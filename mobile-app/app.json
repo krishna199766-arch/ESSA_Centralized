@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "ESSA Warehouse",
+    "slug": "essa-warehouse",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0f1420",
+    "splash": {
+      "backgroundColor": "#0f1420",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": { "supportsTablet": true, "bundleIdentifier": "com.essa.warehouse" },
+    "android": { "package": "com.essa.warehouse" }
+  }
+}

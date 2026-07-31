@@ -1,0 +1,81 @@
+{
+  "source_file": "mehak_fashion.jpeg",
+  "document_type": "purchase_invoice",
+  "template_key": "mehak_fashion",
+  "supplier": {
+    "name": "Mehak Fashion",
+    "gstin": "24ACNPJ5778P1ZP",
+    "pan": "ACNPJ5778P",
+    "state": "Gujarat",
+    "state_code": "24",
+    "address": "H-2002, 2nd Floor, New T.T. Market, Ring Road, Surat - 395002",
+    "phone": "08000834594",
+    "email": "mehakfashion1972@gmail.com",
+    "bank": {
+      "name": "City Union Bank",
+      "account_no": "100109000196221",
+      "ifsc": "CIUB0000100"
+    }
+  },
+  "buyer": {
+    "name": "Essa Garments Private Limited",
+    "gstin": "33AADCE6591N1Z7",
+    "state": "Tamil Nadu",
+    "state_code": "33",
+    "address": "21, Kangayam Road, Venkatesaiya Colony, Tiruppur - 641604, Tamil Nadu"
+  },
+  "invoice": {
+    "number": "520",
+    "date": "2026-05-30",
+    "challan_no": "520",
+    "due_date": "2026-07-14",
+    "transporter": "Golden Transport",
+    "lr_no": "253547",
+    "eway_bill": "622120252107",
+    "tran_id": "24AHHPS3168D1ZD",
+    "book_city": "Tirupur",
+    "broker": "Krishna Agency (Madanji)",
+    "terms": "45 Days"
+  },
+  "line_items": [
+    {
+      "sr": 1,
+      "barcode": null,
+      "description": "BALATAN",
+      "brand": null,
+      "design": null,
+      "size": null,
+      "hsn": "540754",
+      "qty": 96,
+      "uom": "P (meters)",
+      "mrp": null,
+      "rate": 190.0,
+      "discount_pct": 0.0,
+      "discount_amount": 0.0,
+      "taxable_value": null,
+      "amount": 18240.0
+    }
+  ],
+  "taxes": {
+    "cgst_rate": 0,
+    "cgst_amount": 0,
+    "sgst_rate": 0,
+    "sgst_amount": 0,
+    "igst_rate": 5.0,
+    "igst_amount": 912.0,
+    "tds_amount": 0,
+    "freight": 553.0,
+    "round_off": 0.0
+  },
+  "totals": {
+    "total_qty": 96,
+    "sub_total": 18240.0,
+    "taxable_total": 18240.0,
+    "tax_total": 912.0,
+    "grand_total": 19152.0,
+    "amount_in_words": "Nineteen Thousand One Hundred Fifty Two Only"
+  },
+  "meta": {
+    "notes": "Fabric (BALATAN); WITH BAGS; NO ANY LESS CASH RATE; net rate no less, 30 days payment; handwritten less Rs 20/P"
+  }
+}

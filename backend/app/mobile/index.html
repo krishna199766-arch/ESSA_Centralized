@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0f1420" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="ESSA Warehouse" />
+<link rel="manifest" href="/m/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/m/icon.png" />
+<title>ESSA Warehouse</title>
+<style>
+:root{--bg:#0f1420;--panel:#171d2b;--panel2:#1e2636;--line:#2a3346;--text:#e8edf5;--muted:#8a95a8;--accent:#4f8cff;--ok:#35c07a;--warn:#f2b544;--danger:#f2685f}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:16px}
+#app{min-height:100%;display:flex;flex-direction:column}
+.pad{padding:env(safe-area-inset-top) 0 0 0}
+input,select,button,textarea{font:inherit;color:var(--text)}
+input,select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 12px;font-size:16px}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
+.field{margin-bottom:13px}
+.btn{width:100%;background:var(--accent);border:none;border-radius:10px;padding:14px;font-weight:700;font-size:16px;color:#fff}
+.btn:disabled{opacity:.6}
+.btn.sec{background:var(--panel2);border:1px solid var(--line);color:var(--text)}
+.center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:26px}
+.logo{color:var(--accent);font-size:46px;font-weight:900;letter-spacing:2px}
+.brand{font-size:24px;font-weight:800;margin-top:6px}
+.brand span{color:var(--accent)}
+.sub{color:var(--muted);font-size:13px;margin:4px 0 20px}
+.card{width:100%;max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+.err{color:var(--danger);font-size:13px;text-align:center;margin:6px 0}
+.topbar{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);padding:calc(10px + env(safe-area-inset-top)) 14px 10px;display:flex;align-items:center;gap:10px}
+.topbar h1{font-size:17px;margin:0;flex:1}
+.topbar .count{color:var(--muted);font-size:12px}
+.link{color:var(--accent);font-size:13px;background:none;border:none;padding:6px}
+.controls{padding:12px 14px;display:flex;flex-direction:column;gap:9px;background:var(--bg)}
+.row{display:flex;gap:8px}
+.chip{flex:0 0 auto;background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:8px 15px;font-size:14px;color:var(--muted);text-transform:capitalize}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+/* camera scanner overlay */
+.scanov{position:fixed;inset:0;z-index:90;background:#000;display:flex;align-items:center;justify-content:center}
+.scanov video{width:100%;height:100%;object-fit:cover}
+.scanframe{position:absolute;width:68vw;height:68vw;max-width:320px;max-height:320px;
+  border:3px solid rgba(255,255,255,.9);border-radius:16px;box-shadow:0 0 0 100vmax rgba(0,0,0,.45)}
+.scanhint{position:absolute;bottom:120px;left:0;right:0;text-align:center;color:#fff;
+  font-size:15px;text-shadow:0 1px 4px #000;padding:0 24px}
+.scanx{position:absolute;bottom:40px;left:50%;transform:translateX(-50%);
+  background:#fff;color:#111;border:none;border-radius:24px;padding:13px 30px;font-size:16px;font-weight:700}
+.list{flex:1;overflow:auto;padding:0 14px 24px}
+.prow{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:9px}
+.prow .t{font-weight:600}
+.prow .m{color:var(--muted);font-size:12px;margin-top:3px}
+.badge{border-radius:20px;padding:4px 10px;font-size:11px;flex:0 0 auto}
+.bpend{background:#3a2f13;color:var(--warn)}
+.bdone{background:#12301f;color:var(--ok)}
+.detwrap{flex:1;overflow:auto;padding:16px}
+.detname{font-size:20px;font-weight:700}
+.detmeta{color:var(--muted);font-size:13px;margin-top:4px}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;z-index:20}
+.sheetcard{background:var(--panel);width:100%;border-radius:16px 16px 0 0;max-height:80vh;display:flex;flex-direction:column}
+.sheethd{display:flex;align-items:center;justify-content:space-between;padding:15px 16px;border-bottom:1px solid var(--line);font-weight:700}
+.opt{padding:15px 18px;border-bottom:1px solid var(--line);font-size:16px}
+.opt.sel{color:var(--accent)}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);padding:11px 18px;border-radius:10px;z-index:40;font-size:14px}
+.hint{color:var(--muted);font-size:11px;margin-top:2px}
+.selbtn{width:100%;text-align:left;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px}
+.selbtn.empty{color:var(--muted)}
+.spin{border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;width:26px;height:26px;animation:sp 1s linear infinite;margin:30px auto}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="app"><div class="center"><div class="spin"></div></div></div>
+<script>
+const S = { token: localStorage.getItem('essa_token')||'', user: localStorage.getItem('essa_user')||'',
+            screen:'login', products:[], options:{}, status:'pending', q:'', barcode:'', selected:null, employee: localStorage.getItem('essa_emp')||'',
+            // consignments waiting to be taken in (LR register rows)
+            lr:[], lrFilter:'pending', lrSel:null, receivers:[] };
+const app = document.getElementById('app');
+const esc = (s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const money = (v)=> v==null?'—': Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+async function api(path, opts){
+  const r = await fetch(path, Object.assign({headers:{'Content-Type':'application/json'}}, opts||{}));
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.detail || ('HTTP '+r.status));
+  return j;
+}
+function toast(m){ const t=document.createElement('div'); t.className='toast'; t.textContent=m; document.body.appendChild(t); setTimeout(()=>t.remove(),2200); }
+
+// ---------- boot ----------
+(async function boot(){
+  if(S.token){
+    try{ const v = await api('/api/auth/verify?token='+encodeURIComponent(S.token)); if(v.ok){ S.screen='list'; await loadOptions(); return render(); } }catch(e){}
+  }
+  S.screen='login'; render();
+})();
+
+async function loadOptions(){ try{ S.options = await api('/api/inventory/product-options'); }catch(e){ S.options={}; } }
+
+// ---------- render ----------
+function render(){
+  if(S.screen==='login') return renderLogin();
+  if(S.screen==='detail') return renderDetail();
+  if(S.screen==='lr') return renderLR();
+  if(S.screen==='lrdetail') return renderLRDetail();
+  return renderList();
+}
+
+// The two jobs the warehouse does on the phone: take consignments in as they
+// arrive, and detail the products that came out of them.
+function tabs(active){
+  return `<div class="row" style="gap:8px">
+    <div class="chip ${active==='list'?'on':''}" data-tab="list">Products</div>
+    <div class="chip ${active==='lr'?'on':''}" data-tab="lr">Consignments</div>
+  </div>`;
+}
+function wireTabs(){
+  app.querySelectorAll('.chip[data-tab]').forEach(c=>c.onclick=()=>{
+    if(S.screen===c.dataset.tab) return;
+    S.screen=c.dataset.tab; render();
+  });
+}
+function renderLogin(){
+  app.innerHTML = `<div class="center">
+    <div class="logo">AI</div>
+    <div class="brand">ESSA <span>·</span> Warehouse</div>
+    <div class="sub">Sign in to receive consignments &amp; detail products</div>
+    <div class="card">
+      <div class="field"><label>Username</label><input id="u" autocapitalize="none" value="admin"></div>
+      <div class="field"><label>Password</label><input id="p" type="password" placeholder="••••••••"></div>
+      <div class="field"><label>Your name (saved with what you receive &amp; detail)</label><input id="emp" placeholder="e.g. Ramesh" value="${esc(S.employee)}"></div>
+      <div id="err" class="err"></div>
+      <button class="btn" id="go">Sign in</button>
+    </div></div>`;
+  document.getElementById('go').onclick = async ()=>{
+    const u=document.getElementById('u').value.trim(), p=document.getElementById('p').value;
+    S.employee=document.getElementById('emp').value.trim(); localStorage.setItem('essa_emp',S.employee);
+    document.getElementById('go').disabled=true; document.getElementById('err').textContent='';
+    try{ const r= await api('/api/auth/login',{method:'POST',body:JSON.stringify({username:u,password:p})});
+      S.token=r.token; S.user=r.user; localStorage.setItem('essa_token',r.token); localStorage.setItem('essa_user',r.user||'');
+      await loadOptions(); S.screen='list'; render();
+    }catch(e){ document.getElementById('err').textContent=e.message; document.getElementById('go').disabled=false; }
+  };
+}
+
+async function fetchProducts(){
+  try{ S.products = await api(`/api/inventory/products?status=${S.status}&q=${encodeURIComponent(S.q)}`); }
+  catch(e){ S.products=[]; toast('Could not load products'); }
+}
+
+async function renderList(){
+  app.innerHTML = `<div class="topbar"><h1>Products</h1><span class="count" id="cnt"></span><button class="link" id="lo">Logout</button></div>
+    <div class="controls">
+      ${tabs('list')}
+      <div class="row"><input id="bc" placeholder="Enter / scan code…" autocapitalize="characters" enterkeyhint="go"><button class="btn" style="width:auto;padding:12px 14px" id="bcscan" title="Scan with the camera">⛶</button><button class="btn" style="width:auto;padding:12px 18px" id="bcgo">Go</button></div>
+      <input id="q" placeholder="Search SKU, description…" enterkeyhint="search" value="${esc(S.q)}">
+      <div class="row" style="overflow:auto">
+        ${['pending','all','detailed'].map(st=>`<div class="chip ${S.status===st?'on':''}" data-st="${st}">${st}</div>`).join('')}
+        <div class="chip" id="refresh" style="margin-left:auto">↻</div>
+      </div>
+    </div>
+    <div class="list" id="list"><div class="spin"></div></div>`;
+  document.getElementById('lo').onclick=()=>{ localStorage.removeItem('essa_token'); S.token=''; S.screen='login'; render(); };
+  wireTabs();
+  document.getElementById('bcgo').onclick=doBarcode;
+  document.getElementById('bcscan').onclick=openScanner;
+  document.getElementById('bc').addEventListener('keydown',e=>{if(e.key==='Enter')doBarcode();});
+  document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter'){S.q=e.target.value;paint();}});
+  document.getElementById('refresh').onclick=()=>{S.q=document.getElementById('q').value;paint();};
+  app.querySelectorAll('.chip[data-st]').forEach(c=>c.onclick=()=>{S.status=c.dataset.st;paint();});
+  paint();
+}
+// Resolve whatever came off the scanner: a QR payload (JSON), an EAN-13, a SKU
+// or an id. /lookup understands all four, so the same path serves both symbologies
+// on the label. Falls back to a text search so typing a partial description works.
+async function resolveCode(code){
+  const c=(code||'').trim(); if(!c) return null;
+  try{ return await api(`/api/inventory/lookup?code=${encodeURIComponent(c)}`); }
+  catch(e){}
+  try{ const data=await api(`/api/inventory/products?status=all&q=${encodeURIComponent(c)}`);
+    return data.find(p=>(p.barcode||'')===c)||data[0]||null;
+  }catch(e){ return null; }
+}
+async function doBarcode(){
+  const b=document.getElementById('bc').value.trim(); if(!b) return;
+  const p=await resolveCode(b);
+  if(p){ S.selected=p; S.screen='detail'; render(); }
+  else toast('No product for that code');
+}
+
+// ---- camera scanning -------------------------------------------------------
+// Uses the browser's built-in BarcodeDetector: no external library, so the app
+// stays a single self-contained file with no CDN to reach. Available on Android
+// Chrome/Edge and desktop Chrome; iOS Safari has no implementation, so there the
+// text field (hardware scanner or typing) remains the way in.
+const SCAN_FORMATS=['qr_code','ean_13','code_128','ean_8','code_39'];
+let scanStop=null;
+
+function closeScanner(){
+  if(scanStop){ scanStop(); scanStop=null; }
+  const ov=document.getElementById('scanov'); if(ov) ov.remove();
+}
+
+async function openScanner(){
+  if(!('BarcodeDetector' in window)){
+    toast('This browser can’t use the camera scanner — type or use a handheld scanner');
+    document.getElementById('bc')?.focus();
+    return;
+  }
+  let supported=[];
+  try{ supported=await window.BarcodeDetector.getSupportedFormats(); }catch(e){}
+  const formats=SCAN_FORMATS.filter(f=>!supported.length||supported.includes(f));
+  if(!formats.length){ toast('Camera scanner not supported here'); return; }
+
+  const ov=document.createElement('div');
+  ov.id='scanov'; ov.className='scanov';
+  ov.innerHTML=`<video id="scanvid" playsinline muted></video>
+    <div class="scanframe"></div>
+    <div class="scanhint">Point at the QR or barcode on the label</div>
+    <button class="scanx" id="scanx">Cancel</button>`;
+  document.body.appendChild(ov);
+  document.getElementById('scanx').onclick=closeScanner;
+
+  const vid=document.getElementById('scanvid');
+  let stream;
+  try{
+    stream=await navigator.mediaDevices.getUserMedia(
+      {video:{facingMode:{ideal:'environment'}},audio:false});
+  }catch(e){
+    closeScanner();
+    toast(e&&e.name==='NotAllowedError' ? 'Camera permission denied'
+                                        : 'Could not open the camera');
+    return;
+  }
+  vid.srcObject=stream;
+  try{ await vid.play(); }catch(e){}
+
+  const detector=new window.BarcodeDetector({formats});
+  let alive=true;
+  scanStop=()=>{ alive=false; stream.getTracks().forEach(t=>t.stop()); };
+
+  // ~6 detections/sec: fast enough to feel instant, slow enough not to pin the CPU
+  while(alive){
+    try{
+      const hits=await detector.detect(vid);
+      if(hits&&hits.length){
+        const code=hits[0].rawValue;
+        closeScanner();
+        const p=await resolveCode(code);
+        if(p){ S.selected=p; S.screen='detail'; render(); }
+        else toast('Scanned, but no product matches that code');
+        return;
+      }
+    }catch(e){ /* a frame that isn't decodable yet — keep going */ }
+    await new Promise(r=>setTimeout(r,160));
+  }
+}
+async function paint(){
+  const el=document.getElementById('list'); if(el) el.innerHTML='<div class="spin"></div>';
+  await fetchProducts();
+  const cnt=document.getElementById('cnt');
+  if(cnt) cnt.textContent = S.products.length+' shown';
+  const list=document.getElementById('list'); if(!list) return;
+  if(!S.products.length){ list.innerHTML='<p style="color:var(--muted);text-align:center;margin-top:30px">No products.</p>'; return; }
+  list.innerHTML = S.products.map((p,i)=>`<div class="prow" data-i="${i}">
+      <div style="flex:1;min-width:0"><div class="t">${esc(p.description)}</div>
+      <div class="m">${esc(p.sku)}${p.barcode?' · '+esc(p.barcode):''} · stock ${p.stock_qty} ${esc(p.uom||'')}</div></div>
+      <div class="badge ${p.detailed?'bdone':'bpend'}">${p.detailed?'detailed':'pending'}</div></div>`).join('');
+  list.querySelectorAll('.prow').forEach(r=>r.onclick=()=>{ S.selected=S.products[+r.dataset.i]; S.screen='detail'; render(); });
+}
+
+// ---------- consignments: take the packages in as they arrive ----------
+// The desktop reads the LR register off the page, but only the person on the dock
+// knows who actually took the packages — so `received_by` is set here, nowhere else.
+async function renderLR(){
+  app.innerHTML = `<div class="topbar"><h1>Consignments</h1><span class="count" id="lrcnt"></span><button class="link" id="lo2">Logout</button></div>
+    <div class="controls">
+      ${tabs('lr')}
+      <div class="row" style="overflow:auto">
+        ${['pending','received','all'].map(f=>`<div class="chip ${S.lrFilter===f?'on':''}" data-lf="${f}">${f}</div>`).join('')}
+        <div class="chip" id="lrrefresh" style="margin-left:auto">↻</div>
+      </div>
+      <div class="hint">Tap a consignment to see what arrived and record who took it in</div>
+    </div>
+    <div class="list" id="lrlist"><div class="spin"></div></div>`;
+  document.getElementById('lo2').onclick=()=>{ localStorage.removeItem('essa_token'); S.token=''; S.screen='login'; render(); };
+  document.getElementById('lrrefresh').onclick=paintLR;
+  app.querySelectorAll('.chip[data-lf]').forEach(c=>c.onclick=()=>{ S.lrFilter=c.dataset.lf; paintLR(); });
+  wireTabs();
+  loadReceivers();
+  paintLR();
+}
+
+async function paintLR(){
+  const el=document.getElementById('lrlist'); if(el) el.innerHTML='<div class="spin"></div>';
+  try{ S.lr = await api(`/api/lr?received=${S.lrFilter}&limit=300`); }
+  catch(e){ S.lr=[]; toast('Could not load consignments'); }
+  const cnt=document.getElementById('lrcnt'); if(cnt) cnt.textContent=S.lr.length+' shown';
+  const list=document.getElementById('lrlist'); if(!list) return;
+  if(!S.lr.length){
+    list.innerHTML=`<p style="color:var(--muted);text-align:center;margin-top:30px">${
+      S.lrFilter==='pending'?'Nothing waiting — every consignment has been taken in.':'No consignments.'}</p>`;
+    return;
+  }
+  list.innerHTML = S.lr.map((r,i)=>{
+    const bits=[r.transport, r.lr_no && ('LR '+r.lr_no), r.bundle&&(r.bundle+' bundle'), r.qty&&(r.qty+' pcs')].filter(Boolean);
+    const inv=[r.inv_no && ('Inv '+r.inv_no), r.recv_date].filter(Boolean).join(' · ');
+    return `<div class="prow" data-i="${i}">
+      <div style="flex:1;min-width:0">
+        <div class="t">${esc(r.supplier_name||'(no supplier)')}</div>
+        <div class="m">${esc(bits.join(' · '))}</div>
+        <div class="m">${esc(inv)}</div>
+      </div>
+      <div class="badge ${r.received_by?'bdone':'bpend'}">${r.received_by?esc(r.received_by):'receive'}</div>
+    </div>`;
+  }).join('');
+  // open the consignment rather than receiving it on the spot: you should see what
+  // arrived — and be able to name whoever actually took it — before confirming
+  list.querySelectorAll('.prow').forEach(row=>row.onclick=()=>{
+    S.lrSel=S.lr[+row.dataset.i]; S.screen='lrdetail'; render();
+  });
+}
+
+// ---------- one consignment: what arrived, and who took it ----------
+function renderLRDetail(){
+  const r=S.lrSel;
+  if(!r){ S.screen='lr'; return render(); }
+  const status = (r.mismatches&&r.mismatches.length) ? ['⚠ invoice conflict','var(--warn)']
+               : r.matched ? ['✓ invoice linked','var(--ok)']
+               : ['invoice pending','var(--muted)'];
+  const fields = [
+    ['Supplier', r.supplier_name], ['Transport', r.transport],
+    ['LR No', r.lr_no], ['LR date', r.lr_date], ['Received date', r.recv_date],
+    ['Bundles', r.bundle], ['Quantity', r.qty!=null?(r.qty+' pcs'):''],
+    ['Item', r.item], ['Invoice No', r.inv_no], ['Invoice date', r.inv_date],
+    ['Invoice amount', r.amount!=null?('₹ '+money(r.amount)):''],
+    ['Paid / ToPay', r.paid_topay],
+    ['Freight', r.freight_amount!=null?('₹ '+money(r.freight_amount)):''],
+    ['Cash / Cheque', r.cash_cheque],
+  ].filter(([,v])=>v!==null&&v!==''&&v!==undefined);
+  const line=([k,v])=>`<div style="display:flex;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid var(--line)">
+      <span style="color:var(--muted);font-size:13px">${esc(k)}</span>
+      <span style="text-align:right;font-weight:600">${esc(v)}</span></div>`;
+
+  app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ Back</button><h1></h1></div>
+    <div class="detwrap">
+      <div class="detname">${esc(r.supplier_name||'(no supplier)')}</div>
+      <div class="detmeta">${esc([r.transport, r.lr_no&&('LR '+r.lr_no)].filter(Boolean).join(' · '))}</div>
+      <div class="detmeta" style="color:${status[1]}">${status[0]}</div>
+      <div style="height:10px"></div>
+      ${fields.map(line).join('')}
+      <div style="height:16px"></div>
+      ${r.received_by?`<div class="hint" style="color:var(--ok);margin-bottom:8px">Already received by ${esc(r.received_by)} — saving again replaces the name.</div>`:''}
+      <div class="field"><label>Received by (who took the packages)</label>
+        <input id="rby" list="rnames" placeholder="e.g. Ramesh" value="${esc(r.received_by||S.employee||'')}"></div>
+      <datalist id="rnames">${(S.receivers||[]).map(n=>`<option value="${esc(n)}"></option>`).join('')}</datalist>
+      <button class="btn" id="rcv">${r.received_by?'Update receiver':'Receive consignment'}</button>
+      ${r.received_by?`<button class="btn" id="undo" style="margin-top:10px;background:var(--panel2);color:var(--muted)">Undo receipt</button>`:''}
+      <div style="height:30px"></div>
+    </div>`;
+
+  document.getElementById('back').onclick=()=>{ S.screen='lr'; render(); };
+  document.getElementById('rcv').onclick=async ()=>{
+    const name=document.getElementById('rby').value.trim();
+    if(!name){ toast('Enter who received it'); return; }
+    document.getElementById('rcv').disabled=true;
+    try{
+      await api(`/api/lr/${r.id}/receive`,{method:'POST',body:JSON.stringify({received_by:name})});
+      // remember the last name typed — usually the same person receives all day
+      S.employee=name; localStorage.setItem('essa_emp',name);
+      await loadReceivers();
+      toast('✓ Received by '+name);
+      S.screen='lr'; render();
+    }catch(e){ toast('Could not save: '+e.message); document.getElementById('rcv').disabled=false; }
+  };
+  const un=document.getElementById('undo');
+  if(un) un.onclick=async ()=>{
+    if(!confirm('Undo this receipt? The consignment goes back to pending.')) return;
+    try{ await api(`/api/lr/${r.id}/receive`,{method:'DELETE'});
+      toast('✓ Back to pending'); S.screen='lr'; render();
+    }catch(e){ toast('Could not undo: '+e.message); }
+  };
+}
+
+async function loadReceivers(){
+  try{ S.receivers = await api('/api/lr/receivers'); }catch(e){ S.receivers=[]; }
+}
+
+function renderDetail(){
+  const p=S.selected;
+  const f={color:p.color||'',size:p.size||'',pattern:p.pattern||'',fit:p.fit||'',product_type:p.product_type||'',material:p.material||'',
+    design_no:p.design_no||'',mrp:p.mrp??'',sale_price:p.sale_price??'',margin_pct:p.margin_pct??''};
+  const selRow=(key,label)=>`<div class="field"><label>${label}</label>
+    <button class="selbtn ${f[key]?'':'empty'}" data-sel="${key}">${esc(f[key]||'Select…')}</button></div>`;
+  app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ Back</button><h1></h1></div>
+    <div class="detwrap">
+      <div class="detname">${esc(p.description)}</div>
+      <div class="detmeta">${esc(p.sku)}${p.barcode?' · '+esc(p.barcode):''} · HSN ${esc(p.hsn||'—')} · stock ${p.stock_qty} ${esc(p.uom||'')}</div>
+      <div class="detmeta">from ${esc(p.supplier_name||'—')} · cost ₹${money(p.avg_cost)}</div>
+      <div class="detmeta">${p.category
+        ? 'category <b>'+esc(p.category)+'</b>'+(p.category_section?' ('+esc(p.category_section)+')':'')
+        : '<span style="color:var(--warn)">category not mapped</span>'}</div>
+      <div style="height:14px"></div>
+      ${selRow('color','Color')}${selRow('size','Size')}${selRow('pattern','Pattern')}
+      ${selRow('fit','Fit')}${selRow('product_type','Type')}${selRow('material','Material')}
+      <div class="field"><label>Design No</label><input id="design_no" value="${esc(f.design_no)}" placeholder="e.g. SH-05"></div>
+      <div class="row">
+        <div class="field" style="flex:1"><label>MRP</label><input id="mrp" inputmode="decimal" value="${esc(f.mrp)}"></div>
+        <div class="field" style="flex:1"><label>Sale price</label><input id="sale_price" inputmode="decimal" value="${esc(f.sale_price)}"></div>
+        <div class="field" style="flex:1"><label>Margin %</label><input id="margin_pct" inputmode="decimal" value="${esc(f.margin_pct)}"></div>
+      </div>
+      ${p.detailed?`<div class="hint" style="color:var(--ok)">Already detailed by ${esc(p.detailed_by||'—')}. Saving updates it.</div>`:''}
+      <button class="btn" id="save" style="margin-top:8px">Save details</button>
+      <div style="height:30px"></div>
+    </div>`;
+  document.getElementById('back').onclick=()=>{ S.screen='list'; render(); };
+  app.querySelectorAll('[data-sel]').forEach(b=>b.onclick=()=>openSheet(b.dataset.sel,f,b));
+  document.getElementById('save').onclick=async ()=>{
+    const num=v=>v===''||v==null?null:Number(v);
+    const body={color:f.color,size:f.size,pattern:f.pattern,fit:f.fit,product_type:f.product_type,material:f.material,
+      design_no:document.getElementById('design_no').value,
+      mrp:num(document.getElementById('mrp').value),sale_price:num(document.getElementById('sale_price').value),
+      margin_pct:num(document.getElementById('margin_pct').value),detailed_by:S.employee||'mobile'};
+    document.getElementById('save').disabled=true;
+    try{ await api(`/api/inventory/products/${p.id}/detail`,{method:'POST',body:JSON.stringify(body)});
+      toast('✓ Saved'); S.screen='list'; render(); }
+    catch(e){ toast('Save failed: '+e.message); document.getElementById('save').disabled=false; }
+  };
+}
+
+function openSheet(key,f,btn){
+  const opts=(S.options[key]||[]).slice();
+  const sh=document.createElement('div'); sh.className='sheet';
+  sh.innerHTML=`<div class="sheetcard">
+    <div class="sheethd"><span>${key.replace('_',' ')}</span><button class="link" id="x">×</button></div>
+    <div class="row" style="padding:10px 12px;gap:8px"><input id="cst" placeholder="Type a custom value…"><button class="btn" style="width:auto;padding:12px 16px" id="use">Use</button></div>
+    <div style="overflow:auto">${opts.map(o=>`<div class="opt ${o===f[key]?'sel':''}" data-o="${esc(o)}">${esc(o)}</div>`).join('')}</div>
+  </div>`;
+  document.body.appendChild(sh);
+  const pick=(v)=>{ f[key]=v; btn.textContent=v; btn.classList.remove('empty'); sh.remove(); };
+  sh.querySelector('#x').onclick=()=>sh.remove();
+  sh.onclick=(e)=>{ if(e.target===sh) sh.remove(); };
+  sh.querySelector('#use').onclick=()=>{ const v=sh.querySelector('#cst').value.trim(); if(v) pick(v); };
+  sh.querySelectorAll('.opt').forEach(o=>o.onclick=()=>pick(o.dataset.o));
+}
+</script>
+</body>
+</html>

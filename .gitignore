@@ -1,0 +1,11 @@
+backend/.venv/
+backend/data/essa.db
+backend/data/settings.json
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.env
+.DS_Store

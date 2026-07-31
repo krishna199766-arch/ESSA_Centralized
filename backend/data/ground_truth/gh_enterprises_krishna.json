@@ -1,0 +1,103 @@
+{
+  "source_file": "gh_enterprises_krishna.jpeg",
+  "document_type": "purchase_invoice",
+  "template_key": "gh_enterprises",
+  "supplier": {
+    "name": "GH Enterprises Inc",
+    "gstin": "24ABJFA2862L1ZA",
+    "state": "Gujarat",
+    "state_code": "24",
+    "address": "563/3, Khodi Ambli, Near Swami Narayan Mandir, Kalupur, Ahmedabad, Gujarat 380001",
+    "phone": "9978683099",
+    "email": "help.ghenterprisesinc@gmail.com",
+    "manufacturer": "Krishna Creation (Kaushal) - Ahmedabad",
+    "bank": {
+      "name": "Axis Bank",
+      "account_no": "917020073514775",
+      "ifsc": "UTIB0000453",
+      "branch": "Relief Road"
+    }
+  },
+  "buyer": {
+    "name": "Essa Garments Private Limited",
+    "gstin": "33AADCE6591N1Z7",
+    "state": "Tamil Nadu",
+    "state_code": "33",
+    "address": "21, Kangayam Road, Venkatesaiya Colony, Tiruppur - 641604, Tamil Nadu"
+  },
+  "invoice": {
+    "number": "GJ2627AHDT02913",
+    "date": "2026-05-15",
+    "due_date": "2026-07-14",
+    "irn": "b5da5aa3c930cd3dc485260f9585ca8c00e3e9f65e37f487b143d30baf6c0d4b",
+    "ack_no": "162624629408994",
+    "irn_date": "2026-05-15",
+    "eway_bill": "662111920059",
+    "lr_no": "ABD-38656",
+    "lr_date": "2026-05-16",
+    "transporter": "Golden",
+    "destination": "Tirupur",
+    "order_no": "2340",
+    "order_date": "2026-05-12",
+    "reference_no": "15"
+  },
+  "line_items": [
+    {
+      "sr": 1,
+      "barcode": null,
+      "description": "Kurti",
+      "brand": "KAUSHAL",
+      "design": "JAGUAR",
+      "size": "L,XL,XXL",
+      "hsn": "620441",
+      "qty": 78,
+      "uom": "PCS",
+      "mrp": null,
+      "rate": 245,
+      "discount_pct": 0.0,
+      "discount_amount": 0.0,
+      "taxable_value": 19110.0,
+      "amount": 19110.0
+    },
+    {
+      "sr": 2,
+      "barcode": null,
+      "description": "Kurti",
+      "brand": "KAUSHAL",
+      "design": "SENEGAL",
+      "size": "L,XL,XXL",
+      "hsn": "620441",
+      "qty": 99,
+      "uom": "PCS",
+      "mrp": null,
+      "rate": 215,
+      "discount_pct": 0.0,
+      "discount_amount": 0.0,
+      "taxable_value": 21285.0,
+      "amount": 21285.0
+    }
+  ],
+  "taxes": {
+    "cgst_rate": 0,
+    "cgst_amount": 0,
+    "sgst_rate": 0,
+    "sgst_amount": 0,
+    "igst_rate": 5.0,
+    "igst_amount": 2019.75,
+    "tds_amount": 40.0,
+    "freight": 0,
+    "special_discount": 0,
+    "round_off": 0.25
+  },
+  "totals": {
+    "total_qty": 177,
+    "sub_total": 40395.0,
+    "taxable_total": 40395.0,
+    "tax_total": 2019.75,
+    "grand_total": 42415.0,
+    "amount_in_words": "Indian Rupees Forty-Two Thousand Four Hundred Fifteen only"
+  },
+  "meta": {
+    "notes": "e-Invoice with IRN; TDS Rs 40 handwritten; Goods return not accepted after 30 days"
+  }
+}
