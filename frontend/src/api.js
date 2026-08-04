@@ -80,10 +80,26 @@ export const api = {
     if (status) p.push('status=' + status)
     return '/api/inventory/labels' + (p.length ? '?' + p.join('&') : '')
   },
+  // per-piece codes: one inventory record of 8 has 8 child codes, each its own QR.
+  // `status` is kept on the error because a 404 here means something specific and
+  // fixable — a server still running from before this endpoint existed, serving the
+  // new UI off disk — and the screen can say so instead of "could not load".
+  productUnits: (id) => fetch(`/api/inventory/products/${id}/units`)
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('units'), { status: r.status, detail: j.detail }); return j }),
+  generateUnits: (id) => fetch(`/api/inventory/products/${id}/units/generate`, { method: 'POST' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('units'), { status: r.status, detail: j.detail }); return j }),
+  unitQrSvgUrl: (uid, scale) => `/api/inventory/units/${uid}/qr.svg` + (scale ? `?scale=${scale}` : ''),
+  unitLabelUrl: (uid) => `/api/inventory/units/${uid}/label`,
+  unitLabelsUrl: (productId, ids) => (ids && ids.length)
+    ? `/api/inventory/unit-labels?ids=${ids.join(',')}`
+    : `/api/inventory/unit-labels?product_id=${productId}`,
+
   // dropdown option sets (same lists the phone app uses, incl. sizes)
   productOptions: () => fetch('/api/inventory/product-options').then(J),
   barcodeSvgUrl: (id) => `/api/inventory/products/${id}/barcode.svg`,
-  qrSvgUrl: (id) => `/api/inventory/products/${id}/qr.svg`,
+  // scale drives the QR's module size — 2 is right for a list thumbnail, the
+  // default 4 for the detail panel and print
+  qrSvgUrl: (id, scale) => `/api/inventory/products/${id}/qr.svg` + (scale ? `?scale=${scale}` : ''),
   // map a free-text description onto the Product Category master
   categorize: (description) =>
     fetch('/api/inventory/categorize?description=' + encodeURIComponent(description || '')).then(J),
@@ -115,6 +131,16 @@ export const api = {
   categories: (q) => fetch('/api/masters/categories' + (q ? '?q=' + encodeURIComponent(q) : '')).then(J),
   agents: () => fetch('/api/masters/agents').then(J),
   transports: () => fetch('/api/masters/transports').then(J),
+  // the small keyed dropdown lists (company, city, rack, section, modes, …)
+  masterOptions: () => fetch('/api/masters/options').then(J),
+  addMasterOption: (kind, value) => fetch('/api/masters/options', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, value }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('opt'), { detail: j.detail }); return j }),
+  deleteMasterOption: (kind, value) => fetch(
+    `/api/masters/options?kind=${encodeURIComponent(kind)}&value=${encodeURIComponent(value)}`,
+    { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('opt'), { detail: j.detail }); return j }),
 
   // LR entry
   lrExtract: (file) => { const fd = new FormData(); fd.append('file', file);
@@ -123,10 +149,31 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ document_id, rows }) }).then(J),
   lrList: () => fetch('/api/lr').then(J),
-  // freight settlement on delivery (mode, who paid, cash receiver's mobile)
-  lrSettle: (id, fields) => fetch(`/api/lr/${id}`, {
+  lrGet: (id) => fetch(`/api/lr/${id}`).then(J),
+  // key in ONE consignment (the LR Entry form's Save / Save&Next)
+  lrCreate: (body) => fetch('/api/lr', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('lr'), { detail: j.detail }); return j }),
+  // partial edit — freight settlement on delivery, the rack once put away, or
+  // any other field on the entry. Only what you send is touched.
+  lrUpdate: (id, fields) => fetch(`/api/lr/${id}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(fields) }).then(J),
+    body: JSON.stringify(fields) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('lr'), { detail: j.detail }); return j }),
+  lrDelete: (id) => fetch(`/api/lr/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('lr'), { detail: j.detail }); return j }),
+  lrSearch: (filters) => {
+    const p = new URLSearchParams()
+    Object.entries(filters || {}).forEach(([k, v]) => { if (v) p.append(k, v) })
+    return fetch('/api/lr/search' + (p.toString() ? '?' + p : '')).then(J)
+  },
+  lrAddAttachment: (id, file, doc_type) => {
+    const fd = new FormData(); fd.append('file', file); fd.append('doc_type', doc_type || '')
+    return fetch(`/api/lr/${id}/attachments`, { method: 'POST', body: fd })
+      .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('att'), { detail: j.detail }); return j })
+  },
+  lrDeleteAttachment: (attId) => fetch(`/api/lr/attachments/${attId}`, { method: 'DELETE' }).then(J),
 
   // reports
   reportCatalogue: () => fetch('/api/reports').then(J),

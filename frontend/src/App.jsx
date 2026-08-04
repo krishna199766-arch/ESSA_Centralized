@@ -95,9 +95,15 @@ function Field({ label, value, onChange, flagged, note, wide, source }) {
 }
 
 // ---------- line items ----------
-// full per-line field set; table scrolls horizontally so nothing is dropped
+// Full per-line field set; the table scrolls horizontally so nothing is dropped.
+//
+// `barcode` is deliberately NOT a column. It still comes off the invoice and is
+// still stored on the line — `inventory.match_product` keys a re-buy on it, which
+// is what keeps one item's cost history in one product — but it is the supplier's
+// number, not ours, and nobody reviewing an invoice checks it by eye. The
+// trade-off: a misread supplier barcode can no longer be corrected here.
 const ITEM_COLS = [
-  ['barcode', 'Barcode', false, 90], ['description', 'Description', false, 200],
+  ['description', 'Description', false, 200],
   ['brand', 'Brand', false, 90], ['design', 'Design', false, 90], ['size', 'Size', false, 80],
   ['hsn', 'HSN', false, 80], ['qty', 'Qty', true, 60], ['uom', 'UOM', false, 60],
   ['mrp', 'MRP', true, 70], ['rate', 'Rate', true, 70], ['discount_pct', 'Disc %', true, 60],
@@ -112,7 +118,7 @@ function LineItems({ items, setItems }) {
   return (
     <div>
       <div style={{ overflowX: 'auto' }}>
-      <table className="items" style={{ minWidth: 1080 }}>
+      <table className="items" style={{ minWidth: 990 }}>
         <thead><tr>{ITEM_COLS.map(([k, l, , w]) => <th key={k} style={{ minWidth: w }}>{l}</th>)}<th></th></tr></thead>
         <tbody>
           {items.map((it, i) => (
@@ -512,9 +518,9 @@ const SPLIT_ATTRS = [
   ['design_no', 'Design No', 95],
 ]
 const SPLIT_MONEY = [['qty', 'Qty', 70], ['rate', 'Rate', 85], ['mrp', 'MRP', 85],
-  ['sale_price', 'Sale price', 90], ['margin_pct', 'Margin %', 80]]
+  ['sale_price', 'Sale price', 90], ['sale_discount_pct', 'Discount %', 90]]
 const blankVariant = (rate, category) => ({ ...Object.fromEntries(SPLIT_ATTRS.map(([k]) => [k, ''])),
-  category: category || '', qty: '', rate: rate ?? '', mrp: '', sale_price: '', margin_pct: '' })
+  category: category || '', qty: '', rate: rate ?? '', mrp: '', sale_price: '', sale_discount_pct: '' })
 // quantities are floats — compare with the same tolerance the server posts with
 const sameQty = (a, b) => Math.abs((+a || 0) - (+b || 0)) < 0.001
 const variantLabel = (r) => SPLIT_ATTRS.map(([k]) => r[k]).filter(Boolean).join(' · ')
@@ -702,9 +708,10 @@ function Purchases({ selId, setSelId, toast }) {
                         <td style={{ textAlign: 'right' }}>{money(l.amount)}</td>
                         <td>{l.splits.length
                           ? <span className={'badge ' + (l.split_balanced ? 'confirmed' : 'review')}
-                              title={l.split_balanced ? 'Breakdown adds up to the billed qty'
-                                : `${l.split_remainder} of ${l.qty} not yet broken down`}>
-                              {l.splits.length} item{l.splits.length === 1 ? '' : 's'}{l.split_balanced ? '' : ' ⚠'}</span>
+                              title={(l.split_balanced ? 'Breakdown adds up to the billed qty'
+                                : `${l.split_remainder} of ${l.qty} not yet broken down`)
+                                + ' — this bundle line does not receive stock itself; the rows below do'}>
+                              split · {l.splits.length}{l.split_balanced ? '' : ' ⚠'}</span>
                           : <span className={'badge ' + (l.is_new_product ? 'review' : 'confirmed')}>
                               {l.is_new_product ? 'new' : 'matched'}</span>}</td>
                         {editable && (
@@ -728,7 +735,7 @@ function Purchases({ selId, setSelId, toast }) {
                           <td style={{ paddingLeft: 22 }}>↳ <b>{s.label}</b>
                             {s.mrp != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>MRP {money(s.mrp)}</span>}
                             {s.sale_price != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>sale {money(s.sale_price)}</span>}
-                            {s.margin_pct != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>{s.margin_pct}%</span>}</td>
+                            {s.sale_discount_pct != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>−{s.sale_discount_pct}%</span>}</td>
                           <td className="mono" style={{ fontSize: 11 }}>{s.category || l.category
                             || <span style={{ color: 'var(--muted)' }}>auto</span>}</td>
                           <td>{l.hsn}</td>
@@ -842,7 +849,7 @@ function Purchases({ selId, setSelId, toast }) {
 const PRODUCT_ATTRS = [
   ['size', 'Size'], ['color', 'Colour'], ['material', 'Material'], ['pattern', 'Pattern'],
   ['fit', 'Fit'], ['product_type', 'Type'], ['design_no', 'Design No'],
-  ['sale_price', 'Sale price'], ['margin_pct', 'Margin %'],
+  ['sale_price', 'Sale price'], ['sale_discount_pct', 'Discount %'],
 ]
 function Inventory({ toast }) {
   const [summary, setSummary] = useState(null)
@@ -866,10 +873,39 @@ function Inventory({ toast }) {
   const genBarcode = async () => {
     try {
       const r = await api.generateBarcode(detail.id)
-      toast(r.identifiers_generated?.length ? `✓ Generated ${r.identifiers_generated.join(' + ')}` : '✓ Already had a barcode', 'ok')
+      toast(r.identifiers_generated?.length ? `✓ Generated ${r.identifiers_generated.join(' + ')}` : '✓ Already had its SKU', 'ok')
       await open(detail.id); load()
-    } catch (err) { toast(err.detail || 'Could not generate barcode', 'err') }
+    } catch (err) { toast(err.detail || 'Could not generate the code', 'err') }
   }
+  // --- per-piece codes: clicking a quantity opens the individual garments ---
+  const [units, setUnits] = useState(null)      // {product, units[], serialisable, reason}
+  const [zoom, setZoom] = useState(null)        // one piece, viewed large
+  const openUnits = async (p) => {
+    try { setUnits(await api.productUnits(p.id)); setZoom(null) }
+    catch (err) {
+      // a 404 is the recognisable case: the server was started before piece codes
+      // existed and is serving this (newer) page off disk. Say that, rather than
+      // leaving someone to guess at "could not load".
+      toast(err.status === 404
+        ? 'This server was started before piece codes existed — restart the ESSA server and reload.'
+        : (err.detail || 'Could not load the piece codes'), 'err')
+    }
+  }
+  const reloadUnits = async () => { if (units) setUnits(await api.productUnits(units.product.id)) }
+  // printing is recorded, so the sheet has to be reloaded to show the new counts
+  const printUnits = (ids) => {
+    window.open(api.unitLabelsUrl(units.product.id, ids), '_blank')
+    setTimeout(reloadUnits, 1200)
+  }
+  const printOne = (u) => { window.open(api.unitLabelUrl(u.id), '_blank'); setTimeout(reloadUnits, 1200) }
+  const makeUnits = async () => {
+    try {
+      const r = await api.generateUnits(units.product.id)
+      toast(`✓ ${r.created} piece code(s) created`, 'ok')
+      await reloadUnits(); load()
+    } catch (err) { toast(err.detail || 'Could not create piece codes', 'err') }
+  }
+
   const [scan, setScan] = useState('')
   const lookup = async (code) => {
     const c = (code ?? scan).trim(); if (!c) return
@@ -912,21 +948,34 @@ function Inventory({ toast }) {
           </div>
         </div>
         <table className="items">
-          <thead><tr><th>SKU</th><th>Barcode</th><th>Description</th><th>Size</th><th>Category</th><th>HSN</th><th>Supplier</th>
+          <thead><tr><th style={{ width: 46 }}>QR</th><th>SKU</th><th>Description</th><th>Size</th><th>Category</th><th>HSN</th><th>Supplier</th>
             <th style={{ textAlign: 'right' }}>Stock</th><th style={{ textAlign: 'right' }}>Avg cost</th>
             <th style={{ textAlign: 'right' }}>Value</th></tr></thead>
           <tbody>
             {products.filter((p) => matches(p, q, ['sku', 'barcode', 'description', 'hsn', 'supplier_name', 'category', 'size'])).map((p) => (
               <tr key={p.id} style={{ cursor: 'pointer', background: detail?.id === p.id ? 'var(--panel-2)' : '' }} onClick={() => open(p.id)}>
+                {/* The real QR, small enough for a list and still scannable off the
+                    screen. `lazy` keeps a long list from firing a request per row. */}
+                <td style={{ padding: 2 }}>
+                  <img src={api.qrSvgUrl(p.id, 2)} alt={`QR ${p.sku}`} loading="lazy"
+                    title={`Scan or click to open ${p.sku}`}
+                    style={{ width: 34, height: 34, display: 'block', background: '#fff', borderRadius: 3, padding: 1 }} />
+                </td>
                 <td className="mono" style={{ color: 'var(--muted)' }}>{p.sku}</td>
-                <td className="mono">{p.barcode || '—'}</td>
                 <td>{p.description}</td>
                 {/* sizes split off one bundle line share a description — the size is what tells them apart */}
                 <td>{p.size || '—'}</td>
                 <td className="mono" style={{ fontSize: 11 }}>{p.category
                   || <span className="badge review" title="No confident category match — open the product to pick one">unmapped</span>}</td>
                 <td>{p.hsn}</td><td>{p.supplier_name || '—'}</td>
-                <td style={{ textAlign: 'right' }}>{p.stock_qty} {p.uom}</td>
+                {/* the quantity is a way in, not just a number: 8 pcs means eight
+                    individually coded garments, and this is where you see them */}
+                <td style={{ textAlign: 'right' }}>
+                  <button className="qtylink" title={`Show the ${p.stock_qty} individual piece codes`}
+                    onClick={(e) => { e.stopPropagation(); openUnits(p) }}>
+                    {p.stock_qty} {p.uom}
+                  </button>
+                </td>
                 <td style={{ textAlign: 'right' }}>{money(p.avg_cost)}</td>
                 <td style={{ textAlign: 'right' }}>₹ {money(p.stock_value)}</td>
               </tr>
@@ -934,6 +983,87 @@ function Inventory({ toast }) {
           </tbody>
         </table>
       </div>
+
+      {/* Clicking a quantity opens the pieces behind it: one inventory record of 8
+          is eight garments, each with its own code and its own label to print. */}
+      {units && (
+        <div className="piece-wrap" onClick={() => setUnits(null)}>
+          <div className="piece-card" onClick={(e) => e.stopPropagation()}>
+            <div className="piece-head">
+              <b className="mono">{units.product.sku}</b>
+              <span>{units.product.description}</span>
+              <span className="small">
+                {[units.product.size, units.product.color].filter(Boolean).join(' · ')}
+              </span>
+              <span style={{ marginLeft: 'auto' }} className="small">
+                {units.count} piece{units.count === 1 ? '' : 's'} of {units.product.stock_qty} {units.product.uom} in stock
+              </span>
+              <button className="btn" onClick={() => setUnits(null)}>✕</button>
+            </div>
+
+            <div className="piece-body">
+              {zoom && (
+                <div className="piece-zoom">
+                  <img src={api.unitQrSvgUrl(zoom.id, 6)} alt={zoom.code} />
+                  <b className="mono">{zoom.code}</b>
+                  <span className="small">
+                    {zoom.print_count ? `printed ${zoom.print_count}×` : 'not printed yet'}
+                    {zoom.last_printed_by ? ` · last by ${zoom.last_printed_by}` : ''}
+                  </span>
+                  <button className="btn" onClick={() => setZoom(null)}>Close</button>
+                </div>
+              )}
+              {units.units.length === 0 ? (
+                <p className="small" style={{ padding: '10px 0' }}>
+                  {units.serialisable
+                    ? 'No individual codes yet — this stock predates them.'
+                    : `No individual codes: ${units.reason}.`}
+                </p>
+              ) : (
+                <div className="piece-grid">
+                  {units.units.map((u) => (
+                    <div key={u.id} className="piece">
+                      <img src={api.unitQrSvgUrl(u.id, 3)} alt={u.code} loading="lazy" />
+                      <div className="code">{u.code}</div>
+                      <div className="small" style={{ fontSize: 10 }}>
+                        {u.print_count ? `printed ${u.print_count}×` : 'not printed'}
+                      </div>
+                      <div className="acts">
+                        <button className="btn" onClick={() => setZoom(u)} title="Show this code large">View</button>
+                        <button className="btn" onClick={() => printOne(u)}
+                          title={u.print_count ? 'Print this label again' : 'Print this label'}>
+                          {u.print_count ? 'Reprint' : 'Print'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="piece-foot">
+              <span className="small">
+                Every piece carries the same SKU and its own code, so a scan says which
+                garment it is — not just which product.
+              </span>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+                {units.serialisable && units.count < Math.round(units.product.stock_qty || 0) && (
+                  <button className="btn" onClick={makeUnits}
+                    title="Create the missing codes for stock received before per-piece codes existed">
+                    Generate missing ({Math.round(units.product.stock_qty) - units.count})
+                  </button>
+                )}
+                {units.units.length > 0 && (
+                  <button className="btn primary" onClick={() => printUnits(null)}>
+                    🖨 Print all {units.count}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {detail && (
         <div className="sidebar" style={{ width: 400, borderRight: 'none', borderLeft: '1px solid var(--line)' }}>
           <div className="head"><h3>{detail.sku}</h3>
@@ -986,24 +1116,30 @@ function Inventory({ toast }) {
               <div className="k">Value</div><div>₹ {money(detail.stock_value)}</div>
             </div>
 
-            <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '18px 0 8px' }}>Codes &amp; label</h4>
-            {detail.barcode ? (
+            <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '18px 0 8px' }}>QR code &amp; label</h4>
+            {/* Gated on the SKU, not a barcode: the SKU is the only code we issue
+                now, and it is what the QR resolves to. */}
+            {detail.sku ? (
               <div>
                 <div style={{ background: '#fff', border: '1px solid var(--line)', borderRadius: 6, padding: '8px 10px', textAlign: 'center' }}>
-                  {/* QR carries the whole record; EAN-13 is what the 1D handhelds read */}
-                  <img src={api.qrSvgUrl(detail.id)} alt="QR" style={{ width: 104, height: 104 }} />
-                  <img src={api.barcodeSvgUrl(detail.id)} alt="barcode" style={{ maxWidth: '100%', height: 56 }} />
-                  <div className="mono" style={{ fontSize: 12, marginTop: 2, color: '#000' }}>{detail.barcode}</div>
+                  <img src={api.qrSvgUrl(detail.id)} alt="QR" style={{ width: 150, height: 150 }} />
+                  <div className="mono" style={{ fontSize: 12, marginTop: 2, color: '#000' }}>{detail.sku}</div>
                 </div>
+                {detail.barcode && (
+                  <div className="small" style={{ marginTop: 6, color: 'var(--muted)' }}>
+                    Supplier's printed code: <span className="mono">{detail.barcode}</span> — kept so a
+                    re-buy matches this product, not printed on our label.
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <a className="btn primary" href={api.labelUrl(detail.id)} target="_blank" rel="noreferrer">🖨 Print label</a>
                   <button className="btn" onClick={genBarcode} title="Re-run identifier assignment">Ensure IDs</button>
                 </div>
               </div>
             ) : detail.detailed ? (
-              <button className="btn primary" onClick={genBarcode}>Generate barcode + SKU</button>
+              <button className="btn primary" onClick={genBarcode}>Generate SKU + QR</button>
             ) : (
-              <p className="small">Barcode is generated automatically once all product details are set (via the mobile detail form), or generate it manually after detailing.</p>
+              <p className="small">The SKU and its QR are assigned automatically once all product details are set (via the mobile detail form), or generate them manually after detailing.</p>
             )}
 
             <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '0 0 8px' }}>Adjust stock</h4>
@@ -1027,7 +1163,7 @@ function Inventory({ toast }) {
                 <div className="k">Material</div><div>{detail.material || '—'}</div>
                 <div className="k">Design No</div><div>{detail.design_no || '—'}</div>
                 <div className="k">Sale price</div><div>{detail.sale_price != null ? '₹ ' + money(detail.sale_price) : '—'}</div>
-                <div className="k">Margin %</div><div>{detail.margin_pct != null ? detail.margin_pct + '%' : '—'}</div>
+                <div className="k">Discount %</div><div>{detail.sale_discount_pct != null ? detail.sale_discount_pct + '%' : '—'}</div>
                 <div className="k">By</div><div>{detail.detailed_by || '—'}{detail.detailed_at ? ' · ' + detail.detailed_at.slice(0, 10) : ''}</div>
               </div>
             ) : <p className="small">Not yet detailed. Use the ESSA Warehouse mobile app to record color, size, material, MRP, sale price, etc.</p>}
@@ -1056,7 +1192,12 @@ function StockOutward({ toast }) {
   const [products, setProducts] = useState([])
   const [sel, setSel] = useState(null)
   const [creating, setCreating] = useState(false)
-  const [form, setForm] = useState({ date: '', to_destination: '', packed_by: '', lines: [] })
+  // Where the goods are being picked from. WAREHOUSE is the normal case; MULTI is
+  // for a dispatch drawn from more than one place, so the paperwork says so
+  // instead of naming a single location that isn't the whole truth.
+  const FROM_LOCATIONS = ['WAREHOUSE', 'MULTI']
+  const [form, setForm] = useState({ date: '', to_destination: '', packed_by: '',
+    from_location: 'WAREHOUSE', lines: [] })
   const [q, setQ] = useState('')
   const refresh = useCallback(() => api.listOutwards().then(setList), [])
   useEffect(() => { refresh(); api.listProducts().then(setProducts) }, [refresh])
@@ -1071,7 +1212,8 @@ function StockOutward({ toast }) {
     if (!lines.length) { toast('Add at least one product', 'err'); return }
     const o = await api.createOutward({ ...form, lines })
     toast(`✓ Outward ${o.code} created`, 'ok'); setCreating(false)
-    setForm({ date: '', to_destination: '', packed_by: '', lines: [] }); refresh(); setSel(o.id)
+    setForm({ date: '', to_destination: '', packed_by: '', from_location: 'WAREHOUSE', lines: [] })
+    refresh(); setSel(o.id)
   }
   const post = async () => {
     try { const r = await api.postOutward(sel); toast(`✓ Dispatched · ${r.total_qty} units out`, 'ok'); api.getOutward(sel).then(setDetail); refresh() }
@@ -1106,7 +1248,11 @@ function StockOutward({ toast }) {
               <div className="field"><label>Date</label><input value={form.date} placeholder="2026-07-15" onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
               <div className="field"><label>To (destination)</label><input value={form.to_destination} placeholder="e.g. Tasjue Silks, Tirupur" onChange={(e) => setForm({ ...form, to_destination: e.target.value })} /></div>
               <div className="field"><label>Packed by</label><input value={form.packed_by} onChange={(e) => setForm({ ...form, packed_by: e.target.value })} /></div>
-              <div className="field"><label>From location</label><input value="WAREHOUSE" disabled /></div>
+              <div className="field"><label>From location</label>
+                <select value={form.from_location} style={{ width: '100%' }}
+                  onChange={(e) => setForm({ ...form, from_location: e.target.value })}>
+                  {FROM_LOCATIONS.map((l) => <option key={l} value={l}>{l}</option>)}
+                </select></div>
             </div>
             <div className="section" style={{ marginTop: 18 }}>
               <h4>Items to dispatch</h4>
@@ -1584,17 +1730,309 @@ function ScanningOverlay({ url, name, vision }) {
   )
 }
 
+// ---------- LR Entry form (one consignment, keyed in by hand) ----------
+//
+// Mirrors the warehouse Transport Entry screen field for field: the left column
+// is the consignment as it travelled, the right is the paperwork against it and
+// where the bundles land. Importing a register page is still the fast way in —
+// this is for the consignment that arrives with no page to photograph, and for
+// correcting one that did.
+//
+// [key, label, type, opts]. `req` marks the boxes the server also enforces
+// (REQUIRED_MANUAL in routers/lr.py); `list` names a master dropdown, `src` a
+// master with its own table. combo = dropdown you can also type a new value into.
+const LR_FORM_LEFT = [
+  ['lr_mode', 'LR Mode', 'select', { req: 1, list: 'lr_mode' }],
+  ['lr_no', 'LR No', 'text', { req: 1 }],
+  ['lr_date', 'LR Date', 'date', { req: 1 }],
+  ['recv_date', 'Received Date', 'date', {}],
+  ['supplier_name', 'Supplier', 'combo', { req: 1, src: 'suppliers', wide: 1 }],
+  ['agent', 'Agent / Commission', 'combo', { req: 1, src: 'agents' }],
+  ['agent_commission', 'Commission %', 'num', {}],
+  ['transport', 'Transport', 'combo', { src: 'transports', wide: 1 }],
+  ['auto_transfer_location', 'Auto transfer Location', 'select', { list: 'auto_transfer_location' }],
+  ['purchase_manager', 'Purchase Manager', 'combo', { list: 'purchase_manager' }],
+  ['stock_holding_days', 'Stock Holding Period (days)', 'num', {}],
+  ['additional_margin', 'Additional Margin', 'num', {}],
+  ['bundle', 'No Of Bundles', 'num', { req: 1 }],
+  ['boxes', 'No Of Boxes', 'num', { req: 1 }],
+  ['qty', 'No Of Pieces', 'num', { req: 1 }],
+  ['amount', 'Goods Value', 'num', {}],
+]
+// The reference screen also carried Company, Bundle Rack, Section, Remark, Due
+// Date, Pay Mode, PackageSlip No/Date, Actual & Charged Weight, From/Receiving
+// City, Loading Charge and Cash/Cheque. Every one came back empty on every
+// consignment Essa receives, so they were removed outright rather than kept as
+// boxes nobody fills.
+const LR_FORM_RIGHT = [
+  ['lr_entry_date', 'LR Entry Date', 'date', { req: 1 }],
+  ['lr_entry_no', 'LR Entry No', 'ro', {}],
+  ['inv_no', 'Invoice No', 'text', {}],
+  ['inv_date', 'Inv Date', 'date', {}],
+  ['freight_amount', 'Fright Charge', 'charge', { flag: 'freight_applicable' }],
+  // ours, not on their form: how the freight actually settled.
+  ['paid_topay', 'Paid / ToPay', 'select', { fixed: ['TOPAY', 'PAID', 'NO'] }],
+  ['item', 'Item', 'text', { wide: 1 }],
+]
+const LR_FORM_KEYS = [...LR_FORM_LEFT, ...LR_FORM_RIGHT]
+  .filter(([, , t]) => t !== 'ro').map(([k]) => k)
+  .concat('freight_applicable')
+
+function LRField({ spec, form, set, opts, lists }) {
+  const [key, label, type, o = {}] = spec
+  const v = form[key] ?? ''
+  const style = o.wide ? { gridColumn: '1 / -1' } : null
+  const choices = o.fixed || (o.list ? (opts[o.list] || []) : (lists[o.src] || []))
+  const req = o.req ? <span style={{ color: 'var(--danger, #c0392b)' }}> *</span> : null
+
+  if (type === 'charge') {
+    // checkbox + amount, as on their form. The box says the charge APPLIES at
+    // all, which a zero amount can't express — nothing quoted yet vs quoted nil.
+    return (
+      <div className="field" style={style}>
+        <label>{label}</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {/* unticking clears the amount: an amount saved under an unticked box
+              would claim a charge the entry says does not apply */}
+          <input type="checkbox" style={{ width: 16, flex: '0 0 auto' }}
+            checked={!!form[o.flag]}
+            onChange={(e) => { set(o.flag, e.target.checked); if (!e.target.checked) set(key, '') }} />
+          <input value={v} inputMode="decimal" placeholder="0.00"
+            disabled={!form[o.flag]}
+            title={form[o.flag] ? '' : 'Tick the box to record this charge'}
+            onChange={(e) => set(key, e.target.value)} />
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="field" style={style}>
+      <label>{label}{req}</label>
+      {type === 'ro'
+        ? <input value={v || '— on save —'} disabled title="Allocated by the system when the entry is saved" />
+        : type === 'area'
+          ? <input value={v} onChange={(e) => set(key, e.target.value)} placeholder="anything worth noting about this consignment" />
+          : type === 'select'
+            ? <select value={v} onChange={(e) => set(key, e.target.value)}>
+                <option value=""></option>
+                {choices.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            : type === 'combo'
+              ? <>
+                  <input value={v} list={'lrl-' + key} onChange={(e) => set(key, e.target.value)}
+                    placeholder="pick one, or type a new name" />
+                  <datalist id={'lrl-' + key}>{choices.map((c) => <option key={c} value={c} />)}</datalist>
+                </>
+              : <input value={v} type={type === 'date' ? 'date' : 'text'}
+                  inputMode={type === 'num' ? 'decimal' : undefined}
+                  onChange={(e) => set(key, e.target.value)} />}
+    </div>
+  )
+}
+
+const today = () => new Date().toISOString().slice(0, 10)
+// A fresh form: the two dates default to today, exactly as their screen does.
+const blankLR = () => ({ lr_entry_date: today(), lr_date: today(), recv_date: today(),
+  auto_transfer_location: 'NONE', freight_applicable: false })
+
+function LREntryForm({ editing, opts, lists, onDone, onCancel, toast, reloadOpts }) {
+  const [form, setForm] = useState(() => editing ? { ...editing } : blankLR())
+  const [busy, setBusy] = useState(false)
+  const [pendingFiles, setPendingFiles] = useState([])   // queued before first save
+  const [attType, setAttType] = useState('')
+  const [atts, setAtts] = useState(editing?.attachments || [])
+  const fileRef = useRef(null)
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
+  useEffect(() => {
+    setForm(editing ? { ...editing } : blankLR())
+    setAtts(editing?.attachments || [])
+    setPendingFiles([])
+  }, [editing])
+
+  const queueFile = (e) => {
+    const f = e.target.files[0]; if (!f) return
+    setPendingFiles((p) => [...p, { file: f, doc_type: attType || 'Other' }])
+    e.target.value = ''
+  }
+  const dropAttachment = async (a) => {
+    await api.lrDeleteAttachment(a.id)
+    setAtts((x) => x.filter((y) => y.id !== a.id))
+  }
+  // Files picked before the entry exists have nowhere to attach yet, so they
+  // ride along in state and go up the moment it has an id.
+  const flushFiles = async (id) => {
+    const done = []
+    for (const p of pendingFiles) {
+      try { done.push(await api.lrAddAttachment(id, p.file, p.doc_type)) }
+      catch { toast(`Could not attach ${p.file.name}`, 'err') }
+    }
+    setPendingFiles([])
+    return done
+  }
+
+  const submit = async (next) => {
+    setBusy(true)
+    try {
+      const body = {}
+      LR_FORM_KEYS.forEach((k) => { if (form[k] !== undefined) body[k] = form[k] })
+      const saved = editing ? await api.lrUpdate(editing.id, body) : await api.lrCreate(body)
+      const uploaded = await flushFiles(saved.id)
+      if (saved.duplicate_of)
+        toast(`Saved ${saved.lr_entry_no} — but LR/Invoice already exists on entry #${saved.duplicate_of.join(', #')}. Check it isn't a double entry.`, 'err')
+      else
+        toast(`✓ ${editing ? 'Updated' : 'Saved'} ${saved.lr_entry_no}${uploaded.length ? ` · ${uploaded.length} file(s) attached` : ''}`, 'ok')
+      reloadOpts()
+      if (next) {
+        // Save&Next: keep the header the operator would only retype — same lorry,
+        // same supplier, same day — and clear what is per-consignment.
+        const keep = ['lr_mode', 'lr_entry_date', 'lr_date', 'recv_date',
+          'supplier_name', 'agent', 'transport',
+          'auto_transfer_location', 'purchase_manager']
+        const carried = blankLR()
+        keep.forEach((k) => { if (form[k]) carried[k] = form[k] })
+        setForm(carried); setAtts([])
+        onDone(saved, true)
+      } else { onDone(saved, false) }
+    } catch (e) {
+      toast(e.detail || 'Save failed', 'err')
+    }
+    setBusy(false)
+  }
+
+  return (
+    <div className="section">
+      <h4>{editing ? `Edit entry ${editing.lr_entry_no || '#' + editing.id}` : 'New transport entry'}
+        <button className="h4btn" onClick={onCancel}>✕ close</button></h4>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '0 28px' }}>
+        {[LR_FORM_LEFT, LR_FORM_RIGHT].map((col, ci) => (
+          <div key={ci} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 12px', alignContent: 'start' }}>
+            {col.map((spec) => <LRField key={spec[0]} spec={spec} form={form} set={set} opts={opts} lists={lists} />)}
+          </div>
+        ))}
+      </div>
+
+      <h4 style={{ marginTop: 22 }}>File attachments</h4>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <div className="field" style={{ width: 190 }}><label>Type</label>
+          <select value={attType} onChange={(e) => setAttType(e.target.value)}>
+            <option value="">Type</option>
+            {(opts.attachment_type || []).map((t) => <option key={t} value={t}>{t}</option>)}
+          </select></div>
+        <button className="btn" onClick={() => fileRef.current?.click()}>＋ Add file</button>
+        <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={queueFile} />
+        <span className="small" style={{ color: 'var(--muted)' }}>
+          LR copy, weight slip, a photo of damaged bundles — kept against this consignment.
+        </span>
+      </div>
+      {(atts.length > 0 || pendingFiles.length > 0) && (
+        <table className="items" style={{ marginTop: 10, maxWidth: 620 }}>
+          <thead><tr><th>File</th><th style={{ width: 150 }}>Type</th><th style={{ width: 90 }}>Action</th></tr></thead>
+          <tbody>
+            {atts.map((a) => (
+              <tr key={a.id}><td><a href={a.url} target="_blank" rel="noreferrer">{a.filename}</a></td>
+                <td>{a.doc_type}</td>
+                <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => dropAttachment(a)}>×</button></td></tr>
+            ))}
+            {pendingFiles.map((p, i) => (
+              <tr key={'p' + i} style={{ opacity: 0.7 }}>
+                <td>{p.file.name} <span className="small">(uploads on save)</span></td>
+                <td>{p.doc_type}</td>
+                <td><button className="btn" style={{ padding: '2px 7px' }}
+                  onClick={() => setPendingFiles((x) => x.filter((_, j) => j !== i))}>×</button></td></tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+        <button className="btn primary" disabled={busy} onClick={() => submit(false)}>
+          {busy ? 'Saving…' : editing ? '💾 Update' : '💾 Save'}</button>
+        {!editing && <button className="btn" disabled={busy} onClick={() => submit(true)}
+          title="Save this one and start another, keeping the supplier / lorry / dates">💾 Save &amp; Next</button>}
+        <button className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  )
+}
+
+// ---------- LR search ----------
+const LR_SEARCH_FIELDS = [
+  ['q', 'LR / Invoice / Entry no / item', 240], ['supplier', 'Supplier', 160],
+  ['transport', 'Transport', 130],
+]
+function LRSearchPanel({ onResults, onClear, toast }) {
+  const [f, setF] = useState({})
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }))
+  const run = async () => {
+    try { onResults(await api.lrSearch(f)) }
+    catch { toast('Search failed', 'err') }
+  }
+  const clear = () => { setF({}); onClear() }
+  return (
+    <div className="section">
+      <h4>Search the register</h4>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        {LR_SEARCH_FIELDS.map(([k, label, w]) => (
+          <div key={k} className="field" style={{ width: w }}><label>{label}</label>
+            <input value={f[k] || ''} onChange={(e) => set(k, e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') run() }} /></div>
+        ))}
+        <div className="field" style={{ width: 140 }}><label>Received from</label>
+          <input type="date" value={f.date_from || ''} onChange={(e) => set('date_from', e.target.value)} /></div>
+        <div className="field" style={{ width: 140 }}><label>to</label>
+          <input type="date" value={f.date_to || ''} onChange={(e) => set('date_to', e.target.value)} /></div>
+        <div className="field" style={{ width: 120 }}><label>Received</label>
+          <select value={f.received || 'all'} onChange={(e) => set('received', e.target.value)}>
+            <option value="all">All</option><option value="pending">Not received</option>
+            <option value="received">Received</option></select></div>
+        <div className="field" style={{ width: 120 }}><label>Invoice</label>
+          <select value={f.status || 'all'} onChange={(e) => set('status', e.target.value)}>
+            <option value="all">All</option><option value="linked">Linked</option>
+            <option value="unlinked">Not linked</option></select></div>
+        <button className="btn primary" onClick={run}>🔍 Search</button>
+        <button className="btn" onClick={clear}>Clear</button>
+      </div>
+    </div>
+  )
+}
+
 // ---------- LR Entry (upload register image → OCR grid → save) ----------
+// Columns in the import grid — exactly what vision returns (lr.LR_FIELDS), so a
+// register page that carries a column can be reviewed before it is saved.
 const LR_COLS = [
-  ['recv_date', 'Recv Date', 100], ['transport', 'Transport', 110], ['bundle', 'Bundle', 60],
+  ['recv_date', 'Recv Date', 100], ['transport', 'Transport', 110],
+  ['lr_mode', 'Mode', 100], ['bundle', 'Bundle', 60], ['boxes', 'Boxes', 55],
   ['lr_no', 'LR No', 110], ['lr_date', 'LR Date', 100], ['supplier_name', 'Supplier', 180],
-  ['inv_no', 'Inv No', 80], ['inv_date', 'Inv Date', 100], ['qty', 'Qty', 55],
-  ['amount', 'Amount', 90], ['paid_topay', 'Paid/ToPay', 80], ['freight_amount', 'Freight', 70],
-  ['cash_cheque', 'Cash/Chq', 80], ['item', 'Item', 110],
+  ['agent', 'Agent', 120], ['inv_no', 'Inv No', 80], ['inv_date', 'Inv Date', 100],
+  ['qty', 'Pieces', 60], ['amount', 'Goods Value', 95],
+  ['paid_topay', 'Paid/ToPay', 80], ['freight_amount', 'Freight', 70],
+  ['item', 'Item', 110],
+]
+// The SAVED register is laid out to fit one screen rather than scroll sideways.
+// Two devices get it there without dropping anything:
+//   * `sub` puts a second, muted line in the same cell, so a value and its date
+//     (LR no + LR date, invoice + invoice date) share one column instead of two.
+//   * `pair` prints two counts as "2 / 1" in one cell (bundles / boxes).
+// `num` right-aligns figures — a register exists to be read down its columns,
+// and ragged left-aligned numbers cannot be compared at a glance.
+const LR_REG_COLS = [
+  { k: 'lr_entry_no', h: 'Entry No', w: 88, mono: 1 },
+  { k: 'recv_date', h: 'Recv Date', w: 86, mono: 1 },
+  { k: 'transport', h: 'Transport', w: 132, sub: 'lr_mode' },
+  { k: 'supplier_name', h: 'Supplier', w: 168, sub: 'agent' },
+  { k: 'lr_no', h: 'LR No', w: 112, sub: 'lr_date', mono: 1 },
+  { k: 'inv_no', h: 'Invoice', w: 112, sub: 'inv_date', mono: 1 },
+  { k: 'item', h: 'Item', w: 92 },
+  { k: 'bundle', h: 'Bdl / Box', w: 68, num: 1, pair: 'boxes' },
+  { k: 'qty', h: 'Pieces', w: 58, num: 1 },
+  { k: 'amount', h: 'Goods Value', w: 88, num: 1 },
+  { k: 'paid_topay', h: 'Paid/ToPay', w: 84, edit: 1 },
+  { k: 'freight_amount', h: 'Freight', w: 78, num: 1, edit: 1 },
+  { k: 'purchase_manager', h: 'Purch Mgr', w: 92 },
 ]
 // freight settlement — completed or corrected when the lorry actually delivers,
 // so these stay editable on already-saved rows
-const LR_SETTLE_COLS = ['paid_topay', 'freight_amount', 'cash_cheque']
+const LR_SETTLE_COLS = LR_REG_COLS.filter((c) => c.edit).map((c) => c.k)
 function LREntryView({ toast }) {
   const [rows, setRows] = useState([])
   const [docId, setDocId] = useState(null)
@@ -1603,6 +2041,39 @@ function LREntryView({ toast }) {
   const [saved, setSaved] = useState([])
   const refresh = useCallback(() => api.lrList().then(setSaved), [])
   useEffect(() => { refresh() }, [refresh])
+
+  // --- manual entry, dropdown masters and search ---
+  const [form, setForm] = useState(null)         // null = closed, {} = new, row = edit
+  const [opts, setOpts] = useState({})           // keyed dropdown lists
+  const [lists, setLists] = useState({})         // masters with their own tables
+  const loadOpts = useCallback(() => {
+    api.masterOptions().then(setOpts).catch(() => {})
+    Promise.all([api.listSuppliers(), api.agents(), api.transports()])
+      .then(([s, a, t]) => setLists({
+        suppliers: s.map((x) => x.name).filter(Boolean),
+        agents: a.map((x) => x.name).filter(Boolean),
+        transports: t.map((x) => x.name).filter(Boolean),
+      })).catch(() => {})
+  }, [])
+  useEffect(() => { loadOpts() }, [loadOpts])
+
+  const [searching, setSearching] = useState(false)   // search panel open
+  const [found, setFound] = useState(null)       // search results, null = not filtered
+  const shown = found ? found.rows : saved
+  const openNew = () => { setForm({}); setRows([]) }
+  const openEdit = async (r) => {
+    try { setForm(await api.lrGet(r.id)) } catch { toast('Could not open that entry', 'err') }
+  }
+  const afterSave = (_row, keepOpen) => {
+    refresh()
+    setFound(null)          // the saved row may not match the active filter — show the full list
+    if (!keepOpen) setForm(null)
+  }
+  const removeEntry = async (r) => {
+    if (!window.confirm(`Delete entry ${r.lr_entry_no || '#' + r.id} (${r.supplier_name || 'no supplier'})?`)) return
+    try { await api.lrDelete(r.id); toast('Entry deleted', 'ok'); setForm(null); setFound(null); refresh() }
+    catch (e) { toast(e.detail || 'Delete failed', 'err') }
+  }
 
   const [dup, setDup] = useState(null)
   const onFile = async (e) => {
@@ -1648,7 +2119,7 @@ function LREntryView({ toast }) {
       val = Number(val)
     }
     try {
-      const upd = await api.lrSettle(r.id, { [k]: val })
+      const upd = await api.lrUpdate(r.id, { [k]: val })
       setSaved((list) => list.map((x) => (x.id === upd.id ? upd : x)))
       drop(key)
     } catch (err) { toast('Could not save: ' + err.message, 'err'); drop(key) }
@@ -1661,12 +2132,33 @@ function LREntryView({ toast }) {
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 22px', borderBottom: '1px solid var(--line)' }}>
         <h2 style={{ margin: 0 }}>LR Entry</h2>
-        <span className="small">Import an LR register image / PDF — the rows are read automatically (no manual entry).</span>
+        <span className="small">Import a register page and the rows are read automatically — or key one consignment in.</span>
         <div style={{ flex: 1 }} />
+        <button className="btn" onClick={() => setSearching((s) => !s)}
+          title="Find entries by LR / invoice number, supplier, date, rack…">🔍 Search</button>
+        <button className="btn" onClick={openNew}>📄 New entry</button>
         <label className="btn primary uploadbtn">{busy ? 'Reading…' : 'Import LR image / PDF'}
           <input type="file" accept="image/*,.pdf" onChange={onFile} disabled={busy} /></label>
       </div>
       <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
+        {form !== null && (
+          <LREntryForm editing={form.id ? form : null} opts={opts} lists={lists}
+            onDone={afterSave} onCancel={() => setForm(null)} toast={toast} reloadOpts={loadOpts} />
+        )}
+        {searching && (
+          <LRSearchPanel toast={toast} onResults={setFound} onClear={() => setFound(null)} />
+        )}
+        {found && (
+          <div className="warnbox clean" style={{ marginBottom: 14 }}>
+            <h4 style={{ border: 'none', margin: 0 }}>
+              {found.count} matching entr{found.count === 1 ? 'y' : 'ies'}
+              {found.shown < found.count ? ` (showing ${found.shown})` : ''} · Σ pieces <b>{found.totals.qty}</b>
+              {' · '}Σ bundles <b>{found.totals.bundle}</b>{' · '}Σ boxes <b>{found.totals.boxes}</b>
+              {' · '}Σ goods value <b>₹ {money(found.totals.amount)}</b>
+              {' · '}Σ freight <b>₹ {money(found.totals.freight_amount)}</b>
+            </h4>
+          </div>
+        )}
         {note && <div className="warnbox" style={{ marginBottom: 14 }}><h4 style={{ border: 'none', margin: 0, color: 'var(--muted)' }}>{note}</h4></div>}
         {dup && (dup.duplicates > 0 || dup.doubtful > 0) && (
           <div className="warnbox" style={{ marginBottom: 14, borderColor: '#e0a800' }}>
@@ -1677,7 +2169,11 @@ function LREntryView({ toast }) {
             </h4>
           </div>
         )}
-        {rows.length === 0 && saved.length === 0 && <div className="empty" style={{ marginTop: 40 }}>Import an LR register page to auto-extract its rows.</div>}
+        {rows.length === 0 && saved.length === 0 && form === null && (
+          <div className="empty" style={{ marginTop: 40 }}>
+            Import an LR register page to auto-extract its rows, or press <b>New entry</b> to key one in.
+          </div>
+        )}
         {rows.length > 0 && (
           <>
             <div className="section"><h4>Extracted rows — review &amp; save</h4>
@@ -1708,19 +2204,27 @@ function LREntryView({ toast }) {
             </div>
           </>
         )}
-        {saved.length > 0 && (
-          <div className="section"><h4>Saved LR entries · {saved.length}</h4>
+        {shown.length > 0 && (
+          <div className="section"><h4>{found ? 'Search results' : 'Saved LR entries'} · {shown.length}</h4>
             <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
-              The freight columns (Paid/ToPay, Freight, Cash/Chq) are editable here — complete or
-              correct them when the lorry delivers and the money changes hands.
+              Paid/ToPay and Freight are editable in place — complete or correct them when the lorry
+              delivers and the money changes hands. <b>Open</b> any row to edit the whole entry or
+              attach the LR copy.
               <b> Received by</b> comes from the warehouse phone app (<span className="mono">/m</span> →
               Consignments), where whoever takes the packages in records their name.
             </div>
             <div style={{ overflowX: 'auto' }}>
-              <table className="items" style={{ minWidth: 1460 }}>
-                <thead><tr><th style={{ minWidth: 70 }}>Invoice</th>{LR_COLS.map(([k, l, w]) => <th key={k} style={{ minWidth: w }}>{l}</th>)}
-                  <th style={{ minWidth: 110 }}>Received by</th></tr></thead>
-                <tbody>{saved.map((r) => (
+              <table className="items reg">
+                <thead><tr>
+                  <th style={{ width: 66 }}>Invoice</th>
+                  {LR_REG_COLS.map((c) => <th key={c.k} style={{ width: c.w }}
+                    className={c.num ? 'num' : undefined}>{c.h}</th>)}
+                  <th style={{ width: 96 }}>Received</th><th style={{ width: 44 }}>Files</th>
+                  {/* actions last: the row reads left-to-right as data, and what
+                      you can DO with it sits at the end where the eye finishes */}
+                  <th style={{ width: 62 }}></th>
+                </tr></thead>
+                <tbody>{shown.map((r) => (
                   <tr key={r.id}>
                     <td style={{ fontSize: 11, fontWeight: 600 }}>
                       {r.mismatches && r.mismatches.length
@@ -1728,43 +2232,124 @@ function LREntryView({ toast }) {
                         : r.matched ? <span style={{ color: 'var(--ok, #2a8)' }}>✓ linked</span>
                         : <span style={{ color: 'var(--muted)' }}>pending</span>}
                     </td>
-                    {LR_COLS.map(([k]) => {
+                    {LR_REG_COLS.map((c) => {
+                      const k = c.k
                       const m = r.mismatches && r.mismatches.find(x => x.field === k)
-                      if (LR_SETTLE_COLS.includes(k)) return (
-                        <td key={k} title="Freight settlement — editable; saves when you leave the cell">
+                      const cls = (c.num ? 'num ' : '') + (c.mono ? 'mono' : '')
+                      if (c.edit) return (
+                        <td key={k} className={cls} title="Freight settlement — editable; saves when you leave the cell">
                           <input value={cellVal(r, k)}
                             onChange={(e) => setPending({ ...pending, [cellKey(r, k)]: e.target.value })}
                             onBlur={() => commitCell(r, k)}
                             onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} /></td>
                       )
-                      return <td key={k} style={m ? { background: 'rgba(224,168,0,0.18)' } : undefined}
-                        title={m ? `Register: ${m.register}\nInvoice: ${m.invoice}` : undefined}>{r[k] ?? ''}{m ? ' ⚠' : ''}</td>
+                      if (k === 'lr_entry_no') return (
+                        <td key={k} className={cls}
+                          title={r.entry_source === 'manual' ? 'Keyed in on the form' : 'Read off an imported register page'}>
+                          {r.lr_entry_no || '—'}{' '}
+                          <span style={{ color: 'var(--muted)' }}>{r.entry_source === 'manual' ? '✎' : '⬇'}</span></td>
+                      )
+                      // "2 / 1" — bundles and boxes are one fact about the packaging
+                      const val = c.pair
+                        ? `${r[k] ?? '—'} / ${r[c.pair] ?? '—'}`
+                        : (r[k] ?? '')
+                      return (
+                        <td key={k} className={cls}
+                          style={m ? { background: 'rgba(224,168,0,0.18)' } : undefined}
+                          title={m ? `Register: ${m.register}\nInvoice: ${m.invoice}` : undefined}>
+                          <div className="cellmain">{val}{m ? ' ⚠' : ''}</div>
+                          {c.sub && r[c.sub] ? <div className="cellsub">{r[c.sub]}</div> : null}
+                        </td>
+                      )
                     })}
                     {/* set by whoever takes the packages in, from the phone app */}
                     <td>{r.received_by
                       ? <span title="Recorded in the warehouse phone app">✓ {r.received_by}</span>
-                      : <span style={{ color: 'var(--muted)' }} title="Nobody has taken this consignment in on the phone app yet">not received</span>}</td>
+                      : <span style={{ color: 'var(--muted)' }} title="Nobody has taken this consignment in on the phone app yet">—</span>}</td>
+                    <td style={{ textAlign: 'center' }}>{r.attachments?.length
+                      ? <span title={r.attachments.map(a => `${a.doc_type}: ${a.filename}`).join('\n')}>📎 {r.attachments.length}</span>
+                      : ''}</td>
+                    <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+                      <button className="iconbtn" onClick={() => openEdit(r)}
+                        aria-label="Edit entry" title="Edit this entry">✎</button>
+                      <button className="iconbtn danger" onClick={() => removeEntry(r)}
+                        aria-label="Delete entry"
+                        title={r.matched ? 'Linked to an invoice — unlink before deleting' : 'Delete this entry'}>🗑</button>
+                    </td>
                   </tr>
                 ))}</tbody>
               </table>
             </div>
           </div>
         )}
+        {found && found.rows.length === 0 && (
+          <div className="empty" style={{ marginTop: 20 }}>No entries match those filters.</div>
+        )}
       </div>
     </div>
   )
 }
 
-// ---------- masters (categories / agents / transports) ----------
-function Masters() {
+// ---------- masters (categories / agents / transports / dropdown lists) ----------
+// The keyed lists behind the LR Entry form. FIXED ones are vocabulary the app
+// owns — shown, but not editable, because a typo there would become a new "mode"
+// of transport. The rest fill themselves from what is typed on the form.
+const OPTION_TABS = [
+  ['purchase_manager', 'Purchase Managers', 'Who owns the buy behind a consignment.'],
+  ['lr_mode', 'LR Modes', 'How a consignment travelled. Fixed list.', 1],
+  ['auto_transfer_location', 'Transfer Locations', 'Onward branch, or NONE to keep the goods here.', 1],
+  ['attachment_type', 'Attachment Types', 'What a file pinned to an LR entry is. Fixed list.', 1],
+]
+
+function OptionList({ kind, title, blurb, fixed, values, reload, toast }) {
+  const [adding, setAdding] = useState('')
+  const add = async () => {
+    const v = adding.trim(); if (!v) return
+    try { await api.addMasterOption(kind, v); setAdding(''); reload(); toast(`Added “${v}”`, 'ok') }
+    catch (e) { toast(e.detail || 'Could not add', 'err') }
+  }
+  const drop = async (v) => {
+    if (!window.confirm(`Remove “${v}” from ${title}? Entries already using it keep it.`)) return
+    try { await api.deleteMasterOption(kind, v); reload() }
+    catch (e) { toast(e.detail || 'Could not remove', 'err') }
+  }
+  return (
+    <>
+      <h2 style={{ marginTop: 0 }}>{title}</h2>
+      <p className="small">{blurb}{fixed ? '' : ' Values typed on the LR Entry form are remembered here automatically.'}</p>
+      {!fixed && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, maxWidth: 420 }}>
+          <input value={adding} onChange={(e) => setAdding(e.target.value)} placeholder={`Add to ${title}…`}
+            onKeyDown={(e) => { if (e.key === 'Enter') add() }}
+            style={{ flex: 1, background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px' }} />
+          <button className="btn primary" onClick={add}>Add</button>
+        </div>
+      )}
+      {values.length === 0 && <div className="empty">Nothing in this list yet.</div>}
+      {values.map((v) => (
+        <div key={v} style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '11px 14px', marginBottom: 7, maxWidth: 420 }}>
+          <span style={{ flex: 1 }}>{v}</span>
+          {fixed
+            ? <span className="small" style={{ color: 'var(--muted)' }}>fixed</span>
+            : <button className="btn" style={{ padding: '2px 8px' }} onClick={() => drop(v)}>×</button>}
+        </div>
+      ))}
+    </>
+  )
+}
+
+function Masters({ toast }) {
   const [tab, setTab] = useState('categories')
   const [cats, setCats] = useState(null)
   const [q, setQ] = useState('')
   const [section, setSection] = useState('')
   const [agents, setAgents] = useState([])
   const [transports, setTransports] = useState([])
-  useEffect(() => { api.categories().then(setCats); api.agents().then(setAgents); api.transports().then(setTransports) }, [])
+  const [opts, setOpts] = useState({})
+  const loadOpts = useCallback(() => api.masterOptions().then(setOpts).catch(() => {}), [])
+  useEffect(() => { api.categories().then(setCats); api.agents().then(setAgents); api.transports().then(setTransports); loadOpts() }, [loadOpts])
   const shown = cats ? cats.items.filter(c => (!section || c.section === section) && (!q || c.name.toLowerCase().includes(q.toLowerCase()))) : []
+  const optTab = OPTION_TABS.find(([k]) => k === tab)
   return (
     <div className="body">
       <div className="sidebar">
@@ -1772,7 +2357,9 @@ function Masters() {
         <div className="list" style={{ padding: '6px 0' }}>
           {[['categories', `Product Categories · ${cats ? cats.count : '…'}`],
             ['agents', `Agents · ${agents.length}`],
-            ['transports', `Transporters · ${transports.length}`]].map(([k, label]) => (
+            ['transports', `Transporters · ${transports.length}`],
+            ...OPTION_TABS.map(([k, label]) => [k, `${label} · ${(opts[k] || []).length}`]),
+          ].map(([k, label]) => (
             <div key={k} className={'doc-row' + (tab === k ? ' sel' : '')} style={{ padding: '11px 14px' }} onClick={() => setTab(k)}>
               <div className="t" style={{ fontWeight: tab === k ? 700 : 400 }}>{label}</div>
             </div>
@@ -1817,6 +2404,10 @@ function Masters() {
             <p className="small">Auto-created from the "transporter" field on extracted invoices/LRs.</p>
             {transports.map(t => <div key={t.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '11px 14px', marginBottom: 7 }}>{t.name}{t.phone ? ' · ' + t.phone : ''}</div>)}
           </>
+        )}
+        {optTab && (
+          <OptionList kind={optTab[0]} title={optTab[1]} blurb={optTab[2]} fixed={optTab[3]}
+            values={opts[optTab[0]] || []} reload={loadOpts} toast={toast} />
         )}
       </div>
     </div>
@@ -1975,7 +2566,7 @@ export default function App() {
       ) : tab === 'reports' ? (
         <Reports />
       ) : tab === 'masters' ? (
-        role === 'admin' ? <Masters /> : <div className="empty">Masters are admin-only.</div>
+        role === 'admin' ? <Masters toast={toast} /> : <div className="empty">Masters are admin-only.</div>
       ) : <Suppliers toast={toast} />}
 
       {scanning && <ScanningOverlay url={scanning.url} name={scanning.name}

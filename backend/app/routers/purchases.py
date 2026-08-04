@@ -35,12 +35,16 @@ def _split_out(s: models.PurchaseLineSplit):
     d.update({
         "id": s.id, "category": s.category,
         "qty": s.qty, "rate": s.effective_rate, "own_rate": s.rate,
-        "mrp": s.mrp, "sale_price": s.sale_price, "margin_pct": s.margin_pct,
+        "mrp": s.mrp, "sale_price": s.sale_price, "sale_discount_pct": s.sale_discount_pct,
         "amount": s.amount, "code": s.code, "label": s.variant_label,
         "product_id": s.product_id, "is_new_product": s.is_new_product,
         "product_sku": p.sku if p else None,
         "product_barcode": p.barcode if p else None,
         "stock_after": p.stock_qty if p else None,
+        # whether the warehouse has since inspected this item on the phone. The
+        # breakdown supplies what the invoice implied (size, colour); detailing is
+        # where fit, pattern, material and pricing come from someone holding it.
+        "product_detailed": bool(p.detailed) if p else None,
     })
     return d
 
@@ -53,8 +57,10 @@ def _line_out(l: models.PurchaseLine, db: Session = None):
     if db is not None and not l.category:
         from ..services import categorize
         s = categorize.suggest(db, l.description, limit=4)
+        # `via` lets the screen say WHY: "rules" is the engine's own reading,
+        # "alias" is a mapping someone already taught it for this wording
         suggestion = {"best": (s["best"] or {}).get("name"), "confident": s["confident"],
-                      "candidates": [c["name"] for c in s["candidates"]]}
+                      "via": s.get("via"), "candidates": [c["name"] for c in s["candidates"]]}
     return {
         "id": l.id, "product_id": l.product_id, "barcode": l.barcode,
         "description": l.description, "hsn": l.hsn, "qty": l.qty, "uom": l.uom,
@@ -62,6 +68,12 @@ def _line_out(l: models.PurchaseLine, db: Session = None):
         "category": l.category, "category_suggestion": suggestion,
         "product_category": l.product.category if l.product else None,
         "product_sku": l.product.sku if l.product else None,
+        "product_detailed": bool(l.product.detailed) if l.product else None,
+        # The bundle itself is SPLIT: it is what the supplier billed, and it never
+        # becomes stock — the rows below it do. Said explicitly rather than left to
+        # each client to infer from a non-empty list, because "this row does not
+        # move stock" is exactly the thing a receiving screen must not get wrong.
+        "is_split": l.is_split,
         # the QR carries the whole product record; the code itself is the identity
         "qr_code": (l.product.barcode or l.product.sku) if l.product else None,
         "stock_after": l.product.stock_qty if l.product else None,
@@ -85,6 +97,14 @@ def _purchase_out(p: models.Purchase, with_lines=False, db: Session = None):
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "posted_at": p.posted_at.isoformat() if p.posted_at else None,
     }
+    # Once posted, the receipt becomes a worklist: every item it created still has
+    # to be looked at and detailed on the phone. Counting it here lets the GRN list
+    # say so without opening each one.
+    if p.status == "posted":
+        holders = [h for l in p.lines for h in (l.splits if l.is_split else [l])]
+        prods = [h.product for h in holders if h.product]
+        d["items"] = len(holders)
+        d["items_pending_detail"] = sum(1 for x in prods if not x.detailed)
     if with_lines:
         # category suggestions are only useful while the GRN can still be edited
         d["lines"] = [_line_out(l, db if p.status != "posted" else None) for l in p.lines]
@@ -153,7 +173,11 @@ def set_splits(line_id: int, body: SplitRows, db: Session = Depends(get_db)):
 def edit_line(line_id: int, body: LineEdit, db: Session = Depends(get_db)):
     """Set the category master mapping for a line, so its product is created
     already mapped rather than landing 'unmapped' in Inventory. Send "" to clear
-    it and fall back to auto-classification from the description."""
+    it and fall back to auto-classification from the description.
+
+    The mapping is also *learned*: this is the one moment someone states what a
+    supplier's wording means, so the same wording maps itself on the next invoice
+    instead of being asked again. Clearing the category forgets it."""
     line = _draft_line(line_id, db)
     fields = body.model_dump(exclude_unset=True)
     if "category" in fields:
@@ -162,6 +186,8 @@ def edit_line(line_id: int, body: LineEdit, db: Session = Depends(get_db)):
                 models.Category.name == name).first():
             raise HTTPException(400, f"“{name}” is not in the category master")
         line.category = name or None
+        from ..services import categorize
+        categorize.learn_alias(db, line.description, name or None)
     db.commit()
     db.refresh(line)
     return _line_out(line, db)

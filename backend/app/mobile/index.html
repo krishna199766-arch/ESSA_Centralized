@@ -68,6 +68,8 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
 .selbtn{width:100%;text-align:left;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px}
 .selbtn.empty{color:var(--muted)}
 .spin{border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;width:26px;height:26px;animation:sp 1s linear infinite;margin:30px auto}
+/* the bar that carries the one action a screen commits to (post, save) */
+.actionbar{padding:12px 14px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:var(--panel)}
 @keyframes sp{to{transform:rotate(360deg)}}
 </style>
 </head>
@@ -77,7 +79,12 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
 const S = { token: localStorage.getItem('essa_token')||'', user: localStorage.getItem('essa_user')||'',
             screen:'login', products:[], options:{}, status:'pending', q:'', barcode:'', selected:null, employee: localStorage.getItem('essa_emp')||'',
             // consignments waiting to be taken in (LR register rows)
-            lr:[], lrFilter:'pending', lrSel:null, receivers:[] };
+            lr:[], lrFilter:'pending', lrSel:null, receivers:[],
+            // goods receipts: the bundle a supplier billed, broken into what arrived
+            grns:[], grnFilter:'draft', grn:null, grnLine:null, srows:[], sopen:{},
+            cats:[], postResult:null,
+            // cartons: the first label, printed at GRN and scanned around the warehouse
+            bundles:[], bundleFilter:'stored', bundle:null, locations:[] };
 const app = document.getElementById('app');
 const esc = (s)=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const money = (v)=> v==null?'—': Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -98,7 +105,8 @@ function toast(m){ const t=document.createElement('div'); t.className='toast'; t
   S.screen='login'; render();
 })();
 
-async function loadOptions(){ try{ S.options = await api('/api/inventory/product-options'); }catch(e){ S.options={}; } }
+async function loadOptions(){ try{ S.options = await api('/api/inventory/product-options'); }catch(e){ S.options={}; }
+  loadLocations(); }
 
 // ---------- render ----------
 function render(){
@@ -106,15 +114,24 @@ function render(){
   if(S.screen==='detail') return renderDetail();
   if(S.screen==='lr') return renderLR();
   if(S.screen==='lrdetail') return renderLRDetail();
+  if(S.screen==='grn') return renderGrnList();
+  if(S.screen==='grndetail') return renderGrn();
+  if(S.screen==='grnbreak') return renderBreak();
+  if(S.screen==='grnposted') return renderPosted();
+  if(S.screen==='bundles') return renderBundles();
+  if(S.screen==='bundle') return renderBundle();
   return renderList();
 }
 
-// The two jobs the warehouse does on the phone: take consignments in as they
-// arrive, and detail the products that came out of them.
+// What the warehouse does on the phone, in the order the goods move: take the
+// consignment in, receive what the cartons hold, store and later open those
+// cartons, and detail the products that come out of them.
 function tabs(active){
-  return `<div class="row" style="gap:8px">
-    <div class="chip ${active==='list'?'on':''}" data-tab="list">Products</div>
+  return `<div class="row" style="gap:8px;overflow:auto">
     <div class="chip ${active==='lr'?'on':''}" data-tab="lr">Consignments</div>
+    <div class="chip ${active==='grn'?'on':''}" data-tab="grn">Receive</div>
+    <div class="chip ${active==='bundles'?'on':''}" data-tab="bundles">Bundles</div>
+    <div class="chip ${active==='list'?'on':''}" data-tab="list">Products</div>
   </div>`;
 }
 function wireTabs(){
@@ -127,7 +144,7 @@ function renderLogin(){
   app.innerHTML = `<div class="center">
     <div class="logo">AI</div>
     <div class="brand">ESSA <span>·</span> Warehouse</div>
-    <div class="sub">Sign in to receive consignments &amp; detail products</div>
+    <div class="sub">Sign in to receive goods &amp; detail products</div>
     <div class="card">
       <div class="field"><label>Username</label><input id="u" autocapitalize="none" value="admin"></div>
       <div class="field"><label>Password</label><input id="p" type="password" placeholder="••••••••"></div>
@@ -166,7 +183,7 @@ async function renderList(){
   document.getElementById('lo').onclick=()=>{ localStorage.removeItem('essa_token'); S.token=''; S.screen='login'; render(); };
   wireTabs();
   document.getElementById('bcgo').onclick=doBarcode;
-  document.getElementById('bcscan').onclick=openScanner;
+  document.getElementById('bcscan').onclick=()=>openScanner();
   document.getElementById('bc').addEventListener('keydown',e=>{if(e.key==='Enter')doBarcode();});
   document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter'){S.q=e.target.value;paint();}});
   document.getElementById('refresh').onclick=()=>{S.q=document.getElementById('q').value;paint();};
@@ -187,7 +204,7 @@ async function resolveCode(code){
 async function doBarcode(){
   const b=document.getElementById('bc').value.trim(); if(!b) return;
   const p=await resolveCode(b);
-  if(p){ S.selected=p; S.screen='detail'; render(); }
+  if(p){ S.selected=p; S.detailBack='list'; S.screen='detail'; render(); }
   else toast('No product for that code');
 }
 
@@ -204,7 +221,9 @@ function closeScanner(){
   const ov=document.getElementById('scanov'); if(ov) ov.remove();
 }
 
-async function openScanner(){
+// `onCode` receives the raw scan when the caller wants to do something other than
+// open the product — pinning a GRN line to an existing item, for instance.
+async function openScanner(onCode){
   if(!('BarcodeDetector' in window)){
     toast('This browser can’t use the camera scanner — type or use a handheld scanner');
     document.getElementById('bc')?.focus();
@@ -249,8 +268,9 @@ async function openScanner(){
       if(hits&&hits.length){
         const code=hits[0].rawValue;
         closeScanner();
+        if(onCode) return onCode(code);
         const p=await resolveCode(code);
-        if(p){ S.selected=p; S.screen='detail'; render(); }
+        if(p){ S.selected=p; S.detailBack='list'; S.screen='detail'; render(); }
         else toast('Scanned, but no product matches that code');
         return;
       }
@@ -267,10 +287,575 @@ async function paint(){
   if(!S.products.length){ list.innerHTML='<p style="color:var(--muted);text-align:center;margin-top:30px">No products.</p>'; return; }
   list.innerHTML = S.products.map((p,i)=>`<div class="prow" data-i="${i}">
       <div style="flex:1;min-width:0"><div class="t">${esc(p.description)}</div>
-      <div class="m">${esc(p.sku)}${p.barcode?' · '+esc(p.barcode):''} · stock ${p.stock_qty} ${esc(p.uom||'')}</div></div>
+      <div class="m">${esc(p.sku)} · stock ${p.stock_qty} ${esc(p.uom||'')}</div></div>
       <div class="badge ${p.detailed?'bdone':'bpend'}">${p.detailed?'detailed':'pending'}</div></div>`).join('');
-  list.querySelectorAll('.prow').forEach(r=>r.onclick=()=>{ S.selected=S.products[+r.dataset.i]; S.screen='detail'; render(); });
+  list.querySelectorAll('.prow').forEach(r=>r.onclick=()=>{ S.selected=S.products[+r.dataset.i]; S.detailBack='list'; S.screen='detail'; render(); });
 }
+
+// ---------- receive: the bundle a supplier billed, broken into what arrived ----------
+// A supplier bills "WOMEN'S T-SHIRT, 50 PCS" and never prints the mix. Only the
+// person opening the cartons knows it, so the breakdown is entered here, and
+// posting turns every row into its own product — its own SKU, QR, stock movement
+// and weighted-average cost. Same endpoints the desktop calls, so stock is
+// identical whichever end does it. Unposting stays on the desktop: it has to
+// weigh payments, debit notes and dispatches first.
+const SPLIT_ATTRS=[['size','Size'],['color','Colour'],['material','Material'],
+  ['pattern','Pattern'],['fit','Fit'],['product_type','Type'],['design_no','Design No']];
+const SPLIT_MONEY=[['rate','Rate'],['mrp','MRP'],['sale_price','Sale price'],['sale_discount_pct','Disc %']];
+const qtyOf=(v)=>Math.round((+v||0)*1000)/1000;
+// quantities are floats — compare with the tolerance the server posts with
+const sameQty=(a,b)=>Math.abs((+a||0)-(+b||0))<0.001;
+const vLabel=(r)=>SPLIT_ATTRS.map(([k])=>r[k]).filter(Boolean).join(' · ');
+const blankRow=(rate,cat)=>Object.assign(
+  {category:cat||'',qty:'',rate:rate!=null?String(rate):'',mrp:'',sale_price:'',sale_discount_pct:''},
+  Object.fromEntries(SPLIT_ATTRS.map(([k])=>[k,''])));
+const logout=()=>{ localStorage.removeItem('essa_token'); S.token=''; S.screen='login'; render(); };
+
+async function loadCats(){ try{ const c=await api('/api/masters/categories'); S.cats=(c.items||[]).map(i=>i.name); }catch(e){ S.cats=[]; } }
+async function reloadGrn(){ S.grn=await api('/api/purchases/'+S.grn.id); }
+
+async function renderGrnList(){
+  app.innerHTML=`<div class="topbar"><h1>Goods receipts</h1><span class="count" id="gcnt"></span><button class="link" id="lo3">Logout</button></div>
+    <div class="controls">
+      ${tabs('grn')}
+      <div class="row" style="overflow:auto">
+        ${['draft','posted','all'].map(f=>`<div class="chip ${S.grnFilter===f?'on':''}" data-gf="${f}">${f}</div>`).join('')}
+        <div class="chip" id="grefresh" style="margin-left:auto">↻</div>
+      </div>
+      <div class="hint">Open a receipt to break its bundles into the sizes that arrived, then post it to stock</div>
+    </div>
+    <div class="list" id="glist"><div class="spin"></div></div>`;
+  document.getElementById('lo3').onclick=logout;
+  document.getElementById('grefresh').onclick=paintGrns;
+  app.querySelectorAll('.chip[data-gf]').forEach(c=>c.onclick=()=>{ S.grnFilter=c.dataset.gf; paintGrns(); });
+  wireTabs();
+  if(!S.cats.length) loadCats();
+  paintGrns();
+}
+
+async function paintGrns(){
+  const el=document.getElementById('glist'); if(el) el.innerHTML='<div class="spin"></div>';
+  try{ S.grns=await api('/api/purchases'); }catch(e){ S.grns=[]; toast('Could not load goods receipts'); }
+  const rows=S.grns.filter(g=>S.grnFilter==='all'||g.status===S.grnFilter);
+  const cnt=document.getElementById('gcnt'); if(cnt) cnt.textContent=rows.length+' shown';
+  const list=document.getElementById('glist'); if(!list) return;
+  if(!rows.length){
+    list.innerHTML=`<p style="color:var(--muted);text-align:center;margin-top:30px;line-height:1.5">${
+      S.grnFilter==='draft'?'Nothing to receive. A receipt appears here once its invoice has been read and confirmed on the desktop app.':'No goods receipts.'}</p>`;
+    return;
+  }
+  list.innerHTML=rows.map((g,i)=>`<div class="prow" data-i="${i}">
+      <div style="flex:1;min-width:0">
+        <div class="t">${esc(g.supplier_name||('GRN #'+g.id))}</div>
+        <div class="m">Inv ${esc(g.invoice_number||'—')}${g.invoice_date?' · '+esc(g.invoice_date):''} · ₹ ${money(g.grand_total)}</div>
+        <div class="m">${g.line_count} line${g.line_count===1?'':'s'}${g.new_products?` · ${g.new_products} new product${g.new_products===1?'':'s'}`:''}${g.grn_no?' · GRN '+esc(g.grn_no):''}</div>
+      </div>
+      <div class="badge ${g.status==='posted'?'bdone':'bpend'}">${esc(g.status)}</div></div>`).join('');
+  list.querySelectorAll('.prow').forEach(r=>r.onclick=()=>openGrn(rows[+r.dataset.i].id));
+}
+
+async function openGrn(id){
+  try{ S.grn=await api('/api/purchases/'+id); S.screen='grndetail'; render(); }
+  catch(e){ toast('Could not open that receipt: '+e.message); }
+}
+
+// ---------- one receipt: every billed line, and what it really was ----------
+function renderGrn(){
+  const g=S.grn; if(!g){ S.screen='grn'; return render(); }
+  const editable=g.status!=='posted';
+  const unbal=(g.unbalanced_splits||[]).length;
+  // the server says outright whether the bundle is split; falling back to the rows
+  // keeps an older server from making a broken-down bundle read as a plain product
+  const split=(l)=>l.is_split!=null?l.is_split:l.splits.length>0;
+  const lineHtml=(l,i)=>`<div class="prow" style="display:block">
+      <div class="row" style="align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div class="t">${esc(l.description||'(unnamed)')}</div>
+          <div class="m">HSN ${esc(l.hsn||'—')} · ${qtyOf(l.qty)} ${esc(l.uom||'')} × ₹${money(l.rate)} = ₹${money(l.amount)}</div>
+          ${split(l)?`<div class="m">Bundle split into ${l.splits.length} item${l.splits.length===1?'':'s'} — the rows below carry the stock, not this line.</div>`:''}
+          ${l.splits.length&&!l.split_balanced?`<div class="m" style="color:var(--warn)">${qtyOf(l.split_remainder)} of ${qtyOf(l.qty)} still to break down</div>`:''}
+        </div>
+        ${split(l)
+          ? `<div class="badge ${l.split_balanced?'bdone':'bpend'}">split · ${l.splits.length}${l.split_balanced?'':' ⚠'}</div>`
+          : `<div class="badge ${l.is_new_product?'bpend':'bdone'}">${l.is_new_product?'new':'matched'}</div>`}
+      </div>
+      <div class="row" style="align-items:center;gap:8px;margin-top:10px">
+        <span style="color:var(--muted);font-size:12px;flex:0 0 62px">Category</span>
+        ${editable
+          ? `<button class="selbtn ${l.category?'':'empty'}" data-cat="${i}" style="flex:1;padding:9px 12px;font-size:14px">${esc(l.category||(l.category_suggestion&&l.category_suggestion.best)||'auto')}</button>`
+          : `<span style="font-size:13px">${esc(l.category||l.product_category||'auto')}</span>`}
+      </div>
+      ${editable&&!l.category&&l.category_suggestion&&l.category_suggestion.best
+        /* one tap to accept what the classifier read from the description — and
+           whichever category ends up here is remembered for this wording, so the
+           next invoice that says it this way arrives already mapped */
+        ? `<button class="link" style="padding:6px 0;display:block;text-align:left" data-usecat="${i}">use ${esc(l.category_suggestion.best)}${
+            l.category_suggestion.via==='alias' ? ' · learned' : (l.category_suggestion.confident?'':' ?')}</button>`
+        : ''}
+      ${l.splits.map(sp=>`<div class="row" style="align-items:center;gap:10px;border-top:1px solid var(--line);margin-top:9px;padding-top:9px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600">↳ ${esc(sp.label)}</div>
+            <div class="m">${qtyOf(sp.qty)} × ₹${money(sp.rate)} = ₹${money(sp.amount)}${sp.mrp?' · MRP '+money(sp.mrp):''}</div>
+            <div class="m">${esc(sp.product_sku||(g.status==='posted'?'—':'SKU + QR on post'))}</div>
+          </div>
+          ${sp.product_id&&g.status==='posted'
+            ? `<img src="/api/inventory/products/${sp.product_id}/qr.svg?scale=2" alt="QR" style="width:46px;height:46px;background:#fff;border-radius:6px;padding:2px">` : ''}
+          ${editable&&!sp.product_id
+            ? `<button class="btn sec" style="width:auto;padding:9px 12px" data-scan="${i}" data-split="${sp.id}">⌗ QR</button>` : ''}
+        </div>`).join('')}
+      ${editable?`<div class="row" style="margin-top:11px;gap:8px">
+          <button class="btn sec" data-break="${i}">${l.splits.length?'Edit breakdown':'Break down into sizes'}</button>
+          ${!l.splits.length?`<button class="btn sec" style="width:auto;padding:12px 14px" data-scan="${i}">⌗ QR</button>`:''}
+        </div>`:''}
+    </div>`;
+
+  app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ GRNs</button>
+      <h1>${esc(g.supplier_name||('GRN #'+g.id))}</h1>
+      <div class="badge ${g.status==='posted'?'bdone':'bpend'}">${esc(g.status)}</div></div>
+    <div class="list" style="padding-top:12px">
+      <div class="prow" style="display:block">
+        <div class="m">Invoice ${esc(g.invoice_number||'—')}${g.invoice_date?' · '+esc(g.invoice_date):''}</div>
+        <div class="m">GRN No ${esc(g.grn_no||'—')} · ${g.line_count} line${g.line_count===1?'':'s'}</div>
+        <div class="t" style="margin-top:6px">Grand total ₹ ${money(g.grand_total)}</div>
+      </div>
+      ${g.lines.map(lineHtml).join('')}
+    </div>
+    <div class="actionbar">
+      <div class="hint" style="margin-bottom:9px">${g.status==='posted'
+        ? 'Posted — stock is updated. Correct it by unposting on the desktop app.'
+        : unbal ? `⚠ ${unbal} line${unbal===1?'':'s'} broken down to the wrong total — fix before posting.`
+        : 'Posting creates a product and a QR for every size, adds the stock, and averages the cost.'}</div>
+      ${g.status==='posted'
+        ? `<button class="btn" id="showqr">Show QR codes</button>`
+        : `<button class="btn" id="post"${unbal?' disabled':''}>Post to inventory</button>`}
+    </div>`;
+
+  document.getElementById('back').onclick=()=>{ S.screen='grn'; render(); };
+  app.querySelectorAll('[data-break]').forEach(b=>b.onclick=()=>openBreak(g.lines[+b.dataset.break]));
+  // a category chosen here means the products are born mapped, instead of landing
+  // "unmapped" in Inventory for someone to fix one by one — and the server learns
+  // the wording, so the next invoice phrased that way maps itself
+  const setCat=async (line,v)=>{
+    try{ await api('/api/purchases/lines/'+line.id,{method:'PATCH',body:JSON.stringify({category:v})});
+      await reloadGrn(); render();
+    }catch(e){ toast(e.message); }
+  };
+  app.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{
+    const l=g.lines[+b.dataset.cat];
+    pickSheet('Category', S.cats, l.category||'', (v)=>setCat(l,v), true);
+  });
+  app.querySelectorAll('[data-usecat]').forEach(b=>b.onclick=()=>{
+    const l=g.lines[+b.dataset.usecat];
+    setCat(l, l.category_suggestion.best);
+  });
+  app.querySelectorAll('[data-scan]').forEach(b=>b.onclick=()=>
+    scanInto(g.lines[+b.dataset.scan], b.dataset.split?+b.dataset.split:null));
+  const pb=document.getElementById('post'); if(pb) pb.onclick=postGrn;
+  const sq=document.getElementById('showqr'); if(sq) sq.onclick=()=>{ S.postResult=null; S.screen='grnposted'; render(); };
+}
+
+// Pin a line (or one variant of it) to a product that already exists — for goods
+// we already carry, where the supplier's wording drifts between invoices.
+function scanInto(line, splitId){
+  const send=async (code)=>{
+    try{
+      await api(`/api/purchases/lines/${line.id}/scan`,{method:'POST',body:JSON.stringify({code:code,split_id:splitId})});
+      await reloadGrn(); render(); toast('✓ Linked to that product');
+    }catch(e){ toast(e.message); }
+  };
+  if('BarcodeDetector' in window) return openScanner(send);
+  const code=prompt('Scan or type the QR code / SKU for this row:');
+  if(code&&code.trim()) send(code.trim());
+}
+
+async function postGrn(){
+  const rows=S.grn.lines.reduce((n,l)=>n+(l.splits.length||1),0);
+  if(!confirm(`Post this GRN?\n\n${rows} item${rows===1?'':'s'} go into stock. Each new one gets its own SKU and QR code, and its cost is averaged into inventory.\n\nCorrecting a posted GRN means unposting it on the desktop app.`)) return;
+  const btn=document.getElementById('post'); if(btn) btn.disabled=true;
+  try{
+    S.postResult=await api(`/api/purchases/${S.grn.id}/post`,{method:'POST'});
+    await reloadGrn();                       // now carries each variant's product
+    S.screen='grnposted'; render();
+  }catch(e){ toast('Post failed: '+e.message); if(btn) btn.disabled=false; }
+}
+
+// ---------- the breakdown editor ----------
+function openBreak(line){
+  S.grnLine=line; S.sopen={};
+  S.srows=line.splits.length
+    ? line.splits.map(sp=>{ const r=blankRow(line.rate);
+        Object.keys(r).forEach(k=>{ if(sp[k]!=null&&sp[k]!=='') r[k]=String(sp[k]); }); return r; })
+    // a first row inherits the line's category (or the mapping it would get), so
+    // the common case — one category, several sizes — needs no repetition
+    : [blankRow(line.rate, line.category||(line.category_suggestion&&line.category_suggestion.best))];
+  S.screen='grnbreak'; render();
+}
+
+function updProgress(){
+  const l=S.grnLine, billed=+l.qty||0;
+  const assigned=S.srows.reduce((n,r)=>n+(+r.qty||0),0);
+  const done=sameQty(assigned,billed);
+  const p=document.getElementById('prog');
+  if(p){
+    p.textContent=`${qtyOf(assigned)} of ${qtyOf(billed)} ${l.uom||''} assigned`
+      +(done?' ✓':` · ${qtyOf(billed-assigned)} left`);
+    p.style.color=done?'var(--ok)':'var(--muted)';
+  }
+  const bar=document.getElementById('bar');
+  if(bar){
+    bar.style.width=Math.min(100,billed?(assigned/billed)*100:0)+'%';
+    bar.style.background=done?'var(--ok)':'var(--accent)';
+  }
+}
+
+function addRow(size){
+  if(size&&S.srows.some(r=>r.size===size)){ toast(size+' is already a row — set its quantity'); return; }
+  const last=S.srows[S.srows.length-1]||{};
+  const cat=last.category||S.grnLine.category||(S.grnLine.category_suggestion&&S.grnLine.category_suggestion.best);
+  // a size chip fills the empty row the editor opens with rather than adding a
+  // second one below it: an untouched row above the one being typed into is both
+  // clutter and a trap — it fails validation at save
+  const blank=S.srows.findIndex(r=>!vLabel(r)&&!r.qty);
+  if(size&&blank>-1) S.srows[blank].size=size;
+  else S.srows.push(Object.assign(blankRow(S.grnLine.rate,cat), size?{size:size}:{}));
+  render();
+}
+
+function renderBreak(){
+  const l=S.grnLine; if(!l){ S.screen='grndetail'; return render(); }
+  const rowHtml=(r,i)=>`<div class="prow" style="display:block">
+      <div class="row" style="align-items:center;gap:8px">
+        <span style="color:var(--muted);font-size:12px;font-weight:700">${i+1}</span>
+        <div class="t" style="flex:1;min-width:0">${esc(vLabel(r)||'new item')}</div>
+        <button class="link" style="font-size:20px;color:var(--muted)" data-del="${i}">×</button>
+      </div>
+      <div class="row" style="gap:8px;align-items:flex-end;margin-top:8px">
+        <div style="flex:1.2"><label>Size</label>
+          <button class="selbtn ${r.size?'':'empty'}" data-attr="${i}:size" style="padding:10px 12px">${esc(r.size||'Size')}</button></div>
+        <div style="flex:1"><label>Qty</label>
+          <input inputmode="decimal" data-qty="${i}" value="${esc(r.qty)}" placeholder="0" style="padding:10px 12px"></div>
+        <button class="btn sec" style="width:auto;padding:11px 13px" data-rest="${i}">rest</button>
+      </div>
+      <button class="link" style="padding:9px 0;font-size:12px;display:block" data-more="${i}">${S.sopen[i]?'▾ fewer':'▸ colour, material, category, pricing'}</button>
+      ${S.sopen[i]?`
+        ${SPLIT_ATTRS.filter(([k])=>k!=='size').map(([k,lab])=>k==='design_no'
+          ? `<div class="field"><label>${lab}</label><input data-txt="${i}:${k}" value="${esc(r[k])}" placeholder="e.g. SH-05"></div>`
+          : `<div class="field"><label>${lab}</label><button class="selbtn ${r[k]?'':'empty'}" data-attr="${i}:${k}">${esc(r[k]||lab)}</button></div>`).join('')}
+        <div class="field"><label>Category</label>
+          <button class="selbtn ${r.category?'':'empty'}" data-cats="${i}">${esc(r.category||l.category||'auto')}</button></div>
+        <div class="row">${SPLIT_MONEY.map(([k,lab])=>`<div class="field" style="flex:1"><label>${lab}</label>
+          <input inputmode="decimal" data-txt="${i}:${k}" value="${esc(r[k])}" placeholder="${k==='rate'?esc(l.rate!=null?l.rate:'')  :'—'}"></div>`).join('')}</div>
+      `:''}
+    </div>`;
+
+  app.innerHTML=`<div class="topbar"><button class="link" id="cancel">‹ Cancel</button><h1>Break down</h1></div>
+    <div class="controls">
+      <div class="detname" style="font-size:18px">${esc(l.description||'(unnamed)')}</div>
+      <div class="detmeta" id="prog"></div>
+      <div style="height:5px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="bar" style="height:5px;width:0%"></div></div>
+      <div class="hint">Fill only what differs. Each row becomes its own product with its own SKU and QR.</div>
+      <div class="row" style="overflow:auto;gap:8px">
+        ${(S.options.size||[]).slice(0,8).map(sz=>`<div class="chip" data-size="${esc(sz)}" style="text-transform:none">${esc(sz)}</div>`).join('')}
+      </div>
+    </div>
+    <div class="list" id="rows">
+      ${S.srows.map(rowHtml).join('')}
+      <div class="row" style="gap:8px;margin-bottom:10px">
+        <button class="btn sec" id="addrow">+ add row</button>
+        <button class="btn sec" id="duprow"${S.srows.length?'':' disabled'}>⧉ duplicate last</button>
+      </div>
+      ${l.splits.length?`<button class="btn sec" id="clearbd" style="color:var(--danger)">Clear breakdown</button>`:''}
+    </div>
+    <div class="actionbar"><button class="btn" id="savebd">Save breakdown</button></div>`;
+  updProgress();
+
+  document.getElementById('cancel').onclick=()=>{ S.screen='grndetail'; render(); };
+  app.querySelectorAll('[data-size]').forEach(c=>c.onclick=()=>addRow(c.dataset.size));
+  document.getElementById('addrow').onclick=()=>addRow(null);
+  document.getElementById('duprow').onclick=()=>{
+    S.srows.push(Object.assign({},S.srows[S.srows.length-1],{qty:''})); render(); };
+  app.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{ S.srows.splice(+b.dataset.del,1); S.sopen={}; render(); });
+  app.querySelectorAll('[data-more]').forEach(b=>b.onclick=()=>{ const i=+b.dataset.more; S.sopen[i]=!S.sopen[i]; render(); });
+  // typing updates state and the running total only — re-rendering the list on
+  // every keystroke would take the keyboard's focus with it
+  app.querySelectorAll('[data-qty]').forEach(inp=>inp.addEventListener('input',e=>{
+    S.srows[+inp.dataset.qty].qty=e.target.value; updProgress(); }));
+  app.querySelectorAll('[data-txt]').forEach(inp=>inp.addEventListener('input',e=>{
+    const p=inp.dataset.txt.split(':'); S.srows[+p[0]][p[1]]=e.target.value; }));
+  app.querySelectorAll('[data-rest]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.rest, billed=+l.qty||0;
+    const others=S.srows.reduce((n,r,j)=>n+(j===i?0:(+r.qty||0)),0);
+    S.srows[i].qty=String(qtyOf(Math.max(0,billed-others)));
+    const inp=app.querySelector(`[data-qty="${i}"]`); if(inp) inp.value=S.srows[i].qty;
+    updProgress();
+  });
+  app.querySelectorAll('[data-attr]').forEach(b=>b.onclick=()=>{
+    const p=b.dataset.attr.split(':'), i=+p[0], k=p[1];
+    pickSheet(k.replace('_',' '), S.options[k]||[], S.srows[i][k], (v)=>{ S.srows[i][k]=v; render(); }, true);
+  });
+  app.querySelectorAll('[data-cats]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.cats;
+    pickSheet('Category', S.cats, S.srows[i].category, (v)=>{ S.srows[i].category=v; render(); }, true);
+  });
+  const cb=document.getElementById('clearbd');
+  if(cb) cb.onclick=()=>{ if(confirm('Clear the breakdown?\n\nThe line goes back to one product for the whole billed quantity.')) saveBreak([]); };
+  document.getElementById('savebd').onclick=submitBreak;
+}
+
+// The same rules the server enforces, checked here so a picker is told before the
+// round trip rather than after it.
+function submitBreak(){
+  const l=S.grnLine;
+  const kept=S.srows.filter(r=>vLabel(r)||r.qty);
+  for(const r of kept){
+    if(!vLabel(r)){ toast('Every row needs at least one attribute — a size, colour, material…'); return; }
+    if(!(+r.qty>0)){ toast(`“${vLabel(r)}”: enter a quantity greater than zero`); return; }
+  }
+  // identity is the WHOLE attribute tuple, exactly as the server compares it —
+  // not the label, which two different tuples can share
+  const keys=kept.map(r=>SPLIT_ATTRS.map(([k])=>(r[k]||'').trim().toLowerCase()).join(' '));
+  const dup=keys.findIndex((x,i)=>keys.indexOf(x)!==i);
+  if(dup>-1){ toast(`“${vLabel(kept[dup])}” appears twice — merge those rows`); return; }
+  const assigned=kept.reduce((n,r)=>n+(+r.qty||0),0);
+  if(kept.length&&!sameQty(assigned,+l.qty||0)
+     && !confirm(`The rows add up to ${qtyOf(assigned)} of ${qtyOf(l.qty)} billed.\n\n`
+        +`That's fine to save and come back to — the GRN just can't be posted until it balances.\n\nSave anyway?`)) return;
+  saveBreak(kept);
+}
+
+async function saveBreak(rows){
+  const btn=document.getElementById('savebd'); if(btn) btn.disabled=true;
+  try{
+    await api(`/api/purchases/lines/${S.grnLine.id}/splits`,{method:'PUT',body:JSON.stringify({rows:rows})});
+    await reloadGrn();
+    toast(rows.length?`✓ Broken into ${rows.length} item${rows.length===1?'':'s'}`:'✓ Breakdown cleared');
+    S.screen='grndetail'; render();
+  }catch(e){ toast(e.message); if(btn) btn.disabled=false; }
+}
+
+// ---------- what posting produced: a record and a QR per size ----------
+function renderPosted(){
+  const g=S.grn, r=S.postResult;
+  const items=[];
+  g.lines.forEach(l=>{
+    if(l.splits.length) l.splits.forEach(sp=>items.push({id:sp.product_id,sku:sp.product_sku,
+      title:sp.label,sub:l.description,qty:sp.qty,isNew:sp.is_new_product,detailed:sp.product_detailed}));
+    else items.push({id:l.product_id,sku:l.product_sku,title:l.description,sub:null,qty:l.qty,
+      isNew:l.is_new_product,detailed:l.product_detailed});
+  });
+  const ids=items.filter(x=>x.id).map(x=>x.id);
+  const todo=items.filter(x=>x.id&&!x.detailed).length;
+  app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ GRNs</button><h1>In inventory</h1></div>
+    <div class="list" style="padding-top:12px">
+      <div class="prow" style="display:block">
+        <div class="t" style="color:var(--ok)">✓ Posted to inventory</div>
+        <div class="m">${r
+          ? `${r.products_created} new product${r.products_created===1?'':'s'} · ${r.products_updated} restocked`
+            +(r.size_rows?` · ${r.size_rows} size row${r.size_rows===1?'':'s'}`:'')
+          : `${items.length} item${items.length===1?'':'s'} from this GRN`}</div>
+        <div class="m" style="margin-top:6px;line-height:1.5">Each one carries its own SKU and QR, and is tracked on its
+          own from here. Scan it anywhere in the system — the code resolves to the live record, and still reads the
+          item when there's no network.</div>
+        <div class="m" style="margin-top:6px;color:${todo?'var(--warn)':'var(--ok)'}">${todo
+          ? `${todo} of ${items.length} still to detail — tap one to record size, colour, fit and pricing.`
+          : `All ${items.length} detailed ✓`}</div>
+      </div>
+      ${items.map((it,i)=>`<div class="prow" ${it.id?`data-item="${i}"`:''}>
+          ${it.id?`<img src="/api/inventory/products/${it.id}/qr.svg?scale=3" alt="QR ${esc(it.sku||'')}"
+              style="width:56px;height:56px;background:#fff;border-radius:6px;padding:3px;flex:0 0 auto">`:''}
+          <div style="flex:1;min-width:0">
+            <div class="t">${esc(it.title||'(unnamed)')}</div>
+            ${it.sub?`<div class="m">${esc(it.sub)}</div>`:''}
+            <div class="m">${esc(it.sku||'—')} · ${qtyOf(it.qty)} in</div>
+          </div>
+          <div class="badge ${it.detailed?'bdone':'bpend'}">${it.detailed?'detailed':'to detail'}</div>
+        </div>`).join('')}
+    </div>
+    <div class="actionbar">
+      <div class="m" style="margin-bottom:8px">Print the carton labels and stick one on each box —
+        that is what gets it onto a rack. The garment tags come later, from <b>Bundles</b>, once the
+        box is opened and its items detailed.</div>
+      <div class="row" style="gap:8px">
+        <a class="btn sec" href="/api/bundles/labels?purchase_id=${g.id}" target="_blank" rel="noopener"
+           style="text-align:center;text-decoration:none;padding:14px">Carton labels</a>
+        <button class="btn" id="done">Done</button>
+      </div>
+    </div>`;
+  const back=()=>{ S.postResult=null; S.screen='grn'; render(); };
+  document.getElementById('back').onclick=back;
+  document.getElementById('done').onclick=back;
+  // detail an item where you are standing, with it in your hands — the list is
+  // exactly the items this receipt created, and it ticks over as they are done
+  app.querySelectorAll('[data-item]').forEach(row=>row.onclick=()=>openItemDetail(items[+row.dataset.item].id));
+}
+
+async function openItemDetail(productId, back){
+  if(!productId) return;
+  try{
+    S.selected=await api('/api/inventory/products/'+productId);
+    S.detailBack=back||'grnposted';     // back where it was opened from, not Products
+    S.screen='detail'; render();
+  }catch(e){ toast('Could not open that item: '+e.message); }
+}
+
+// ---------- bundles: the carton, its label, and the tags that come later ----------
+// Two labels, two moments. The CARTON label is printed at GRN and answers "which
+// box is this and where does it live" — that is this screen's first half: scan it,
+// put it away, find it again. The GARMENT tags are printed here too, but only at
+// the end, when the box has been opened and every item inside has been detailed.
+// Tagging 50 loose garments at GRN — before anyone has looked at them, and before
+// they sit in a carton for a fortnight — is the work this ordering avoids.
+async function renderBundles(){
+  app.innerHTML=`<div class="topbar"><h1>Bundles</h1><span class="count" id="bcnt"></span><button class="link" id="lo4">Logout</button></div>
+    <div class="controls">
+      ${tabs('bundles')}
+      <div class="row">
+        <input id="bcode" placeholder="Scan / type a bundle code…" autocapitalize="characters" enterkeyhint="go">
+        <button class="btn" style="width:auto;padding:12px 14px" id="bscan" title="Scan the carton label">⛶</button>
+        <button class="btn" style="width:auto;padding:12px 18px" id="bgo">Go</button>
+      </div>
+      <div class="row" style="overflow:auto">
+        ${['stored','opened','tagged','all'].map(f=>`<div class="chip ${S.bundleFilter===f?'on':''}" data-bf="${f}">${f}</div>`).join('')}
+        <div class="chip" id="brefresh" style="margin-left:auto">↻</div>
+      </div>
+      <div class="hint">Scan a carton to put it away, find what's inside, or open it and tag its items</div>
+    </div>
+    <div class="list" id="blist"><div class="spin"></div></div>`;
+  document.getElementById('lo4').onclick=logout;
+  document.getElementById('brefresh').onclick=paintBundles;
+  document.getElementById('bgo').onclick=()=>lookupBundle(document.getElementById('bcode').value);
+  document.getElementById('bscan').onclick=()=>openScanner(lookupBundle);
+  document.getElementById('bcode').addEventListener('keydown',e=>{ if(e.key==='Enter') lookupBundle(e.target.value); });
+  app.querySelectorAll('.chip[data-bf]').forEach(c=>c.onclick=()=>{ S.bundleFilter=c.dataset.bf; paintBundles(); });
+  wireTabs();
+  paintBundles();
+}
+
+async function lookupBundle(code){
+  const c=(code||'').trim(); if(!c) return;
+  try{ S.bundle=await api('/api/bundles/lookup?code='+encodeURIComponent(c)); S.screen='bundle'; render(); }
+  catch(e){ toast('No bundle for that code'); }
+}
+
+async function paintBundles(){
+  const el=document.getElementById('blist'); if(el) el.innerHTML='<div class="spin"></div>';
+  const f=S.bundleFilter==='all'?'':S.bundleFilter;
+  try{ S.bundles=await api('/api/bundles'+(f?'?status='+f:'')); }
+  catch(e){ S.bundles=[]; toast('Could not load bundles'); }
+  const cnt=document.getElementById('bcnt'); if(cnt) cnt.textContent=S.bundles.length+' shown';
+  const list=document.getElementById('blist'); if(!list) return;
+  if(!S.bundles.length){
+    list.innerHTML=`<p style="color:var(--muted);text-align:center;margin-top:30px;line-height:1.5">${
+      S.bundleFilter==='stored'?'No cartons in store. They appear here the moment a GRN is posted.':'No bundles.'}</p>`;
+    return;
+  }
+  list.innerHTML=S.bundles.map((b,i)=>`<div class="prow" data-i="${i}">
+      <img src="/api/bundles/${b.id}/qr.svg?scale=2" alt="QR ${esc(b.code)}"
+           style="width:48px;height:48px;background:#fff;border-radius:6px;padding:2px;flex:0 0 auto">
+      <div style="flex:1;min-width:0">
+        <div class="t">${esc(b.description||'(unnamed)')}</div>
+        <div class="m">${esc(b.code)} · ${b.qty!=null?b.qty:'—'} ${esc(b.uom||'')} · ${b.item_count} item${b.item_count===1?'':'s'}</div>
+        <div class="m">${b.location?'📍 '+esc(b.location):'<span style="color:var(--warn)">not put away</span>'} · GRN ${esc(b.grn_no||'—')}</div>
+      </div>
+      <div class="badge ${b.status==='tagged'?'bdone':'bpend'}">${esc(b.status)}</div>
+    </div>`).join('');
+  list.querySelectorAll('.prow').forEach(r=>r.onclick=()=>openBundle(S.bundles[+r.dataset.i].id));
+}
+
+async function openBundle(id){
+  try{ S.bundle=await api('/api/bundles/'+id); S.screen='bundle'; render(); }
+  catch(e){ toast('Could not open that bundle: '+e.message); }
+}
+async function reloadBundle(){ if(S.bundle) S.bundle=await api('/api/bundles/'+S.bundle.id); }
+
+function renderBundle(){
+  const b=S.bundle; if(!b){ S.screen='bundles'; return render(); }
+  const pending=b.items_pending_detail||0;
+  const mix=(b.mix||[]).map(m=>`${m.qty!=null?m.qty:''} ${esc(m.label||'—')}`).join(' · ');
+  app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ Bundles</button>
+      <h1>${esc(b.code)}</h1><div class="badge ${b.status==='tagged'?'bdone':'bpend'}">${esc(b.status)}</div></div>
+    <div class="list" style="padding-top:12px">
+      <div class="prow" style="align-items:flex-start">
+        <img src="/api/bundles/${b.id}/qr.svg?scale=3" alt="QR"
+             style="width:84px;height:84px;background:#fff;border-radius:6px;padding:3px;flex:0 0 auto">
+        <div style="flex:1;min-width:0">
+          <div class="t">${esc(b.description||'(unnamed)')}</div>
+          <div class="m">${b.qty!=null?b.qty:'—'} ${esc(b.uom||'')} · ${b.item_count} item${b.item_count===1?'':'s'}</div>
+          ${mix?`<div class="m">${mix}</div>`:''}
+          <div class="m">GRN ${esc(b.grn_no||'—')} · Inv ${esc(b.invoice_number||'—')}</div>
+          <div class="m">${esc(b.supplier_name||'')}</div>
+        </div>
+      </div>
+
+      <div class="prow" style="display:block">
+        <label>Where is it? (rack / bin)</label>
+        <div class="row">
+          <input id="loc" list="locs" value="${esc(b.location||'')}" placeholder="e.g. RACK A3" autocapitalize="characters">
+          <button class="btn" style="width:auto;padding:12px 16px" id="putaway">${b.location?'Move':'Put away'}</button>
+        </div>
+        <datalist id="locs">${(S.locations||[]).map(l=>`<option value="${esc(l)}"></option>`).join('')}</datalist>
+        <div class="hint">${b.location
+          ? 'Put away'+(b.located_by?' by '+esc(b.located_by):'')+' — scan the carton and change this to move it.'
+          : 'The carton label is for exactly this: scan it, then say where it went.'}</div>
+      </div>
+
+      <div class="prow" style="display:block">
+        <div class="t">Inside this carton</div>
+        <div class="m" style="margin-bottom:8px">${pending
+          ? `${pending} of ${b.items.length} still to detail — tap one to record size, colour, fit and pricing.`
+          : `All ${b.items.length} detailed ✓ — ready to tag.`}</div>
+        ${(b.items||[]).map((it,i)=>`<div class="row" data-item="${i}"
+            style="align-items:center;gap:10px;border-top:1px solid var(--line);padding:9px 0">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:600">${esc([it.size,it.color,it.material].filter(Boolean).join(' · ')||it.description||'—')}</div>
+              <div class="m">${esc(it.sku||'—')} · stock ${it.stock_qty}${it.mrp?' · MRP '+money(it.mrp):''}</div>
+            </div>
+            <div class="badge ${it.detailed?'bdone':'bpend'}">${it.detailed?'detailed':'to detail'}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="actionbar">
+      <div class="m" style="margin-bottom:8px">${b.status==='tagged'
+        ? 'Tagged'+(b.tagged_by?' by '+esc(b.tagged_by):'')+' — every item carries its own label now.'
+        : pending ? 'Garment tags print once every item has been detailed — that is what the second label is for.'
+        : 'Tag the items: prints one garment label each and closes the carton off.'}</div>
+      <div class="row" style="gap:8px">
+        <a class="btn sec" href="/api/bundles/${b.id}/label" target="_blank" rel="noopener"
+           style="text-align:center;text-decoration:none;padding:14px">Carton label</a>
+        ${b.status==='tagged'
+          ? `<a class="btn" href="/api/bundles/${b.id}/item-labels" target="_blank" rel="noopener"
+               style="text-align:center;text-decoration:none;padding:14px">Reprint tags</a>`
+          : `<button class="btn" id="tagit"${pending?' disabled':''}>Tag &amp; print</button>`}
+      </div>
+    </div>`;
+  document.getElementById('back').onclick=()=>{ S.screen='bundles'; render(); };
+  document.getElementById('putaway').onclick=async ()=>{
+    const loc=document.getElementById('loc').value.trim();
+    if(!loc){ toast('Enter where it went'); return; }
+    try{
+      await api(`/api/bundles/${b.id}/locate`,{method:'POST',
+        body:JSON.stringify({location:loc,located_by:S.employee||'mobile'})});
+      await loadLocations(); await reloadBundle(); render(); toast('✓ '+loc);
+    }catch(e){ toast(e.message); }
+  };
+  app.querySelectorAll('[data-item]').forEach(row=>row.onclick=()=>{
+    // opening the box is what detailing its contents means, so record it
+    if(b.status==='stored') api(`/api/bundles/${b.id}/open`,{method:'POST'}).catch(()=>{});
+    openItemDetail(b.items[+row.dataset.item].id, 'bundle');
+  });
+  const t=document.getElementById('tagit');
+  if(t) t.onclick=async ()=>{
+    try{
+      const r=await api(`/api/bundles/${b.id}/tag`,{method:'POST',
+        body:JSON.stringify({tagged_by:S.employee||'mobile'})});
+      await reloadBundle(); render();
+      toast(`✓ Tagged · ${r.label_ids.length} garment label(s)`);
+      window.open(`/api/bundles/${b.id}/item-labels`,'_blank');
+    }catch(e){ toast(e.message); }
+  };
+}
+
+async function loadLocations(){ try{ S.locations=await api('/api/bundles/locations'); }catch(e){ S.locations=[]; } }
 
 // ---------- consignments: take the packages in as they arrive ----------
 // The desktop reads the LR register off the page, but only the person on the dock
@@ -335,11 +920,11 @@ function renderLRDetail(){
     ['Supplier', r.supplier_name], ['Transport', r.transport],
     ['LR No', r.lr_no], ['LR date', r.lr_date], ['Received date', r.recv_date],
     ['Bundles', r.bundle], ['Quantity', r.qty!=null?(r.qty+' pcs'):''],
-    ['Item', r.item], ['Invoice No', r.inv_no], ['Invoice date', r.inv_date],
+    ['Boxes', r.boxes], ['Item', r.item],
+    ['Invoice No', r.inv_no], ['Invoice date', r.inv_date],
     ['Invoice amount', r.amount!=null?('₹ '+money(r.amount)):''],
     ['Paid / ToPay', r.paid_topay],
     ['Freight', r.freight_amount!=null?('₹ '+money(r.freight_amount)):''],
-    ['Cash / Cheque', r.cash_cheque],
   ].filter(([,v])=>v!==null&&v!==''&&v!==undefined);
   const line=([k,v])=>`<div style="display:flex;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid var(--line)">
       <span style="color:var(--muted);font-size:13px">${esc(k)}</span>
@@ -392,13 +977,13 @@ async function loadReceivers(){
 function renderDetail(){
   const p=S.selected;
   const f={color:p.color||'',size:p.size||'',pattern:p.pattern||'',fit:p.fit||'',product_type:p.product_type||'',material:p.material||'',
-    design_no:p.design_no||'',mrp:p.mrp??'',sale_price:p.sale_price??'',margin_pct:p.margin_pct??''};
+    design_no:p.design_no||'',mrp:p.mrp??'',sale_price:p.sale_price??'',sale_discount_pct:p.sale_discount_pct??''};
   const selRow=(key,label)=>`<div class="field"><label>${label}</label>
     <button class="selbtn ${f[key]?'':'empty'}" data-sel="${key}">${esc(f[key]||'Select…')}</button></div>`;
   app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ Back</button><h1></h1></div>
     <div class="detwrap">
       <div class="detname">${esc(p.description)}</div>
-      <div class="detmeta">${esc(p.sku)}${p.barcode?' · '+esc(p.barcode):''} · HSN ${esc(p.hsn||'—')} · stock ${p.stock_qty} ${esc(p.uom||'')}</div>
+      <div class="detmeta">${esc(p.sku)} · HSN ${esc(p.hsn||'—')} · stock ${p.stock_qty} ${esc(p.uom||'')}</div>
       <div class="detmeta">from ${esc(p.supplier_name||'—')} · cost ₹${money(p.avg_cost)}</div>
       <div class="detmeta">${p.category
         ? 'category <b>'+esc(p.category)+'</b>'+(p.category_section?' ('+esc(p.category_section)+')':'')
@@ -410,41 +995,67 @@ function renderDetail(){
       <div class="row">
         <div class="field" style="flex:1"><label>MRP</label><input id="mrp" inputmode="decimal" value="${esc(f.mrp)}"></div>
         <div class="field" style="flex:1"><label>Sale price</label><input id="sale_price" inputmode="decimal" value="${esc(f.sale_price)}"></div>
-        <div class="field" style="flex:1"><label>Margin %</label><input id="margin_pct" inputmode="decimal" value="${esc(f.margin_pct)}"></div>
+        <div class="field" style="flex:1"><label>Discount %</label><input id="sale_discount_pct" inputmode="decimal" value="${esc(f.sale_discount_pct)}"></div>
       </div>
       ${p.detailed?`<div class="hint" style="color:var(--ok)">Already detailed by ${esc(p.detailed_by||'—')}. Saving updates it.</div>`:''}
       <button class="btn" id="save" style="margin-top:8px">Save details</button>
       <div style="height:30px"></div>
     </div>`;
-  document.getElementById('back').onclick=()=>{ S.screen='list'; render(); };
+  // back to whichever list opened this: the Products tab, or the receipt's
+  // item list when detailing what a GRN just created
+  document.getElementById('back').onclick=()=>{ S.screen=S.detailBack||'list'; render(); };
   app.querySelectorAll('[data-sel]').forEach(b=>b.onclick=()=>openSheet(b.dataset.sel,f,b));
   document.getElementById('save').onclick=async ()=>{
     const num=v=>v===''||v==null?null:Number(v);
     const body={color:f.color,size:f.size,pattern:f.pattern,fit:f.fit,product_type:f.product_type,material:f.material,
       design_no:document.getElementById('design_no').value,
       mrp:num(document.getElementById('mrp').value),sale_price:num(document.getElementById('sale_price').value),
-      margin_pct:num(document.getElementById('margin_pct').value),detailed_by:S.employee||'mobile'};
+      sale_discount_pct:num(document.getElementById('sale_discount_pct').value),detailed_by:S.employee||'mobile'};
     document.getElementById('save').disabled=true;
     try{ await api(`/api/inventory/products/${p.id}/detail`,{method:'POST',body:JSON.stringify(body)});
-      toast('✓ Saved'); S.screen='list'; render(); }
+      toast('✓ Saved · QR confirmed');
+      // re-read the receipt so the item ticks over to "detailed"
+      if(S.detailBack==='grnposted'&&S.grn){ try{ await reloadGrn(); }catch(e){} }
+      if(S.detailBack==='bundle'&&S.bundle){ try{ await reloadBundle(); }catch(e){} }
+      S.screen=S.detailBack||'list'; render(); }
     catch(e){ toast('Save failed: '+e.message); document.getElementById('save').disabled=false; }
   };
 }
 
 function openSheet(key,f,btn){
-  const opts=(S.options[key]||[]).slice();
+  pickSheet(key.replace('_',' '), S.options[key]||[], f[key], (v)=>{
+    f[key]=v; btn.textContent=v||'Select…'; btn.classList.toggle('empty',!v);
+  });
+}
+
+// One box, two jobs: it filters the list as you type and it is also how a value
+// that isn't in the list gets used. The category master runs to hundreds of
+// names — scrolling that on a phone is not a thing anyone does twice.
+function pickSheet(title, options, current, onPick, allowClear){
+  const opts=(options||[]).slice();
   const sh=document.createElement('div'); sh.className='sheet';
   sh.innerHTML=`<div class="sheetcard">
-    <div class="sheethd"><span>${key.replace('_',' ')}</span><button class="link" id="x">×</button></div>
-    <div class="row" style="padding:10px 12px;gap:8px"><input id="cst" placeholder="Type a custom value…"><button class="btn" style="width:auto;padding:12px 16px" id="use">Use</button></div>
-    <div style="overflow:auto">${opts.map(o=>`<div class="opt ${o===f[key]?'sel':''}" data-o="${esc(o)}">${esc(o)}</div>`).join('')}</div>
+    <div class="sheethd"><span>${esc(title)}</span><button class="link" id="x">×</button></div>
+    <div class="row" style="padding:10px 12px;gap:8px"><input id="cst" placeholder="Type to search, or enter your own…"><button class="btn" style="width:auto;padding:12px 16px" id="use">Use</button></div>
+    ${allowClear&&current?`<div class="opt" id="clr" style="color:var(--muted)">— clear —</div>`:''}
+    <div style="overflow:auto" id="opts"></div>
   </div>`;
   document.body.appendChild(sh);
-  const pick=(v)=>{ f[key]=v; btn.textContent=v; btn.classList.remove('empty'); sh.remove(); };
+  const pick=(v)=>{ sh.remove(); onPick(v); };
+  const paintOpts=(q)=>{
+    const t=(q||'').trim().toLowerCase();
+    const shown=t?opts.filter(o=>String(o).toLowerCase().includes(t)):opts;
+    sh.querySelector('#opts').innerHTML = shown.length
+      ? shown.map(o=>`<div class="opt ${o===current?'sel':''}" data-o="${esc(o)}">${esc(o)}</div>`).join('')
+      : `<p style="color:var(--muted);padding:16px;font-size:14px">Nothing matches — tap Use to enter it anyway.</p>`;
+    sh.querySelectorAll('.opt[data-o]').forEach(o=>o.onclick=()=>pick(o.dataset.o));
+  };
+  paintOpts('');
   sh.querySelector('#x').onclick=()=>sh.remove();
   sh.onclick=(e)=>{ if(e.target===sh) sh.remove(); };
+  const clr=sh.querySelector('#clr'); if(clr) clr.onclick=()=>pick('');
+  sh.querySelector('#cst').addEventListener('input',e=>paintOpts(e.target.value));
   sh.querySelector('#use').onclick=()=>{ const v=sh.querySelector('#cst').value.trim(); if(v) pick(v); };
-  sh.querySelectorAll('.opt').forEach(o=>o.onclick=()=>pick(o.dataset.o));
 }
 </script>
 </body>

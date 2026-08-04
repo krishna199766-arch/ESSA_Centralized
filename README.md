@@ -18,6 +18,13 @@ Invoice Entry, Inventory Entry and Stock Inward in the reference application.
 **Modules built so far** (tabs across the top):
 
 - **Documents** — intake: image/PDF → canonical invoice, trained per supplier.
+- **LR Entry** — the transport register. Photograph a register page and vision
+  reads every row, or press **New entry** and key one consignment in on a form
+  that carries the Transport Entry field set Essa actually uses (mode, agent and
+  commission, purchase manager, auto-transfer, stock holding period, additional
+  margin, bundles/boxes/pieces, goods value, freight, item, attachments).
+  **Search** filters the register and totals what it finds. Rows cross-link to
+  their invoice automatically.
 - **Purchases / GRN** — confirmed invoice → GRN → inventory (weighted-avg cost).
 - **Inventory** — stock master with per-product **edit** and **stock
   adjustment** (physical-count correction), plus a movement ledger.
@@ -31,18 +38,62 @@ Invoice Entry, Inventory Entry and Stock Inward in the reference application.
   Register, Supplier Pending Bills, Payments Register, and Product / Supplier /
   Tax masters — each with CSV export.
 - **Suppliers** — suppliers and their learned formats.
+- **Masters** — product categories, agents, transporters, and the dropdown lists
+  the LR Entry form uses (purchase managers; plus the fixed LR mode, transfer
+  location and attachment-type vocabularies).
 
-There is also a **phone app** for the warehouse team, with the two jobs that
-belong on the floor rather than at a desk:
+There is also a **phone app** for the warehouse team, with the three jobs that
+belong on the floor rather than at a desk, in the order the goods move:
 
 - **Consignments** — take each arriving consignment in. The register is read off
   the page on the desktop, but only the person on the dock knows who actually took
   the packages, so **Received by** is recorded *here* and nowhere else: tap a
   pending consignment and it is stamped with your name. The desktop LR Entry shows
   it read-only.
+- **Receive** — open a goods receipt and **break each billed bundle into the sizes
+  that actually arrived**. The supplier bills "WOMEN'S T-SHIRT, 50 PCS" and never
+  prints the mix; only the person opening the cartons knows it. Tap a size chip,
+  type the quantity (or **rest** for the remaining balance), open a row for colour /
+  material / pattern / fit / type / design no / category and per-size pricing.
+  **Post to inventory** then creates **one product per size, each with its own SKU
+  and QR code**, its own inward stock movement and its own weighted-average cost.
+  The bundle line is marked **split** and never becomes stock itself. A breakdown
+  that doesn't add up to the billed quantity saves but refuses to post, so units
+  can't be quietly lost or invented. Correcting a posted GRN is still a desk job
+  (unpost checks payments, debit notes and dispatches first).
+
+  Posting also gives every line a **carton label** (`ESSA-B-00001`) — printed there
+  and then, because the goods are on the floor and have to go on a rack. See
+  **Bundles** below.
+
+  And it gives every *piece* its own code. A split row of 8 becomes **one inventory
+  record** (`ESSA-00008`, qty 8) with **8 unique child QRs** beneath it —
+  `ESSA-00008-001 … -008`, all linked to that one SKU. In **Inventory**, click the
+  quantity to see all 8, each with **View / Print / Reprint**. Scanning any child
+  code resolves to the product, so it works anywhere a SKU code does, while the
+  code itself says *which* of the eight it is. Goods measured rather than counted
+  (fabric by the metre) get no piece codes, and the screen says why.
+
+  The receipt then becomes a **detailing worklist** — *"4 of 4 still to detail"*.
+  Tap an item to record what the invoice couldn't say (fit, pattern, material, MRP,
+  sale price) with its QR on screen to check against the label in your hand; saving
+  ticks it over to **detailed** and fills out its QR payload. The code itself is
+  issued at post and never changes, so nothing sits in stock unscannable — detailing
+  enriches the existing code rather than minting a second one.
+- **Bundles** — the cartons, and the **two labels** an item can carry. A **carton
+  label** is printed the moment a GRN posts and answers *which box is this, what's
+  in it, where does it live*: scan it, record the rack it went on, find it again,
+  move it. Later, when the box is opened for packing or retail, detail its items
+  and hit **Tag & print** — that is when the **individual garment tags** come out,
+  one per item, carrying size, colour, category, SKU and MRP. Tagging is refused
+  while any item is still undetailed, because the whole point of waiting is that by
+  then the tag can carry what someone actually saw. A carton is a *handling* unit,
+  never a stock row — the pieces inside are already counted as the items they
+  became, so nothing is double-counted, and the two code types are distinct enough
+  that scanning a box where a garment is expected fails loudly.
 - **Products** — physically **detail each product** that arrived from an invoice:
   pick a product (search or barcode/QR scan), record Color / Size / Pattern / Fit /
-  Type / Material / Design No / MRP / Sale price / Margin %, and save to the same
+  Type / Material / Design No / MRP / Sale price / Discount %, and save to the same
   database. Attributes already set on the GRN arrive pre-filled, so only what the
   invoice couldn't say needs typing. The desktop Inventory tab shows what was
   detailed and by whom.
@@ -268,7 +319,7 @@ item, across:
 
 | Identity (what makes it a distinct product) | Classification | Price (per row) |
 |---|---|---|
-| Size · Colour · Material · Pattern · Fit · Type · Design No | Category | Qty · Rate · MRP · Sale price · Margin % |
+| Size · Colour · Material · Pattern · Fit · Type · Design No | Category | Qty · Rate · MRP · Sale price · Discount % |
 
 **Category** is set on the GRN — on the line, or per breakdown row — so products are
 created already mapped to the category master instead of arriving *unmapped* for
@@ -279,6 +330,20 @@ auto-classification, and a blank one still falls back to it. Breakdown rows
 inherit the line's category, so the common case — one category, several sizes —
 needs no repetition.
 
+That mapping is what keeps **one** product master across every supplier. Suppliers
+name the same garment differently — *Women's T-Shirt*, *Ladies Tee*, *Female
+T-Shirt*, *Women's Tee* — and all of them classify to the single internal category
+**LADIES-T-SHIRT**, so there is one record, one QR, one stock figure and one line in
+every report instead of four near-duplicates. The engine is rule-based and offline
+(no model call, no per-line cost, same answer every time), and it **learns**: the
+moment someone sets a category by hand, that wording is remembered and maps itself
+on the next invoice — shown as `use LADIES-T-SHIRT · learned`. One correction covers
+every spelling that reduces to the same thing, so teaching it "Ladies Tee" also
+teaches "Women's Tee" and "LADIES TEE 3PC". When a description matches nothing
+confidently it is left for a human rather than filed somewhere plausible; see
+[ARCHITECTURE.md](ARCHITECTURE.md) §7a for how confidence is decided and what the
+rules were measured to cost.
+
 Fill only the attributes that actually differ — 50 S / 50 M / 70 L needs the Size
 column alone; a bundle mixing cotton and rayon in each size uses Size + Material.
 **⧉ duplicate last** copies the previous row's attributes so you change just what
@@ -287,8 +352,8 @@ the GRN **cannot post** until the rows add up — otherwise stock would silently
 gain or lose units.
 
 Posting turns that one billed line into **one product per distinct combination**,
-each with its own `ESSA-#####` SKU and its own internal EAN-13 (so the QR label
-prints immediately — the supplier never printed a code for "L / Red" on its own),
+each with its own `ESSA-#####` SKU, which is the code its QR label carries (the
+supplier never printed a code for "L / Red" on its own),
 each with its own inward movement and weighted-average cost. From then on a single
 variant can be priced, scanned, dispatched and returned on its own. The QR carries
 the whole attribute record, so one phone scan returns everything about the item.
@@ -380,9 +445,13 @@ for production), `ESSA_COMPANY_GSTIN`, `ESSA_COMPANY_NAME`.
 | PATCH | `/api/purchases/lines/{id}` | set the line's category master mapping |
 | POST | `/api/purchases/lines/{id}/scan` | pin a line / variant to a product by QR, barcode or SKU |
 | POST | `/api/lr/extract` · `/api/lr/save` | read an LR register page → rows → save |
+| POST | `/api/lr` | key in ONE consignment (the LR Entry form's Save / Save&Next) |
 | GET | `/api/lr?received=pending\|received\|all` | LR register (linked invoice + conflicts flagged) |
-| PATCH | `/api/lr/{id}` | freight settlement: Paid/ToPay, freight amount, cash/cheque |
+| GET | `/api/lr/search?q=&supplier=&transport=&date_from=…` | filter the register; returns matching rows + their totals |
+| GET · PATCH · DELETE | `/api/lr/{id}` | one entry: read, edit any field, or remove (blocked once invoice-linked) |
+| POST · DELETE | `/api/lr/{id}/attachments` · `/api/lr/attachments/{id}` | files kept against a consignment (LR copy, weight slip, photo) |
 | POST | `/api/lr/{id}/receive` | who took the consignment in — sent by the phone app |
+| GET · POST · DELETE | `/api/masters/options` | the keyed dropdown lists (purchase manager, LR mode, transfer location, attachment type) |
 | GET | `/api/inventory/summary` | product count, units, stock valuation |
 | GET | `/api/inventory/products` · `/products/{id}` | stock master + movement ledger |
 | POST | `/api/inventory/products/{id}/detail` | phone app: physical attributes + prices |

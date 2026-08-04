@@ -1,6 +1,7 @@
 import os
 import hashlib
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
@@ -13,18 +14,93 @@ from ..services import masters as masters_svc
 
 router = APIRouter(prefix="/api/lr", tags=["lr-entry"])
 
+# Every column an LR entry accepts from a client, whichever route it came in by.
+# One list so the import path and the manual form can never drift apart — a
+# column added to the model is added here and both routes carry it.
+WRITABLE = [
+    "lr_mode", "lr_no", "lr_date", "recv_date", "lr_entry_date",
+    "supplier_name", "agent", "agent_commission", "transport",
+    "auto_transfer_location", "purchase_manager",
+    "stock_holding_days", "additional_margin",
+    "bundle", "boxes", "qty", "amount",
+    "inv_no", "inv_date",
+    "paid_topay", "freight_applicable", "freight_amount", "item",
+]
+_NUMERIC = {"agent_commission", "stock_holding_days", "additional_margin",
+            "bundle", "boxes", "qty", "amount", "freight_amount"}
+_BOOLEAN = {"freight_applicable"}
+
+# Marked * on the Transport Entry form. Enforced on MANUAL entry only: a
+# register page carries none of Company/Agent, so holding an import to the same
+# bar would reject perfectly good rows read off a real page.
+REQUIRED_MANUAL = [
+    ("lr_mode", "LR Mode"), ("lr_no", "LR No"),
+    ("lr_date", "LR Date"), ("supplier_name", "Supplier"),
+    ("agent", "Agent/Commission"), ("lr_entry_date", "LR Entry Date"),
+    ("bundle", "No Of Bundles"), ("boxes", "No Of Boxes"), ("qty", "No Of Pieces"),
+]
+
+# lists that learn from what is typed on the form (see masters.OPEN_OPTIONS)
+_LEARNS = {"purchase_manager": "purchase_manager"}
+
+
+def _coerce(field, value):
+    """Blank → None; numeric columns → float; checkbox columns → bool.
+
+    Everything arrives as a string from a form, and a blank numeric must become
+    NULL rather than 0 — "no weight recorded" and "weighed nil" are different."""
+    if value is None:
+        return None
+    if field in _BOOLEAN:
+        return value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
+    if isinstance(value, str):
+        value = value.strip()
+    if value == "":
+        return None
+    if field in _NUMERIC:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    return value
+
+
+def _apply(entry, data, db, fields=WRITABLE):
+    """Write the given fields onto an entry and let the open masters learn."""
+    for f in fields:
+        if f in data:
+            setattr(entry, f, _coerce(f, data[f]))
+    # An amount arriving without its checkbox means the charge applies — a
+    # register page carries the figure and no tick, and so does a PATCH that
+    # settles the freight from the grid. Without this the form would show the
+    # amount greyed out behind an unticked box that contradicts it.
+    if "freight_amount" in data and "freight_applicable" not in data:
+        entry.freight_applicable = entry.freight_amount is not None
+    for field, kind in _LEARNS.items():
+        if data.get(field):
+            masters_svc.get_or_create_option(db, kind, str(data[field]).strip())
+    if data.get("agent"):
+        masters_svc.get_or_create_agent(db, str(data["agent"]).strip())
+    if data.get("transport"):
+        masters_svc.get_or_create_transport(db, str(data["transport"]).strip())
+
 
 class SaveLR(BaseModel):
     document_id: Optional[int] = None
     rows: List[Dict[str, Any]]
 
 
-class SettleFreight(BaseModel):
-    """Freight settlement, corrected or completed when the lorry actually
-    delivers — mode and amount."""
-    paid_topay: Optional[str] = None          # TOPAY | PAID | NO
-    freight_amount: Optional[float] = None
-    cash_cheque: Optional[str] = None         # CASH | CHEQUE | NO
+class LRIn(BaseModel):
+    """One consignment keyed in on the LR Entry form. Every field is optional
+    here and checked against REQUIRED_MANUAL in the handler, so the response can
+    name all the missing boxes at once instead of failing on the first."""
+    model_config = {"extra": "allow"}
+
+
+class LRUpdate(BaseModel):
+    """A partial edit. Only the fields actually sent are touched, so correcting
+    the freight on a row never disturbs what was read off the register."""
+    model_config = {"extra": "allow"}
 
 
 class ReceiveConsignment(BaseModel):
@@ -66,6 +142,7 @@ def save(body: SaveLR, db: Session = Depends(get_db)):
     skipped = 0
     existing = lr_link._index_existing(db)
     seen = {}
+    issued = []                       # entry numbers handed out in this batch
     for r in body.rows:
         if not any(r.get(k) for k in ("lr_no", "supplier_name", "inv_no")):
             continue
@@ -76,18 +153,16 @@ def save(body: SaveLR, db: Session = Depends(get_db)):
                 skipped += 1
                 continue
             seen.setdefault(key, []).append(r)
-        db.add(models.LREntry(
-            document_id=body.document_id,
-            recv_date=r.get("recv_date"), transport=r.get("transport"),
-            bundle=r.get("bundle"), lr_no=r.get("lr_no"), lr_date=r.get("lr_date"),
-            supplier_name=r.get("supplier_name"), inv_no=r.get("inv_no"),
-            inv_date=r.get("inv_date"), qty=r.get("qty"), amount=r.get("amount"),
-            paid_topay=r.get("paid_topay"), freight_amount=r.get("freight_amount"),
-            cash_cheque=r.get("cash_cheque"),
-            item=r.get("item")))
+        entry = models.LREntry(document_id=body.document_id, entry_source="import")
+        _apply(entry, r, db)
+        entry.lr_entry_no = lr_svc.next_entry_no(db, issued)
+        issued.append(entry.lr_entry_no)
+        # the office books the entry the day the page is imported; the register's
+        # own dates (lr_date, recv_date) are what the consignment actually did
+        entry.lr_entry_date = entry.lr_entry_date or _today()
+        db.add(entry)
         # received_by is intentionally not taken from the imported page — the
         # warehouse sets it from the phone app when the goods actually arrive
-        masters_svc.get_or_create_transport(db, r.get("transport"))
         # register the supplier name in the supplier master if unseen
         name = (r.get("supplier_name") or "").strip()
         if name and not db.query(models.Supplier).filter(models.Supplier.name == name).first():
@@ -97,15 +172,96 @@ def save(body: SaveLR, db: Session = Depends(get_db)):
     return {"ok": True, "saved": saved, "skipped_duplicates": skipped}
 
 
+def _today():
+    import datetime as dt
+    return dt.date.today().isoformat()
+
+
+@router.post("")
+def create(body: LRIn, db: Session = Depends(get_db)):
+    """Key in ONE consignment — the LR Entry form's Save / Save&Next.
+
+    The import path is still the fast way in; this exists for the consignment
+    that turns up with no register page to photograph, and for correcting one
+    that did. Duplicates are reported, not blocked: a human typing a row they
+    can see in front of them outranks a fingerprint match, so the response says
+    what it collided with and lets the form warn."""
+    data = body.model_dump()
+    missing = [label for f, label in REQUIRED_MANUAL if _coerce(f, data.get(f)) is None]
+    if missing:
+        raise HTTPException(400, "Required: " + ", ".join(missing))
+
+    entry = models.LREntry(entry_source="manual")
+    _apply(entry, data, db)
+    entry.lr_entry_no = lr_svc.next_entry_no(db)
+    entry.lr_entry_date = entry.lr_entry_date or _today()
+    db.add(entry)
+
+    name = (entry.supplier_name or "").strip()
+    if name and not db.query(models.Supplier).filter(models.Supplier.name == name).first():
+        db.add(models.Supplier(name=name))
+
+    key = lr_link.dup_key(data)
+    clash = lr_link._index_existing(db).get(key, []) if key else []
+    db.commit()
+    db.refresh(entry)
+    return {**_row_out(entry),
+            "duplicate_of": [e.id for e in clash if e.id != entry.id] or None}
+
+
+def _att_out(a: models.LRAttachment):
+    return {"id": a.id, "doc_type": a.doc_type, "filename": a.filename,
+            "mime": a.mime, "url": f"/api/lr/attachments/{a.id}/file"}
+
+
 def _row_out(e: models.LREntry):
-    return {"id": e.id, "recv_date": e.recv_date, "transport": e.transport,
-            "bundle": e.bundle, "lr_no": e.lr_no, "lr_date": e.lr_date,
-            "supplier_name": e.supplier_name, "inv_no": e.inv_no, "inv_date": e.inv_date,
-            "qty": e.qty, "amount": e.amount, "paid_topay": e.paid_topay,
-            "freight_amount": e.freight_amount, "cash_cheque": e.cash_cheque,
-            "item": e.item, "received_by": e.received_by,
-            "matched": bool(e.matched), "invoice_document_id": e.invoice_document_id,
-            "mismatches": e.mismatches or []}
+    out = {f: getattr(e, f) for f in WRITABLE}
+    out.update({
+        "id": e.id, "lr_entry_no": e.lr_entry_no, "entry_source": e.entry_source,
+        "document_id": e.document_id, "received_by": e.received_by,
+        "matched": bool(e.matched), "invoice_document_id": e.invoice_document_id,
+        "mismatches": e.mismatches or [],
+        "freight_applicable": bool(e.freight_applicable),
+        "attachments": [_att_out(a) for a in e.attachments],
+    })
+    return out
+
+
+def _filtered(db, received="all", q="", supplier="", transport="",
+              status="all", date_from="", date_to=""):
+    """The register narrowed by the Search panel's filters.
+
+    Dates compare as strings because every date in this system is stored as
+    ISO YYYY-MM-DD, where lexical order IS chronological order."""
+    query = db.query(models.LREntry)
+    if received == "pending":
+        query = query.filter((models.LREntry.received_by == None)   # noqa: E711
+                             | (models.LREntry.received_by == ""))
+    elif received == "received":
+        query = query.filter(models.LREntry.received_by != None,    # noqa: E711
+                             models.LREntry.received_by != "")
+    if status == "linked":
+        query = query.filter(models.LREntry.matched == True)        # noqa: E712
+    elif status == "unlinked":
+        query = query.filter((models.LREntry.matched == False)      # noqa: E712
+                             | (models.LREntry.matched == None))    # noqa: E711
+    for col, val in ((models.LREntry.supplier_name, supplier),
+                     (models.LREntry.transport, transport)):
+        if val:
+            query = query.filter(col.ilike(f"%{val}%"))
+    if date_from:
+        query = query.filter(models.LREntry.recv_date >= date_from)
+    if date_to:
+        query = query.filter(models.LREntry.recv_date <= date_to)
+    if q:
+        like = f"%{q}%"
+        query = query.filter(
+            models.LREntry.lr_no.ilike(like)
+            | models.LREntry.inv_no.ilike(like)
+            | models.LREntry.lr_entry_no.ilike(like)
+            | models.LREntry.supplier_name.ilike(like)
+            | models.LREntry.item.ilike(like))
+    return query
 
 
 @router.get("")
@@ -113,30 +269,70 @@ def list_lr(received: str = "all", limit: int = 500, db: Session = Depends(get_d
     """The register, newest first. `received=pending|received` filters by whether
     the warehouse has taken the consignment in — that's what the phone app lists,
     and it keeps the payload small as the register grows."""
-    q = db.query(models.LREntry)
-    if received == "pending":
-        q = q.filter((models.LREntry.received_by == None)          # noqa: E711
-                     | (models.LREntry.received_by == ""))
-    elif received == "received":
-        q = q.filter(models.LREntry.received_by != None,           # noqa: E711
-                     models.LREntry.received_by != "")
-    rows = q.order_by(models.LREntry.id.desc()).limit(max(1, min(limit, 2000))).all()
+    rows = _filtered(db, received=received).order_by(
+        models.LREntry.id.desc()).limit(max(1, min(limit, 2000))).all()
     return [_row_out(e) for e in rows]
 
 
+@router.get("/search")
+def search(q: str = "", supplier: str = "", transport: str = "", received: str = "all",
+           status: str = "all", date_from: str = "", date_to: str = "",
+           limit: int = 500, db: Session = Depends(get_db)):
+    """The form's Search. Returns matching rows plus the totals for them, because
+    the question behind a filtered register is nearly always "how many pieces and
+    how much freight came from this supplier / this month"."""
+    query = _filtered(db, received=received, q=q, supplier=supplier,
+                      transport=transport, status=status,
+                      date_from=date_from, date_to=date_to)
+    total = query.count()
+    rows = query.order_by(models.LREntry.id.desc()).limit(max(1, min(limit, 2000))).all()
+
+    def _sum(attr):
+        return round(sum(float(getattr(e, attr) or 0) for e in rows), 2)
+
+    return {"count": total, "shown": len(rows),
+            "totals": {"qty": _sum("qty"), "bundle": _sum("bundle"),
+                       "boxes": _sum("boxes"), "amount": _sum("amount"),
+                       "freight_amount": _sum("freight_amount")},
+            "rows": [_row_out(e) for e in rows]}
+
+
 @router.patch("/{entry_id}")
-def settle_freight(entry_id: int, body: SettleFreight, db: Session = Depends(get_db)):
-    """Record how the freight settled on delivery: Paid/ToPay, amount, cash or
-    cheque. Only the fields sent are touched, so the extracted register values
-    stay put."""
+def update_entry(entry_id: int, body: LRUpdate, db: Session = Depends(get_db)):
+    """Edit an entry — the freight settlement when the lorry delivers, the rack
+    once the bundles are put away, or any other field the form holds. Only the
+    fields actually sent are touched, so the extracted register values stay put."""
     e = db.get(models.LREntry, entry_id)
     if not e:
         raise HTTPException(404, "LR entry not found")
-    for k, v in body.model_dump(exclude_unset=True).items():
-        setattr(e, k, v)
+    data = body.model_dump()
+    unknown = [k for k in data if k not in WRITABLE]
+    if unknown:
+        raise HTTPException(400, f"not editable: {', '.join(sorted(unknown))}")
+    _apply(e, data, db, fields=[k for k in WRITABLE if k in data])
     db.commit()
     db.refresh(e)
     return _row_out(e)
+
+
+@router.delete("/{entry_id}")
+def delete_entry(entry_id: int, db: Session = Depends(get_db)):
+    """Remove an entry keyed in by mistake. Refused once an invoice is linked to
+    it — unlink there first, so the two records never disagree about whether the
+    consignment happened."""
+    e = db.get(models.LREntry, entry_id)
+    if not e:
+        raise HTTPException(404, "LR entry not found")
+    if e.matched:
+        raise HTTPException(400, "This entry is linked to an invoice — unlink it first.")
+    for a in e.attachments:
+        try:
+            os.remove(a.stored_path)
+        except OSError:
+            pass                      # file already gone; the row still goes
+    db.delete(e)
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/receivers")
@@ -179,4 +375,76 @@ def unreceive_consignment(entry_id: int, db: Session = Depends(get_db)):
     e.received_by = None
     db.commit()
     db.refresh(e)
+    return _row_out(e)
+
+
+# ---- file attachments --------------------------------------------------------
+#
+# The LR copy, the weighment slip, a photo of a torn bundle. Stored beside the
+# uploads but NOT registered as a `Document`: a Document is fed to the extraction
+# engine and trains a supplier profile, whereas these are evidence filed against
+# the consignment and must never end up in that pipeline.
+
+@router.post("/{entry_id}/attachments")
+async def add_attachment(entry_id: int, file: UploadFile = File(...),
+                         doc_type: str = Form(""), db: Session = Depends(get_db)):
+    e = db.get(models.LREntry, entry_id)
+    if not e:
+        raise HTTPException(404, "LR entry not found")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty file")
+    h = hashlib.sha256(raw).hexdigest()
+    ext = os.path.splitext(file.filename or "")[1] or ".bin"
+    stored = os.path.join(UPLOAD_DIR, f"lr{entry_id}_{h[:16]}{ext}")
+    if not os.path.exists(stored):
+        with open(stored, "wb") as f:
+            f.write(raw)
+        os.chmod(stored, 0o644)
+    a = models.LRAttachment(lr_id=e.id, doc_type=(doc_type or "").strip() or "Other",
+                            filename=file.filename, stored_path=stored,
+                            mime=file.content_type)
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    return _att_out(a)
+
+
+@router.get("/attachments/{att_id}/file")
+def attachment_file(att_id: int, db: Session = Depends(get_db)):
+    a = db.get(models.LRAttachment, att_id)
+    if not a or not os.path.exists(a.stored_path):
+        raise HTTPException(404, "attachment not found")
+    return FileResponse(a.stored_path, media_type=a.mime or "application/octet-stream",
+                        filename=a.filename)
+
+
+@router.delete("/attachments/{att_id}")
+def delete_attachment(att_id: int, db: Session = Depends(get_db)):
+    a = db.get(models.LRAttachment, att_id)
+    if not a:
+        raise HTTPException(404, "attachment not found")
+    # The same bytes can back several attachments (upload the same LR copy to two
+    # entries and the content hash collides), so only drop the file when this was
+    # the last row pointing at it.
+    others = db.query(models.LRAttachment).filter(
+        models.LRAttachment.stored_path == a.stored_path,
+        models.LRAttachment.id != a.id).count()
+    if not others:
+        try:
+            os.remove(a.stored_path)
+        except OSError:
+            pass
+    db.delete(a)
+    db.commit()
+    return {"ok": True}
+
+
+# Declared last: a bare "/{entry_id}" would otherwise swallow "/search" and
+# "/receivers", which FastAPI matches in declaration order.
+@router.get("/{entry_id}")
+def get_entry(entry_id: int, db: Session = Depends(get_db)):
+    e = db.get(models.LREntry, entry_id)
+    if not e:
+        raise HTTPException(404, "LR entry not found")
     return _row_out(e)

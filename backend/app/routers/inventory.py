@@ -28,7 +28,7 @@ class ProductDetail(BaseModel):
     design_no: Optional[str] = None
     mrp: Optional[float] = None
     sale_price: Optional[float] = None
-    margin_pct: Optional[float] = None
+    sale_discount_pct: Optional[float] = None
     detailed_by: Optional[str] = None
 
 
@@ -55,7 +55,7 @@ def _product_out(p: models.Product):
         # physical-detail attributes
         "color": p.color, "size": p.size, "pattern": p.pattern, "fit": p.fit,
         "product_type": p.product_type, "material": p.material, "design_no": p.design_no,
-        "sale_price": p.sale_price, "margin_pct": p.margin_pct,
+        "sale_price": p.sale_price, "sale_discount_pct": p.sale_discount_pct,
         "category": p.category, "category_section": p.category_section,
         "detailed": bool(p.detailed), "detailed_by": p.detailed_by,
         "detailed_at": p.detailed_at.isoformat() if p.detailed_at else None,
@@ -136,7 +136,7 @@ def detail_product(prod_id: int, body: ProductDetail, db: Session = Depends(get_
         raise HTTPException(404, "product not found")
     data = body.model_dump(exclude_none=True)
     for k in ("color", "size", "pattern", "fit", "product_type", "material",
-              "design_no", "mrp", "sale_price", "margin_pct"):
+              "design_no", "mrp", "sale_price", "sale_discount_pct"):
         if k in data:
             setattr(p, k, data[k])
     p.detailed = True
@@ -157,18 +157,153 @@ class GenBarcode(BaseModel):
 
 @router.post("/products/{prod_id}/generate-barcode")
 def generate_barcode(prod_id: int, db: Session = Depends(get_db)):
-    """Assign the product its sku + internal barcode if it doesn't have them.
-    Requires the product to be fully detailed first."""
+    """Assign the product its SKU if it hasn't got one — the only identifier we
+    issue, and what its QR resolves to. Requires the product to be fully detailed
+    first. (Path kept for compatibility; no barcode is minted any more.)"""
     p = db.get(models.Product, prod_id)
     if not p:
         raise HTTPException(404, "product not found")
     if not p.detailed:
-        raise HTTPException(400, "Set all product details first, then generate the barcode.")
+        raise HTTPException(400, "Set all product details first, then generate the code.")
     ident = barcode_svc.assign_identifiers(db, p)
     db.commit()
     db.refresh(p)
     out = _product_out(p)
     out["identifiers_generated"] = ident["generated"]
+    return out
+
+
+# ---------------------------------------------------------------------------
+#  Per-piece codes — one identity per garment under a SKU that has many
+# ---------------------------------------------------------------------------
+class UnitsPrinted(BaseModel):
+    ids: list[int]
+    printed_by: Optional[str] = None
+
+
+def _unit_out(u: models.ProductUnit):
+    return {
+        "id": u.id, "code": u.code, "seq": u.seq, "status": u.status,
+        "product_id": u.product_id, "purchase_id": u.purchase_id,
+        "print_count": u.print_count or 0,
+        "last_printed_at": u.last_printed_at.isoformat() if u.last_printed_at else None,
+        "last_printed_by": u.last_printed_by,
+    }
+
+
+@router.get("/products/{prod_id}/units")
+def product_units(prod_id: int, db: Session = Depends(get_db)):
+    """The individual pieces under one SKU — what the Inventory screen shows when
+    the quantity is clicked. `serialisable` explains an empty list rather than
+    leaving the screen to guess (fabric sold by the metre has no pieces)."""
+    from ..services import units as unit_svc
+    p = db.get(models.Product, prod_id)
+    if not p:
+        raise HTTPException(404, "product not found")
+    rows = db.query(models.ProductUnit).filter(
+        models.ProductUnit.product_id == prod_id).order_by(models.ProductUnit.seq).all()
+    ok, reason = unit_svc.can_serialise(p.uom, p.stock_qty)
+    return {
+        "product": {"id": p.id, "sku": p.sku, "description": p.description,
+                    "uom": p.uom, "stock_qty": p.stock_qty, "mrp": p.mrp,
+                    "size": p.size, "color": p.color, "category": p.category},
+        "count": len(rows), "serialisable": ok, "reason": reason,
+        "units": [_unit_out(u) for u in rows],
+    }
+
+
+@router.post("/products/{prod_id}/units/generate")
+def generate_units(prod_id: int, db: Session = Depends(get_db)):
+    """Give stock received before per-piece codes existed its missing codes."""
+    from ..services import units as unit_svc
+    p = db.get(models.Product, prod_id)
+    if not p:
+        raise HTTPException(404, "product not found")
+    made, reason = unit_svc.backfill(db, p)
+    if not made and reason:
+        raise HTTPException(400, reason)
+    db.commit()
+    return {"ok": True, "created": len(made), "codes": [u.code for u in made]}
+
+
+@router.get("/units/{uid}/qr.svg")
+def unit_qr_svg(uid: int, scale: int = 4, db: Session = Depends(get_db)):
+    from fastapi.responses import Response
+    u = db.get(models.ProductUnit, uid)
+    if not u:
+        raise HTTPException(404, "piece not found")
+    return Response(barcode_svc.unit_qr_svg(u, scale=max(1, min(scale, 10))),
+                    media_type="image/svg+xml")
+
+
+@router.get("/units/{uid}/qr.png")
+def unit_qr_png(uid: int, scale: int = 6, db: Session = Depends(get_db)):
+    from fastapi.responses import Response
+    u = db.get(models.ProductUnit, uid)
+    if not u:
+        raise HTTPException(404, "piece not found")
+    png = barcode_svc.unit_qr_png(u, scale=max(1, min(scale, 20)))
+    if not png:
+        raise HTTPException(503, "QR library not available on the server")
+    return Response(png, media_type="image/png")
+
+
+@router.get("/units/{uid}/label", response_class=HTMLResponse)
+def unit_label(uid: int, db: Session = Depends(get_db)):
+    """One piece's label — Print for a single garment, or Reprint a torn one."""
+    from ..services import units as unit_svc
+    u = db.get(models.ProductUnit, uid)
+    if not u:
+        raise HTTPException(404, "piece not found")
+    unit_svc.mark_printed(db, [u])
+    db.commit()
+    return HTMLResponse(barcode_svc.unit_labels_sheet([u]))
+
+
+@router.get("/unit-labels", response_class=HTMLResponse)
+def unit_labels(ids: str = "", product_id: int = 0, db: Session = Depends(get_db)):
+    """A sheet of per-piece labels: a selection (ids=1,2,3) or every piece of one
+    SKU. Opening it counts as printing them, which is what makes the screen able
+    to offer Reprint afterwards."""
+    from ..services import units as unit_svc
+    q = db.query(models.ProductUnit)
+    if ids.strip():
+        want = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+        rows = q.filter(models.ProductUnit.id.in_(want)).all()
+        rows.sort(key=lambda u: want.index(u.id))
+    elif product_id:
+        rows = q.filter(models.ProductUnit.product_id == product_id).order_by(
+            models.ProductUnit.seq).all()
+    else:
+        raise HTTPException(400, "pass ids= or product_id=")
+    if not rows:
+        raise HTTPException(404, "no pieces to print")
+    unit_svc.mark_printed(db, rows)
+    db.commit()
+    return HTMLResponse(barcode_svc.unit_labels_sheet(rows))
+
+
+@router.post("/units/printed")
+def units_printed(body: UnitsPrinted, db: Session = Depends(get_db)):
+    """Record a print without rendering a sheet — for a label printer driven
+    elsewhere."""
+    from ..services import units as unit_svc
+    rows = db.query(models.ProductUnit).filter(
+        models.ProductUnit.id.in_(body.ids)).all()
+    unit_svc.mark_printed(db, rows, body.printed_by)
+    db.commit()
+    return {"ok": True, "marked": len(rows)}
+
+
+@router.get("/units/lookup")
+def unit_lookup(code: str, db: Session = Depends(get_db)):
+    """Resolve a scanned per-piece label: which piece, and which product it is."""
+    from ..services import units as unit_svc
+    u = unit_svc.resolve(db, code)
+    if not u:
+        raise HTTPException(404, f"no piece for code '{code}'")
+    out = _unit_out(u)
+    out["product"] = _product_out(u.product) if u.product else None
     return out
 
 
@@ -201,6 +336,20 @@ def product_qr_svg(prod_id: int, scale: int = 4, db: Session = Depends(get_db)):
         raise HTTPException(404, "product not found")
     return Response(barcode_svc.product_qr_svg(p, scale=max(1, min(scale, 10))),
                     media_type="image/svg+xml")
+
+
+@router.get("/products/{prod_id}/qr.png")
+def product_qr_png(prod_id: int, scale: int = 6, db: Session = Depends(get_db)):
+    """The product's QR as a PNG — what the phone app shows for a variant it has
+    just created, since React Native cannot render the SVG above."""
+    from fastapi.responses import Response
+    p = db.get(models.Product, prod_id)
+    if not p:
+        raise HTTPException(404, "product not found")
+    png = barcode_svc.product_qr_png(p, scale=max(1, min(scale, 20)))
+    if not png:
+        raise HTTPException(503, "QR library not available on the server")
+    return Response(png, media_type="image/png")
 
 
 @router.get("/products/{prod_id}/qr-payload")
@@ -267,11 +416,11 @@ def categorize_all(force: bool = False, db: Session = Depends(get_db)):
 
 @router.get("/products/{prod_id}/label", response_class=HTMLResponse)
 def product_label(prod_id: int, db: Session = Depends(get_db)):
-    """Print-ready single barcode label for one product."""
+    """Print-ready single QR label for one product."""
     p = db.get(models.Product, prod_id)
     if not p:
         raise HTTPException(404, "product not found")
-    if not p.barcode and not p.sku:
+    if not p.sku:
         barcode_svc.assign_identifiers(db, p)
         db.commit(); db.refresh(p)
     return HTMLResponse(barcode_svc.labels_sheet([p]))
@@ -279,7 +428,7 @@ def product_label(prod_id: int, db: Session = Depends(get_db)):
 
 @router.get("/labels", response_class=HTMLResponse)
 def labels(ids: str = "", status: str = "detailed", db: Session = Depends(get_db)):
-    """Print-ready barcode-label sheet. Pass ids=1,2,3 for a selection, else all
+    """Print-ready QR-label sheet. Pass ids=1,2,3 for a selection, else all
     products matching status (default: detailed)."""
     if ids.strip():
         want = [int(x) for x in ids.split(",") if x.strip().isdigit()]
@@ -293,7 +442,7 @@ def labels(ids: str = "", status: str = "detailed", db: Session = Depends(get_db
     # make sure every product on the sheet is scannable
     changed = False
     for p in ps:
-        if not p.barcode or not p.sku:
+        if not p.sku:
             barcode_svc.assign_identifiers(db, p); changed = True
     if changed:
         db.commit()

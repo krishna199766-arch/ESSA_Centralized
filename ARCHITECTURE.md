@@ -144,8 +144,128 @@ only the populated attributes was rejected: it folds *L* into *L / Red* for
 whichever arrived first, which silently corrupts valuation across two GRNs. The
 attribute set is deliberately the same one the phone detail form and `qr_payload`
 carry, so a variant created at GRN is already the record the warehouse, the label
-and the scanner expect. Variants get their SKU *and* an internal EAN-13 at post
+and the scanner expect. Variants get their SKU at post
 (`barcode_svc.assign_identifiers`) because no supplier code exists for one variant.
+
+**The bundle is marked split, and says so** (`is_split` on the line payload). It is
+what the supplier billed and it never becomes stock — the rows below it do, and
+`post_grn` walks them instead. Every client is told outright rather than inferring
+it from a non-empty list, because "this row does not move stock" is exactly the
+thing a receiving screen must not get wrong; the phone shows `split · 4` and a line
+saying the rows below carry the stock.
+
+**A code per piece, under a SKU that has many** (`models.ProductUnit`,
+`services/units.py`). Receiving 8 of ESSA-00008 makes **one** inventory record with
+a stock of 8 — master, valuation and ledger all stay at SKU level, because that is
+what a weighted-average cost and a stock report are about. Underneath it,
+`post_grn` mints one identity per garment: `ESSA-00008-001 … -008`, each with its
+own QR, all pointing at the same SKU.
+
+Printing the SKU label eight times would be cheaper and is what most systems do. It
+cannot answer "which of these came back", "which one is missing", or "where did
+this particular piece go" — eight identical tags are eight copies of an answer, not
+eight questions. A serial per piece is the difference between counting stock and
+tracking it.
+
+Two limits are deliberate. **Only countable units of measure**: 43.5 MTR of fabric
+is not 43 or 44 of anything, so nothing is generated and the screen is told *why*
+rather than left showing an unexplained blank. And **a ceiling per receipt**
+(`MAX_PER_RECEIPT`): serialising is for goods a human will physically tag, and
+quietly writing 5,000 rows and offering 5,000 labels is the wrong answer to a
+5,000-piece receipt.
+
+Piece numbers continue across receipts (`next_seq`), so a re-buy adds -009, -010
+rather than starting again at -001 and colliding. `resolve()` accepts a piece code
+and returns its **product**, which is what lets every existing scan point — GRN
+linking, lookup, outward — take a label off an individual garment without knowing
+units exist. Unposting deletes the pieces that receipt created, exactly as it does
+its cartons.
+
+What is *not* wired yet: nothing consumes a unit on dispatch. `status` exists and
+receipt sets it, so until outward-by-piece is built the honest reading of the table
+is "the pieces this SKU received", not "the pieces still on the shelf".
+
+That makes three label layers, each answering a different question:
+
+| | Carton (`EB1`) | SKU (`E1`) | Piece (`EU1`) |
+|---|---|---|---|
+| identifies | the box on the rack | the product record | one physical garment |
+| example | `ESSA-B-00001` | `ESSA-00008` | `ESSA-00008-003` |
+| count | one per GRN line | one per stock item | one per unit received |
+
+**Two labels, because there are two moments** (`models.Bundle`, `services/bundles.py`).
+A carton and a garment are different things to a warehouse, and one code cannot be
+both:
+
+| | Carton label (`ESSA-B-00001`, tag `EB1`) | Garment tag (`ESSA-00004`, tag `E1`) |
+|---|---|---|
+| printed | the moment the GRN posts | later, when the box is opened and tagged |
+| answers | which box is this, what's inside, where does it live | which garment is this, what size, what price |
+| size | 99mm, 34mm QR — read across a rack | 58mm, 26mm QR — read in the hand |
+| carries | qty, the size mix, GRN/invoice, a LOCATION line | attributes, category, SKU, MRP |
+
+A `Bundle` is a **handling** unit, never a stock row: the 50 pieces inside are
+already counted as the items they became, and counting the carton too would double
+the warehouse — verified, 50 t-shirts + 20 dhoti still reads 70 units with two
+bundles on file. What it owns is a code to scan when putting it away, the receipt
+it came from, and where it is now.
+
+The order is the point. Printing garment tags at GRN means tagging fifty loose
+items before anyone has looked at them and before they sit in a carton for a
+fortnight; printing only garment tags leaves the box itself anonymous on the rack.
+So `post_grn` creates the bundles and the phone's post screen prints *carton*
+labels, while `bundles.tag()` prints the garment tags — and **refuses** while any
+item is still undetailed, because the whole reason that step is separate is that by
+then the information exists to put on the tag.
+
+`EB1` versus `E1` is what keeps the two apart at the scanner. `barcode_svc.resolve`
+returns products and rejects a bundle payload outright, so scanning a carton where
+a garment is expected fails loudly instead of dispatching a box as if it were one
+shirt. Unposting a GRN deletes its bundles: they describe a receipt that no longer
+happened, and their labels point at products the unpost may have just removed.
+
+**One code per item, issued at post, filled out at detailing.** A variant gets its
+SKU and QR when the GRN posts, not when someone gets round to inspecting it —
+otherwise stock exists with no way to scan it, which is the gap labels are for.
+Detailing never mints a second code: `assign_identifiers` is idempotent, so the SKU
+a label was printed with stays valid forever. What changes is the QR's *payload* —
+`qr_payload` reads the live record, so an item detailed after posting goes from
+`L · Red` to carrying fit, pattern, material and pricing too. That is why the phone
+suggests detailing before printing: the sticker is a snapshot, and the fuller one
+reads the whole item with no network. Either way a scan resolves by SKU to the
+live row, so an early print is never wrong, only thinner.
+
+**The receipt becomes the worklist.** `items_pending_detail` on the GRN and
+`product_detailed` on each row let the posted screen say "4 of 4 still to detail"
+and tick over as they are done — so the items a receipt created are detailed from
+that receipt, with the goods in hand, instead of being hunted down individually in
+the Products list afterwards.
+
+**The breakdown is entered where the cartons are** (`mobile-app/grn.js`). Only the
+person opening them knows the mix, so the phone carries the whole receiving path —
+GRN list, per-line breakdown, post — against the same endpoints the desktop calls,
+and stock is identical whichever end does it. The phone screen is not a smaller
+copy of the desktop grid: a seven-attribute row doesn't fit a phone, so size and
+quantity stay on the surface (tap a size chip, tap *rest* to take the remaining
+balance) and the other five attributes plus pricing fold away per row. What does
+*not* move to the phone is unposting, because it has to weigh payments, debit notes
+and dispatches first — a desk decision made with the ledger in front of you.
+
+QR previews are served as PNG (`/api/inventory/products/{id}/qr.png`) alongside the
+SVG the web app uses: React Native's `<Image>` cannot rasterise SVG without a native
+renderer, and the alternative — a dependency whose only job is drawing a code the
+server already knows how to draw — buys nothing. Same payload, same 'M' error
+correction, same code.
+
+**One code, not two.** A product carries a single identifier of ours — the SKU —
+and that is what its QR resolves to and what prints beneath it. An internal EAN-13
+used to be minted alongside it so the label could carry a 1D stripe; once the
+label went QR-only that second number bought nothing and gave two answers to
+"what is this product's code". `Product.barcode` survives, but only to hold a code
+the SUPPLIER printed: `inventory.match_product` keys a re-buy on it, which is what
+keeps one item's weighted-average cost in one record instead of splitting across
+two when the supplier's description wording drifts between invoices. Nothing
+generates it, and it is never shown as our code.
 
 **Unpost (`unpost_grn`).** Correcting a posted GRN means reversing it, not editing
 history. The ledger is what makes that safe: `_replay_stock` recomputes a product's
@@ -173,13 +293,143 @@ Re-buying a barcoded item matches the existing product and re-averages its cost
 instead of duplicating — verified: a second purchase of `MWC541674` (8 @ ₹300
 on top of 2 @ ₹250) moves stock 2→10 and avg cost 250→290.
 
-## 8. The remaining modules
+## 7a. Product classification: many descriptions, one master
+
+Every supplier writes the same garment differently — *Women's T-Shirt*, *Ladies
+Tee*, *Female T-Shirt*, *LADIES TSHIRT* — and if each wording became its own
+product the master would fill with near-duplicates: stock split across four
+records, four QR codes for one item, and reports that add up to nothing. So a
+description is mapped onto the **Product Category master** (~690 names, from GRN
+PRODUCT DETAILS.xlsx) before it becomes stock (`services/categorize.py`).
+
+The engine is **rule-based, not a model call**: no network, no key, no per-line
+cost, and the same description always gives the same answer — which is what lets a
+mis-mapping be reasoned about and fixed rather than re-prompted. Three steps:
+
+1. **What we were told.** A wording a human has already mapped wins outright
+   (below).
+2. **Section.** Gender/age words are canonicalised to the master's own vocabulary
+   (`women's`/`womens`/`female`/`ladies` → LADIES), which is what makes *Women's
+   T-shirt* reach LADIES-T-SHIRT rather than the bare OVERALL T-SHIRT. A category
+   asserting a *different* gender is excluded outright, however well it scores.
+3. **Garment.** The canonical text is scored against every candidate name, blending
+   `token_set_ratio` with `token_sort_ratio` — set-ratio alone returns 100 whenever
+   one string's tokens are a subset of the other's, so "LADIES T SHIRT" ties with
+   the bare "T-SHIRT".
+
+**Confidence takes three signals, not one.** The score must clear `AUTO_THRESHOLD`,
+beat the runner-up by `MIN_MARGIN`, *and* share a whole word with the category name.
+The word test was added after a measured failure: "GENTS TEE" and "MENS-TIE" differ
+by one letter, scored 87.5, and auto-filed t-shirts into MENS-TIE. Character
+similarity across a whole string is not evidence — a shared word is. Measured over
+the entire master it sends **no** extra name to review, because a real match always
+shares a word; it only bites on wordings that match nothing, which is exactly where
+a human should be asked. Near-spellings still count as shared (CHUDIDHAR/CHUDITHAR
+at 89, PANT/PANTS at 89) while genuinely different words do not (SHIRT/SKIRT at 80,
+TEE/TIE at 67).
+
+**It learns from corrections (`CategoryAlias`).** No hand-written synonym list ever
+finishes — suppliers keep inventing wordings. So the moment someone sets a category
+on a GRN line by hand, that wording is remembered and maps itself on the next
+invoice. The key is the *canonical* form, not the raw text, so one correction covers
+every spelling that canonicalises the same way: teach it "Ladies Tee" and "Women's
+Tee", "LADIES TEE 3PC" and "Tee Ladies" are taught too. Re-teaching overwrites, and
+clearing the category forgets — a wrong alias is corrected exactly the way it was
+created, so no admin screen is needed to undo one. An alias is never stored for a
+name the master doesn't have, so learning cannot invent categories.
+
+**What the rules cost, measured.** Feeding all 473 distinct master names back in as
+descriptions, 438 map to themselves. Of the rest, most are a name mapping to its own
+sectioned twin (BABY ITEMS → KIDS-BABY ITEMS), which is the standardisation working.
+Two decisions came out of that sweep and are worth knowing:
+
+- **`SET` is not a stopword.** It used to be, and that made 17 master names
+  unreachable — six of them differ from a twin by that word alone (DHOTI SET vs
+  DHOTI), so every "DHOTI SET" line filed silently as DHOTI. A *counted* set
+  ("2 SET", "3PCS") is a pack quantity and is stripped; a bare one is part of the name.
+- **BOYS/GIRLS survive section canonicalisation** (`QUALIFIERS`), because the master
+  uses them to separate KIDS-BOYS PANT, KIDS-GIRLS PANT and KIDS-PANT — stripping
+  them left one search text for three categories and the highest scorer took all
+  three. BABY deliberately does *not* survive: the master has the catch-all
+  KIDS-BABY ITEMS, and a preserved BABY drags every unrecognised "BABY something"
+  into it. Fixing one name is not worth a bucket that swallows the unknown.
+
+## 8. LR Entry: two routes into one record
+
+The reference system's **Transport Entry** screen is a single-consignment data
+entry form. This app's LR Entry started as the opposite — photograph the register
+page, vision reads every row — because that is dramatically faster for the ten or
+twenty consignments a page holds. Both now exist and write the same `LREntry`,
+distinguished by `entry_source`:
+
+- **import** (`POST /api/lr/extract` → `/save`) — the fast path, and still the
+  default. Rows are duplicate-checked (`lr_link`) before they land.
+- **manual** (`POST /api/lr`) — one consignment keyed in, for goods that arrive
+  with no page to photograph, and for correcting one that did.
+
+Three consequences worth knowing:
+
+**The columns are a union, not a copy.** The register page carries what the
+transporter printed; the form also carries office decisions (purchase manager,
+stock holding period, additional margin, auto-transfer location) that appear on
+no page anywhere. So `lr.LR_PROMPT` asks vision only for the
+printed subset — asking for the rest would invite invention — and
+`lr_link.LR_ALL_FIELDS` compares only that subset when deciding whether a
+re-imported row is a duplicate. Comparing the office columns would make every row
+someone had since edited come back "doubtful" against its own twin.
+
+**Required fields are enforced on the manual route only** (`REQUIRED_MANUAL`).
+A register page names no agent and no box count, so holding an import to the
+form's asterisks would reject rows read off a perfectly good page.
+
+**`MasterOption` instead of a table per list.** A purchase manager, an LR mode or
+an attachment type is a name and nothing else. Supplier / Agent / Transport /
+Category keep their own tables because they carry structure (GSTIN, phone,
+section); these do not. Fixed vocabularies (LR mode, attachment type, transfer
+location) are seeded and reject additions so a typo cannot become a new mode of
+transport; the open ones learn from what is typed, exactly as agents and
+transporters already do. `RETIRED_OPTIONS` purges lists whose field has since
+been dropped, so an install that ran an earlier build doesn't keep offering a
+dropdown nothing reads.
+
+`LRAttachment` is deliberately not a `Document`: a Document is fed to the
+extraction engine and trains a supplier profile, whereas an LR copy or a photo of
+a torn bundle is evidence filed against a consignment and must never enter that
+pipeline.
+
+**Then fifteen columns came back out.** The reference screen carries Company,
+Bundle Rack, Section, Remark, Due Date, Pay Mode, PackageSlip No/Date, Actual &
+Charged Weight, From/Receiving City, Loading Charge and Cash/Cheque. Built and
+shipped, every one of them was empty on every consignment — Essa's registers
+simply do not record them, and the warehouse does not put bundles away by rack
+from this screen. They were dropped rather than left optional: a column that is
+always blank still costs a prompt line (worse extraction, more to hallucinate),
+a form box, a review cell and a register column, and it teaches whoever reads
+the screen that blank is normal. `_migrate` issues `ALTER TABLE … DROP COLUMN`
+(SQLite ≥ 3.35), falling back to leaving the column unmapped if that fails,
+which is what the older `place` and `purchaser` columns already do. The `city`,
+`pay_mode`, `company`, `bundle_rack` and `section` option lists went with them.
+
+Note `cash_cheque` was among them and was *not* new — it had been part of the
+freight settlement since the first version of this module. Freight now settles as
+Paid/ToPay plus an amount.
+
+Company is worth calling out separately: the deployment still has one, in
+`config.COMPANY_NAME` / `COMPANY_GSTIN`, which is what identifies the buyer
+during extraction. What was removed is a *per-consignment* company, which only
+earns its place if Essa receives goods for more than one billing entity.
+
+The general rule this leaves: mirror the reference screen to learn what the
+business records, then delete what it turns out never to fill. Matching a form
+field-for-field is a starting hypothesis, not the specification.
+
+## 9. The remaining modules
 
 The same canonical shape and the inventory ledger extend to the rest of the
 recordings:
 
-- **Barcode generation** — suppliers who don't pre-barcode (AMS, Matoshree,
-  Mehak) get an `ESSA-#####` SKU on GRN post; the barcode module prints from it.
+- **Code generation** — suppliers who don't pre-barcode (AMS, Matoshree, Mehak)
+  get an `ESSA-#####` SKU on GRN post; the QR label prints from it.
 - **Stock Outward & Warehouse reports** — outward is a negative `StockMovement`;
   the ledger already supports it and is the reporting spine.
 - **Payments (debit / discount / TDS)** — the taxes block already models TDS
@@ -194,7 +444,7 @@ Recommended remaining order: (1) stock outward + payments ledger → (2) returns
 (3) reporting → (4) barcode printing. Each consumes the canonical shape and the
 ledger these two modules now guarantee.
 
-## 9. Production hardening checklist
+## 10. Production hardening checklist
 
 The foundation is production-minded (real relational model, versioned learning,
 audit trail, pluggable providers, DB-agnostic). Before going live, add: user

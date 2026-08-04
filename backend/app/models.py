@@ -13,7 +13,7 @@ LineItem         denormalised line rows for querying/reporting once confirmed.
 import datetime as dt
 from sqlalchemy import (Column, Integer, String, Float, Text, DateTime,
                         ForeignKey, JSON, Boolean)
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from .database import Base
 
 
@@ -172,7 +172,11 @@ class Product(Base):
     category = Column(String, index=True)          # e.g. LADIES-T-SHIRT
     category_section = Column(String)              # OVERALL | KIDS | LADIES | MENS
     sale_price = Column(Float)
-    margin_pct = Column(Float)
+    # Discount off MRP, in percent — the selling lever ("20% off 1000 = 800").
+    # Named for the SALE side because `LineItem.discount_pct` already means the
+    # supplier's trade discount on what we PAID; the two must never be confused.
+    # Replaced `margin_pct` (markup over cost), which nobody was filling in.
+    sale_discount_pct = Column(Float)
     detailed = Column(Boolean, default=False, index=True)
     detailed_at = Column(DateTime)
     detailed_by = Column(String)
@@ -242,6 +246,108 @@ class PurchaseLine(Base):
         return bool(self.splits)
 
 
+class ProductUnit(Base):
+    """One physical piece, under a SKU that has many.
+
+    Receiving 8 of ESSA-00008 makes ONE inventory record with a stock of 8 — the
+    master, the valuation and the ledger all stay at SKU level, because that is
+    what a weighted-average cost and a stock report are about. What this table adds
+    is an *identity per piece*: ESSA-00008-001 … -008, each with its own QR, all
+    pointing back at the same SKU.
+
+    That is what lets a label be stuck on a garment rather than on a shelf edge. A
+    scan of any child code resolves to the product (so every existing scan point
+    keeps working), while the code itself says which of the eight it is — which is
+    what a returns desk, a lost-piece query or a per-piece audit needs and a shared
+    SKU code can never answer.
+
+    Deliberately NOT stock rows: eight units under a stock of eight is the same
+    eight garments, not sixteen. `status` tracks where a piece is; the quantity
+    remains the ledger's answer.
+    """
+    __tablename__ = "product_units"
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True)
+    code = Column(String, unique=True, index=True)     # ESSA-00008-003
+    seq = Column(Integer)                              # 3 — its number within the SKU
+    # which receipt put this piece on the floor, so a unit can be traced to its GRN
+    purchase_id = Column(Integer, ForeignKey("purchases.id"), nullable=True, index=True)
+    bundle_id = Column(Integer, ForeignKey("bundles.id"), nullable=True, index=True)
+    status = Column(String, default="in_stock", index=True)   # in_stock | dispatched | sold | returned
+    # printing is tracked so the screen can offer Print the first time and Reprint
+    # afterwards — a label reprinted because it tore is worth telling apart from
+    # one that was never printed
+    print_count = Column(Integer, default=0)
+    last_printed_at = Column(DateTime, nullable=True)
+    last_printed_by = Column(String)
+    created_at = Column(DateTime, default=now)
+
+    product = relationship("Product", backref=backref(
+        "units", cascade="all, delete-orphan", order_by="ProductUnit.seq"))
+
+
+class Bundle(Base):
+    """The carton a GRN line physically arrived as, and the code stuck on it.
+
+    Deliberately **not** a Product and never a stock row. The 50 pieces inside are
+    already counted as the items they became; counting the carton as well would
+    double the warehouse. What a bundle owns is a *handling* identity — something
+    to scan when putting it on a rack, finding it again, or opening it — plus the
+    receipt it came from and where it is now.
+
+    This is the first of the two labels an item can carry, and they answer
+    different questions. The bundle label says "this box, from this GRN, holds 50
+    women's t-shirts across four sizes" and is printed the moment the GRN posts,
+    because the goods are on the floor and have to be put somewhere. The product
+    label says "this garment is ESSA-00004, L, Red, MRP 899" and is printed later,
+    when the box is opened and its contents tagged for sale. Printing item labels
+    at GRN would mean tagging 50 loose garments that are about to sit in a carton
+    for a fortnight; printing only item labels would leave the carton itself
+    anonymous on the rack.
+
+    Life: stored (labelled and put away) → opened → tagged (its items now carry
+    their own labels, so the bundle stops being the unit anyone handles).
+    """
+    __tablename__ = "bundles"
+    id = Column(Integer, primary_key=True)
+    code = Column(String, unique=True, index=True)      # ESSA-B-00001, what its QR resolves to
+    purchase_id = Column(Integer, ForeignKey("purchases.id"), index=True)
+    line_id = Column(Integer, ForeignKey("purchase_lines.id"), index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
+    # copied off the line at post, not read through it: a bundle label is a
+    # historical record of what was received, and must still read correctly if the
+    # GRN is later unposted, corrected and posted again
+    description = Column(String)
+    hsn = Column(String)
+    uom = Column(String)
+    qty = Column(Float)                                  # pieces in the carton
+    item_count = Column(Integer, default=0)              # distinct products inside
+    grn_no = Column(String)
+    invoice_number = Column(String)
+    location = Column(String, index=True)                # where it was put away
+    status = Column(String, default="stored", index=True)  # stored | opened | tagged
+    received_at = Column(DateTime, default=now)
+    located_at = Column(DateTime, nullable=True)
+    located_by = Column(String)
+    opened_at = Column(DateTime, nullable=True)
+    tagged_at = Column(DateTime, nullable=True)
+    tagged_by = Column(String)
+    created_at = Column(DateTime, default=now)
+
+    purchase = relationship("Purchase")
+    line = relationship("PurchaseLine", backref=backref("bundle", uselist=False))
+    supplier = relationship("Supplier")
+
+    @property
+    def products(self):
+        """What is inside — the items this carton's line produced."""
+        if not self.line:
+            return []
+        if self.line.is_split:
+            return [s.product for s in self.line.splits if s.product]
+        return [self.line.product] if self.line.product else []
+
+
 class PurchaseLineSplit(Base):
     """One VARIANT of a GRN line — the attribute breakdown of a billed bundle.
 
@@ -279,7 +385,7 @@ class PurchaseLineSplit(Base):
     rate = Column(Float)                 # unit cost (defaults to the line's rate)
     mrp = Column(Float)                  # retail prices are per variant, not per bundle
     sale_price = Column(Float)
-    margin_pct = Column(Float)
+    sale_discount_pct = Column(Float)    # off MRP; see Product.sale_discount_pct
     # a QR/barcode scanned on the floor pins this variant to an existing product
     # instead of leaving it to the description + attribute match
     code = Column(String)
@@ -471,6 +577,34 @@ class Category(Base):
     created_at = Column(DateTime, default=now)
 
 
+class CategoryAlias(Base):
+    """A supplier's wording, and the category a human said it means.
+
+    The rules in services/categorize.py cover the wordings we thought of; suppliers
+    keep inventing more, and no list written up front ever finishes. So the moment
+    someone sets a category on a GRN line by hand, that correction is kept and the
+    same wording maps itself next time — the engine gets better with use instead of
+    waiting on a developer to add another synonym.
+
+    The key is the CANONICAL form of the description (gender words replaced by the
+    master's own vocabulary, sizes and noise stripped), not the raw text, so one
+    correction covers every spelling that canonicalises the same way: teach it
+    "Ladies Tee" and "Women's Tee" is taught too.
+
+    `source` records who said so, and `hits` how often it has been used — together
+    they are the evidence for reviewing a mapping that turns out to be wrong."""
+    __tablename__ = "category_aliases"
+    id = Column(Integer, primary_key=True)
+    key = Column(String, unique=True, index=True)   # canonical description text
+    sample = Column(String)                         # a raw description that produced it
+    category = Column(String, index=True)           # the master name it maps to
+    section = Column(String)
+    source = Column(String, default="human")        # human | import
+    hits = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
 class Agent(Base):
     __tablename__ = "agents"
     id = Column(Integer, primary_key=True)
@@ -488,26 +622,55 @@ class Transport(Base):
 
 
 class LREntry(Base):
-    """LR Entry register — one row per received consignment (from the TRANSPORT
-    Excel / LR book). Captured by OCR/vision from an uploaded image or PDF."""
+    """LR Entry register — one row per received consignment.
+
+    Two ways in, and `entry_source` says which:
+      * "import" — OCR/vision reads a photographed LR book page or the TRANSPORT
+        Excel, and a batch of rows lands at once. This is the fast path.
+      * "manual" — one consignment keyed in on the LR Entry form, for when the
+        goods arrive with no register page to photograph.
+
+    The columns below are the union of what the register page carries and what
+    the Transport Entry form captures, so either route fills the same record."""
     __tablename__ = "lr_entries"
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
+    entry_source = Column(String, default="import")   # import | manual
+    # Our own running number for the entry (LRE-00001). Distinct from `lr_no`,
+    # which is the TRANSPORTER's docket number printed on the consignment.
+    lr_entry_no = Column(String, index=True)
+    lr_entry_date = Column(String)       # when the entry was booked in the office
+    lr_mode = Column(String)             # Hand Delivery | Transport | Courier | …
     recv_date = Column(String)
     transport = Column(String)
     bundle = Column(Float)
+    boxes = Column(Float)
     lr_no = Column(String)
     lr_date = Column(String)
     supplier_name = Column(String)
+    agent = Column(String)
+    agent_commission = Column(Float)     # % or flat, as the agent is engaged
     inv_no = Column(String)
     inv_date = Column(String)
-    qty = Column(Float)
-    amount = Column(Float)
+    qty = Column(Float)                  # No Of Pieces
+    amount = Column(Float)               # Goods Value
+    auto_transfer_location = Column(String)   # onward branch, or NONE to keep here
+    purchase_manager = Column(String)
+    stock_holding_days = Column(Float)
+    additional_margin = Column(Float)
+    # Freight settles as mode + amount; the flag mirrors the form's checkbox and
+    # says the charge APPLIES at all, which a zero amount cannot express (nothing
+    # yet quoted vs quoted at nil).
     paid_topay = Column(String)          # TOPAY | NO | PAID
+    freight_applicable = Column(Boolean, default=False)
     freight_amount = Column(Float)
-    cash_cheque = Column(String)         # CASH | CHEQUE | NO
-    # (a `place` column may still exist in older databases — the register's
-    # booking-city column was dropped from the app; it is no longer mapped or read)
+    # Columns dropped after they proved to be dead weight in this warehouse — no
+    # consignment ever carried one: company, bundle_rack, section, remark,
+    # due_date, pay_mode, package_slip_no, slip_date, actual_weight,
+    # charged_weight, from_city, receiving_city, loading_charge/
+    # loading_applicable, cash_cheque, and the earlier `place` and `purchaser`.
+    # `_migrate` drops them; older databases may still hold the physical column,
+    # but nothing maps or reads it.
     item = Column(String)
     # Who physically RECEIVED the consignment. Not typed on the desktop and not
     # read off the register page: only the warehouse knows who took the packages,
@@ -515,7 +678,7 @@ class LREntry(Base):
     # goods land. The desktop shows it read-only.
     received_by = Column(String)
     # Freight settlement is recorded as mode + amount only (paid_topay,
-    # freight_amount, cash_cheque). `paid_by` and `cash_receiver_mobile` columns
+    # freight_amount). `paid_by`, `cash_receiver_mobile` and `cash_cheque` columns
     # may still exist in older databases; they are no longer mapped or read.
     # --- invoice linkage (cross-fill): set when a matching invoice is uploaded ---
     invoice_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
@@ -523,4 +686,46 @@ class LREntry(Base):
     # fields where the linked invoice DISAGREES with the register value we kept:
     # [{"field","register","invoice"}] — register value is retained, conflict flagged
     mismatches = Column(JSON, default=list)
+    created_at = Column(DateTime, default=now)
+
+    attachments = relationship("LRAttachment", back_populates="entry",
+                               cascade="all, delete-orphan",
+                               order_by="LRAttachment.id")
+
+
+class LRAttachment(Base):
+    """A file pinned to one LR entry — the LR copy, a weighment slip, a photo of
+    damaged bundles. Separate from `Document` on purpose: a Document is something
+    the extraction engine reads and learns a supplier format from, whereas these
+    are evidence kept against the consignment and never extracted."""
+    __tablename__ = "lr_attachments"
+    id = Column(Integer, primary_key=True)
+    lr_id = Column(Integer, ForeignKey("lr_entries.id"), index=True)
+    doc_type = Column(String)            # from the `attachment_type` master
+    filename = Column(String)
+    stored_path = Column(String)
+    mime = Column(String)
+    created_at = Column(DateTime, default=now)
+
+    entry = relationship("LREntry", back_populates="attachments")
+
+
+class MasterOption(Base):
+    """One entry in a small dropdown list, keyed by `kind`.
+
+    The big masters earn their own table (Supplier, Agent, Transport, Category)
+    because they carry structure — a GSTIN, a phone, a section. These do not: a
+    rack, a warehouse section, a pay mode or a city is a name and nothing else,
+    and there are a dozen such lists on the LR Entry form alone. A table apiece
+    would be a dozen near-identical models and routers; one keyed table is the
+    same data with one place to maintain.
+
+    Lists that are fixed vocabulary (lr_mode, attachment_type, …) are seeded
+    once; the free ones (company, rack, section, …) fill themselves from whatever
+    is entered, the same way agents and transporters already do."""
+    __tablename__ = "master_options"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String, index=True)    # see masters.OPTION_KINDS
+    value = Column(String, index=True)
+    sort = Column(Integer, default=0)    # seeded lists keep their given order
     created_at = Column(DateTime, default=now)

@@ -76,11 +76,16 @@ a { color: var(--accent); }
   margin: 0 0 10px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
 .field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
-.field input {
+.field input, .field select {
   width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
   padding: 7px 9px; border-radius: 7px; font-size: 13px;
 }
-.field input:focus { outline: none; border-color: var(--accent); }
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+.field input:disabled { opacity: .55; cursor: not-allowed; }
+/* Chrome renders the native date picker glyph near-black on a dark field */
+.field input[type=date]::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+/* a checkbox must not stretch to the field width like a text input does */
+.field input[type=checkbox] { width: auto; padding: 0; }
 .field.flag input { border-color: var(--warn); background: #241d0d; }
 .field .flagnote { font-size: 10px; color: var(--warn); margin-top: 2px; }
 /* value carried in from the LR register rather than read off the page */
@@ -117,6 +122,31 @@ table.items input { width: 100%; background: transparent; border: 1px solid tran
 table.items input:hover { border-color: var(--line); }
 table.items input:focus { outline: none; border-color: var(--accent); background: var(--panel-2); }
 table.items td.num input { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- the saved LR register -------------------------------------------------
+   Sized to fit the window instead of scrolling sideways. `table-layout: fixed`
+   is what makes that work: the browser then honours the th widths instead of
+   widening a column to fit its longest cell, which is how one supplier name
+   used to push the last four columns off-screen. */
+table.items.reg { table-layout: fixed; width: 100%; }
+table.items.reg th, table.items.reg td { vertical-align: top; }
+/* Figures right-align so they can be compared down the column; everything is
+   tabular so the digits line up rather than drifting with glyph width. */
+table.items .num, table.items .num input { text-align: right; }
+table.items .num, table.items td.mono { font-variant-numeric: tabular-nums; }
+/* A long transporter or supplier name wraps to a second line rather than
+   stretching its column — the row grows a little, the table stays put. */
+table.items.reg td .cellmain { overflow-wrap: anywhere; line-height: 1.35; }
+/* the paired value (mode under transport, date under LR no) */
+table.items.reg td .cellsub { font-size: 10.5px; color: var(--muted); line-height: 1.3;
+  overflow-wrap: anywhere; }
+table.items.reg td.mono .cellsub { font-family: inherit; }
+/* Row actions: a bare glyph, no button chrome. Two full buttons per row drew the
+   eye before the data did, which is backwards for a register you read down. */
+.iconbtn { background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 3px 5px; border-radius: 5px; }
+.iconbtn:hover { color: var(--text); background: var(--panel-2); }
+.iconbtn.danger:hover { color: #e06c6c; }
 .items-foot { display:flex; gap:16px; margin-top:8px; color: var(--muted); font-size:12px; }
 .items-foot b { color: var(--text); font-variant-numeric: tabular-nums; }
 
@@ -167,6 +197,32 @@ table.items td.num input { text-align: right; font-variant-numeric: tabular-nums
 .trainflag.no { background:#3a2f13; color:var(--warn); }
 .small { font-size: 12px; color: var(--muted); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ---------- per-piece codes (click a quantity) ---------- */
+/* The quantity reads as a number but behaves as a link, because 8 pcs is a way
+   into the eight individually coded garments behind it. */
+.qtylink { background: none; border: none; color: var(--text); font: inherit; cursor: pointer;
+  padding: 0; border-bottom: 1px dashed var(--muted); }
+.qtylink:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.piece-wrap { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center;
+  justify-content: center; background: rgba(8, 11, 18, .78); backdrop-filter: blur(3px);
+  animation: fadein .15s ease; padding: 24px; }
+.piece-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  width: min(980px, 100%); max-height: 86vh; display: flex; flex-direction: column; }
+.piece-head { display: flex; align-items: baseline; gap: 12px; padding: 16px 20px;
+  border-bottom: 1px solid var(--line); }
+.piece-body { overflow: auto; padding: 16px 20px; }
+.piece-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+.piece { border: 1px solid var(--line); border-radius: 10px; padding: 10px; text-align: center;
+  background: var(--panel-2); }
+.piece img { width: 96px; height: 96px; background: #fff; border-radius: 4px; padding: 3px; }
+.piece .code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; margin-top: 6px; }
+.piece .acts { display: flex; gap: 5px; justify-content: center; margin-top: 7px; }
+.piece .acts button { padding: 3px 8px; font-size: 11px; }
+.piece-foot { display: flex; gap: 10px; align-items: center; padding: 14px 20px;
+  border-top: 1px solid var(--line); }
+.piece-zoom { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0 18px; }
+.piece-zoom img { width: 260px; height: 260px; background: #fff; border-radius: 6px; padding: 8px; }
 
 /* ---------- scanning overlay ---------- */
 .scan-overlay { position: fixed; inset: 0; z-index: 95; display: flex; flex-direction: column;

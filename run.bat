@@ -15,5 +15,5 @@ if "%1"=="--reset" (
 
 echo.
 echo ==^> Serving on http://localhost:8000/   (Ctrl-C to stop)
-echo     Tip: turn on Vision in the app (top-right) for best extraction.
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+echo     Tip: turn on Vision in the app (top-right) for best extraction.

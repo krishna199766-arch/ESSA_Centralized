@@ -35,11 +35,19 @@ LR ↔ Invoice linking:
 from .. import models
 
 # Every column we compare when deciding "exactly the same" vs "doubtful" — the
-# columns that come off the register page.
+# columns that come off the register PAGE, and only those.
+#
+# The office-decision columns (purchase_manager, stock_holding_days,
+# additional_margin, auto_transfer_location) are deliberately absent. They are
+# never printed on a register, so a re-import always has them blank; comparing
+# them would make every row where someone had since filled one in come back
+# "doubtful" against its own twin, and the point of the check is to spot a page
+# transcribed differently, not office edits.
 LR_ALL_FIELDS = ["recv_date", "transport", "bundle", "lr_no", "lr_date",
                  "supplier_name", "inv_no", "inv_date", "qty", "amount",
-                 "paid_topay", "freight_amount", "cash_cheque", "item"]
-_LR_NUMERIC = {"bundle", "qty", "amount", "freight_amount"}
+                 "paid_topay", "freight_amount", "item",
+                 "lr_mode", "boxes", "agent"]
+_LR_NUMERIC = {"bundle", "qty", "amount", "freight_amount", "boxes"}
 
 
 def _norm(v):

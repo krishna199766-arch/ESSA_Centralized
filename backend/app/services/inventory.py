@@ -30,7 +30,7 @@ def _norm(s):
 # already the record the warehouse and the label expect.
 SPLIT_ATTRS = ("size", "color", "material", "pattern", "fit", "product_type", "design_no")
 # per-variant money fields — these describe price, never identity
-SPLIT_PRICES = ("rate", "mrp", "sale_price", "margin_pct")
+SPLIT_PRICES = ("rate", "mrp", "sale_price", "sale_discount_pct")
 
 
 def match_product(db, barcode, description, hsn, supplier_id, attrs=None):
@@ -249,7 +249,7 @@ def _create_product(db, purchase, line, split=None, mint_codes=False):
             setattr(product, a, getattr(split, a, None))
         product.mrp = split.mrp
         product.sale_price = split.sale_price
-        product.margin_pct = split.margin_pct
+        product.sale_discount_pct = split.sale_discount_pct
     db.add(product)
     db.flush()
     if mint_codes:
@@ -280,7 +280,16 @@ def post_grn(db, purchase):
         return {"ok": False, "purchase_id": purchase.id,
                 "error": "breakdown doesn't add up — " + "; ".join(off)}
 
-    created, updated, split_rows = 0, 0, 0
+    from . import units as unit_svc
+    created, updated, split_rows, pieces = 0, 0, 0, 0
+    # one identity per physical piece, under the SKU that receives it — the stock
+    # figure stays at SKU level, this is the layer a garment tag hangs off
+    def _serialise(product, qty):
+        nonlocal pieces
+        made = unit_svc.create_for_receipt(db, product, qty, purchase)
+        pieces += len(made)
+        return made
+
     for line in purchase.lines:
         if line.is_split:
             for sp in line.splits:
@@ -302,7 +311,7 @@ def post_grn(db, purchase):
                     updated += 1
                     # an existing variant can still pick up prices set on this GRN,
                     # and any attribute it was missing (e.g. matched by scanned QR)
-                    for f in ("mrp", "sale_price", "margin_pct"):
+                    for f in ("mrp", "sale_price", "sale_discount_pct"):
                         if getattr(sp, f) is not None:
                             setattr(product, f, getattr(sp, f))
                     for a in SPLIT_ATTRS:
@@ -315,6 +324,7 @@ def post_grn(db, purchase):
                     product.hsn = line.hsn
                 _receive_into_stock(db, product, sp.qty, sp.effective_rate,
                                     purchase, note=sp.variant_label or None)
+                _serialise(product, sp.qty)
                 split_rows += 1
             continue
 
@@ -331,15 +341,21 @@ def post_grn(db, purchase):
         if line.hsn and not product.hsn:
             product.hsn = line.hsn
         _receive_into_stock(db, product, line.qty, line.rate, purchase)
+        _serialise(product, line.qty)
 
     purchase.status = "posted"
     purchase.posted_at = dt.datetime.utcnow()
     if purchase.document:
         purchase.document.status = "posted"
     db.flush()
+    # the goods are now on the floor and have to go somewhere, so each carton gets
+    # its handling label here — the item labels come later, at tagging
+    from . import bundles as bundle_svc
+    made = bundle_svc.create_for_purchase(db, purchase)
     return {"ok": True, "purchase_id": purchase.id,
             "products_created": created, "products_updated": updated,
-            "lines": len(purchase.lines), "size_rows": split_rows}
+            "lines": len(purchase.lines), "size_rows": split_rows,
+            "bundles": [b.code for b in made], "pieces": pieces}
 
 
 # ---------------------------------------------------------------------------
@@ -523,10 +539,18 @@ def unpost_grn(db, purchase):
     purchase.posted_at = None
     if purchase.document and purchase.document.status == "posted":
         purchase.document.status = "confirmed"
+    # the cartons describe a receipt that, as of now, did not happen — and their
+    # labels point at products this unpost may have just deleted. The per-piece
+    # codes go the same way: those garments were never received.
+    from . import bundles as bundle_svc
+    from . import units as unit_svc
+    pieces_dropped = unit_svc.remove_for_purchase(db, purchase)
+    dropped = bundle_svc.remove_for_purchase(db, purchase)
     db.flush()
     return {"ok": True, "purchase_id": purchase.id, "movements_reversed": n_reversed,
             "qty_reversed": round(qty_reversed, 3),
-            "products_removed": removed, "products_kept": kept}
+            "products_removed": removed, "products_kept": kept,
+            "bundles_removed": dropped, "pieces_removed": pieces_dropped}
 
 
 def adjust_stock(db, product, new_qty, note="manual adjustment"):

@@ -4,11 +4,20 @@ Map a free-text invoice description onto the Product Category master.
 Suppliers write whatever they like on a bill — "Women's T-shirt", "LADIES TSHIRT",
 "GENTS SHIRT FS", "baba suit 3pc" — while the master (from GRN PRODUCT DETAILS.xlsx)
 uses a fixed vocabulary of ~690 names like LADIES-T-SHIRT / MENS-SHIRT / KIDS-BABASUIT.
-This module bridges the two deterministically: no model call, no network, and the
+Mapping the two is what keeps ONE product master across every supplier: the same
+garment described four ways becomes one record, one QR and one stock figure,
+instead of four near-duplicates nobody can report on.
+
+This module bridges them deterministically: no model call, no network, and the
 same input always gives the same answer, so a mis-mapping can be reasoned about
 and fixed by editing the rules below.
 
-Two steps:
+Three steps:
+
+ 0. What we have been told. A wording a human has already mapped (CategoryAlias)
+    wins outright — see learn_alias. Suppliers keep inventing descriptions and no
+    hand-written rule list ever finishes, so the engine learns from each correction
+    instead of waiting on a developer.
 
  1. Section. Gender/age words in the description are canonicalised to the master's
     own vocabulary ("women's", "womens", "female", "ladies" -> LADIES). This is
@@ -20,10 +29,11 @@ Two steps:
     outright — a women's tee must never land in MENS-T-SHIRT, no matter how well
     the rest of the string scores.
 
-The caller decides what to do with a weak result: `confident` is only True when
-the score clears AUTO_THRESHOLD and beats the runner-up by MIN_MARGIN, so vague
-descriptions ("ASSORTED", "GARMENTS") stay unmapped and get reviewed instead of
-being silently filed in the wrong place.
+The caller decides what to do with a weak result: `confident` is only True when the
+score clears AUTO_THRESHOLD, beats the runner-up by MIN_MARGIN, and shares a whole
+WORD with the category name — so vague descriptions ("ASSORTED", "GARMENTS") and
+near-spellings of the wrong thing ("GENTS TEE" against MENS-TIE) stay unmapped and
+get reviewed instead of being silently filed in the wrong place.
 """
 import re
 from rapidfuzz import fuzz
@@ -50,8 +60,27 @@ SECTION_WORDS = [
 GENDER_TOKENS = {"KIDS": "KIDS", "LADIES": "LADIES", "MENS": "MENS",
                  "LW": "LADIES", "MW": "MENS", "KW": "KIDS"}
 
-# noise that carries no category signal and only dilutes the score
-STOPWORDS = {"OF", "THE", "AND", "WITH", "FOR", "PCS", "PC", "NOS", "NO", "SET",
+# Words that say which section AND survive into the search text, because the master
+# uses them to tell two categories apart: KIDS-BOYS PANT and KIDS-GIRLS PANT are
+# both KIDS and both PANT. Stripping them as ordinary section synonyms left one
+# search text ("KIDS PANT") for three different categories, and whichever scored
+# highest took every one of them.
+#
+# BABY is deliberately NOT here, though the master has KIDS-BABY TOWEL. Keeping it
+# does fix that one name, but the master also has the catch-all KIDS-BABY ITEMS,
+# and a preserved BABY drags every unrecognised "BABY <something>" into it — a
+# measured "BABY DRESS" went from honest review to auto-filing as BABY ITEMS. A
+# bucket category that shares the qualifier attracts everything, and silently
+# wrong beats loudly unsure. BOYS/GIRLS have no such twin.
+QUALIFIERS = {"BOYS", "BOY", "GIRLS", "GIRL"}
+
+# noise that carries no category signal and only dilutes the score.
+# "SET" is deliberately NOT here: 17 master names end in it and six of those are
+# distinguished from a twin by that word alone (DHOTI SET vs DHOTI, KIDS-MIDI SET
+# vs KIDS-MIDI). Dropping it made every one of those categories unreachable — a
+# "DHOTI SET" line filed silently as DHOTI. A *counted* set ("2 SET") is a pack
+# quantity and is stripped by the SYNONYMS rule below instead.
+STOPWORDS = {"OF", "THE", "AND", "WITH", "FOR", "PCS", "PC", "NOS", "NO",
              "ASSTD", "ASST", "QTY", "PRINTED", "PLAIN", "NEW", "FANCY", "SUPER",
              "DELUXE", "BRANDED", "QUALITY", "MIX", "MIXED"}
 
@@ -68,9 +97,25 @@ _SIZE_RUN = re.compile(r"\b(?:XS|S|M|L|XL|XXL|XXXL|\d+X\d+|\d+)\b")
 SYNONYMS = [
     (re.compile(r"\bT ?SHIRTS?\b"), "T SHIRT"),           # TSHIRT / T SHIRTS -> T-SHIRT
     (re.compile(r"\bTEE ?SHIRTS?\b"), "T SHIRT"),
+    # ...and the bare word, which has to come AFTER the rule above so "TEE SHIRT"
+    # is already "T SHIRT" and doesn't become "T SHIRT SHIRT". Without this,
+    # "Ladies Tee" has no garment token the master shares and fuzzy matching
+    # drifts to whatever is closest by characters — LADIES-SAREE, and worse,
+    # "Gents Tee" scored MENS-TIE high enough to auto-apply. No category in the
+    # master contains "TEE", so rewriting it is safe on both sides.
+    (re.compile(r"\bTEES?\b"), "T SHIRT"),
     (re.compile(r"\bBAB(?:Y|A) ?SUITS?\b"), "BABASUIT"),
     (re.compile(r"\bNIGHT(?:IE|Y|IES)\b"), "NIGHTY"),
-    (re.compile(r"\bCH[UR]+I?[DT]H?AR\b"), "CHUDITHAR"),  # churidar/chudidhar/...
+    # churidar / chudidar / chudidhar / churidhar -> the master's CHUDITHAR. The
+    # earlier pattern could not match "CHUDIDHAR", the spelling it named: after
+    # CH[UR]+ had taken the U it needed an optional I before the D, and the real
+    # word puts the I after it.
+    (re.compile(r"\bCH[UI][RD]I[DT]H?ARS?\b"), "CHUDITHAR"),
+    # a counted pack is quantity, not identity: "BABA SUIT 3PC" and "BABA SUIT"
+    # are the same category. Stripping it also means one alias covers "3PC",
+    # "3 PC" and "3 PCS" instead of three. Note the count is REQUIRED: a bare
+    # "SET" is part of the name (DHOTI SET), while "2 SET" is two of them.
+    (re.compile(r"\b\d+\s?(?:PC|PCS|PIECE|PIECES|SET|SETS)\b"), " "),
     (re.compile(r"\bLEGGIN(?:G|GS|S)\b"), "LEGGINGS"),
     (re.compile(r"\bSAREES\b"), "SAREE"),
     (re.compile(r"\bFULL SLEEVES?\b|\bF ?S\b"), ""),      # sleeve length isn't a category
@@ -121,7 +166,7 @@ def _canonical_text(description, section):
     if not section:
         return " ".join(words)
     aliases = {n for sec, needles in SECTION_WORDS if sec == section for n in needles}
-    single = {a for a in aliases if " " not in a}
+    single = {a for a in aliases if " " not in a} - QUALIFIERS
     out = [w for w in words if w not in single]
     return " ".join([section] + out)
 
@@ -156,17 +201,97 @@ def _score(search_text, name_norm, section, cat_section):
     return rank, name_score
 
 
+# two words count as the same when they are this close — a plural or a one-letter
+# misspelling, not a different garment. SHIRT/SKIRT score 80 and TEE/TIE 67, so
+# both stay apart; CHUDIDHAR/CHUDITHAR (89) and PANT/PANTS (89) come together.
+TOKEN_NEAR = 85
+TOKEN_MIN_LEN = 4          # short words are where near-misses turn into wrong stock
+
+
+def _shares_a_word(search_text, name_norm, section):
+    """True when the description and the category name have a word in common —
+    the same word, or one spelt within a letter of it — ignoring the section word
+    they may both carry.
+
+    Character similarity across the WHOLE string must never be enough to file
+    stock automatically: "GENTS TEE" and "MENS TIE" differ by one letter and
+    scored 87.5, which was confident enough to post t-shirts into MENS-TIE.
+    Requiring a shared word means a wording the rules don't cover yet goes to a
+    human instead of somewhere plausible-looking — and the human's answer is then
+    remembered (see learn_alias), so nobody is asked about it twice."""
+    words = {w for w in search_text.split() if w != section}
+    names = {w for w in name_norm.split() if w != section}
+    if words & names:
+        return True
+    return any(fuzz.ratio(w, n) >= TOKEN_NEAR
+               for w in words if len(w) >= TOKEN_MIN_LEN
+               for n in names if len(n) >= TOKEN_MIN_LEN)
+
+
+# a strong enough name match stands on its own — this is the "LADIES-NIGHTY" vs
+# "LADIES NIGHTIE" case, already bridged by SYNONYMS, kept as a safety valve
+STRONG_SCORE = 97
+
+
+def _alias_for(db, key):
+    return db.query(models.CategoryAlias).filter(models.CategoryAlias.key == key).first()
+
+
+def learn_alias(db, description, category_name, section=None, source="human"):
+    """Remember that this wording means this category, because a human said so.
+
+    Called when someone sets the category on a GRN line by hand — the one moment
+    the system is being told, unambiguously, what a supplier's words mean. Re-teaching
+    the same wording overwrites it, so a mapping that turns out wrong is corrected
+    the same way it was created: set the right category on any line that reads that
+    way. Passing an empty category forgets it."""
+    key = _canonical_text(description, detect_section(description))
+    if not key:
+        return None
+    row = _alias_for(db, key)
+    if not category_name:
+        if row:
+            db.delete(row)
+            db.flush()
+        return None
+    cat = db.query(models.Category).filter(models.Category.name == category_name).first()
+    if not cat:
+        return None                      # never learn a name the master doesn't have
+    sec = section or next((c.section for c in db.query(models.Category).filter(
+        models.Category.name == category_name).all() if c.section and c.section != "OVERALL"),
+        cat.section)
+    if row:
+        row.category, row.section, row.source = category_name, sec, source
+        row.sample = description
+    else:
+        row = models.CategoryAlias(key=key, sample=description, category=category_name,
+                                   section=sec, source=source, hits=0)
+        db.add(row)
+    db.flush()
+    return row
+
+
 def suggest(db, description, limit=5, section=None):
     """Rank the category master against a description.
 
-    Returns {section, query, best, confident, candidates:[{name, section, score}]}.
+    Returns {section, query, best, confident, via, candidates:[{name, section, score}]}.
     `best` is None when nothing scores usefully. Pass `section` to override the
-    detected one (e.g. the operator picked LADIES by hand)."""
+    detected one (e.g. the operator picked LADIES by hand). `via` is "alias" when a
+    human has already told the system what this wording means, else "rules"."""
     detected = section or detect_section(description)
     search = _canonical_text(description, detected)
     if not search:
         return {"section": detected, "query": search, "best": None,
-                "confident": False, "candidates": []}
+                "confident": False, "via": "rules", "candidates": []}
+
+    # What a human has already said beats what the rules can infer — that is the
+    # whole point of having been told.
+    alias = _alias_for(db, search) if section is None else None
+    if alias:
+        best = {"name": alias.category, "section": alias.section, "score": 100.0,
+                "section_match": bool(detected and alias.section == detected)}
+        return {"section": detected, "query": search, "best": best, "confident": True,
+                "via": "alias", "learned_from": alias.sample, "candidates": [best]}
 
     scored = []
     for c in db.query(models.Category).all():
@@ -180,7 +305,7 @@ def suggest(db, description, limit=5, section=None):
 
     if not scored:
         return {"section": detected, "query": search, "best": None,
-                "confident": False, "candidates": []}
+                "confident": False, "via": "rules", "candidates": []}
 
     # best score per distinct name (OVERALL duplicates most sectioned entries, so
     # the same name can appear twice — keep the sectioned, higher-ranking one)
@@ -195,11 +320,14 @@ def suggest(db, description, limit=5, section=None):
               "score": round(min(ns, 100.0), 1),
               "section_match": bool(detected and c.section == detected)}
              for _, ns, c in ranked[:limit]]
-    top_rank = ranked[0][0]
+    top_rank, top_name_score, top_cat = ranked[0]
     runner_rank = ranked[1][0] if len(ranked) > 1 else 0
-    confident = top_rank >= AUTO_THRESHOLD and (top_rank - runner_rank) >= MIN_MARGIN
+    confident = (top_rank >= AUTO_THRESHOLD
+                 and (top_rank - runner_rank) >= MIN_MARGIN
+                 and (_shares_a_word(search, normalise(top_cat.name), detected)
+                      or top_name_score >= STRONG_SCORE))
     return {"section": detected, "query": search, "best": cands[0],
-            "confident": confident, "candidates": cands}
+            "confident": confident, "via": "rules", "candidates": cands}
 
 
 def categorise_product(db, product, force=False):
@@ -213,4 +341,10 @@ def categorise_product(db, product, force=False):
         product.category = res["best"]["name"]
         product.category_section = res["best"]["section"]
         res["applied"] = True
+        if res.get("via") == "alias":
+            # count the use, not the render: suggest() runs every time a GRN is
+            # opened, so only an actual mapping is evidence the alias earns its keep
+            row = _alias_for(db, res["query"])
+            if row:
+                row.hits = (row.hits or 0) + 1
     return res

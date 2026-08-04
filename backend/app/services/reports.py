@@ -15,10 +15,10 @@ def _rep(columns, rows, totals=None):
 
 
 def stock_report(db):
-    cols = ["sku", "barcode", "description", "hsn", "supplier", "uom", "stock_qty", "avg_cost", "stock_value"]
+    cols = ["sku", "supplier_barcode", "description", "hsn", "supplier", "uom", "stock_qty", "avg_cost", "stock_value"]
     rows, tqty, tval = [], 0.0, 0.0
     for p in db.query(models.Product).order_by(models.Product.description).all():
-        rows.append({"sku": p.sku, "barcode": p.barcode or "", "description": p.description,
+        rows.append({"sku": p.sku, "supplier_barcode": p.barcode or "", "description": p.description,
                      "hsn": p.hsn or "", "supplier": p.primary_supplier.name if p.primary_supplier else "",
                      "uom": p.uom, "stock_qty": p.stock_qty, "avg_cost": round(p.avg_cost or 0, 2),
                      "stock_value": p.stock_value})
@@ -100,8 +100,8 @@ def payments_register(db):
 
 
 def product_master(db):
-    cols = ["sku", "barcode", "description", "hsn", "uom", "mrp", "avg_cost", "stock_qty", "supplier"]
-    rows = [{"sku": p.sku, "barcode": p.barcode or "", "description": p.description, "hsn": p.hsn or "",
+    cols = ["sku", "supplier_barcode", "description", "hsn", "uom", "mrp", "avg_cost", "stock_qty", "supplier"]
+    rows = [{"sku": p.sku, "supplier_barcode": p.barcode or "", "description": p.description, "hsn": p.hsn or "",
              "uom": p.uom, "mrp": p.mrp or "", "avg_cost": round(p.avg_cost or 0, 2), "stock_qty": p.stock_qty,
              "supplier": p.primary_supplier.name if p.primary_supplier else ""}
             for p in db.query(models.Product).order_by(models.Product.description).all()]
