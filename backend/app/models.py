@@ -433,11 +433,20 @@ class StockMovement(Base):
 
 
 # ============================================================================
-#  Stock Outward  (Warehouse → destination dispatch / transfer)
+#  Stock Outward / Stock Inward  (warehouse → destination, and its acceptance)
 # ============================================================================
 class StockOutward(Base):
-    """A dispatch / inter-location transfer out of the warehouse. Posting
-    decrements product stock (negative StockMovement, kind='outward')."""
+    """A dispatch / inter-location transfer out of the warehouse, and the record
+    the destination accepts it on.
+
+    One row, two screens, because they are two ends of ONE movement: Stock
+    Outward is the warehouse packing and sending it (posting decrements stock via
+    a negative StockMovement, kind='outward'), Stock Inward is the destination
+    counting what turned up and accepting it. Splitting them into two documents
+    would mean reconciling the pair; keeping the sent qty and the accepted qty on
+    the same line makes a short delivery visible by subtraction.
+
+    draft → posted (dispatched, stock out) → received (counted and accepted)."""
     __tablename__ = "stock_outwards"
     id = Column(Integer, primary_key=True)
     code = Column(String)                       # package / order code
@@ -446,7 +455,9 @@ class StockOutward(Base):
     from_location = Column(String, default="WAREHOUSE")
     to_destination = Column(String)             # store / customer
     packed_by = Column(String)
-    received_by = Column(String)
+    received_by = Column(String)                # who accepted it at the far end
+    received_date = Column(String)              # the date they wrote on the note
+    received_at = Column(DateTime, nullable=True)   # when it was keyed in
     status = Column(String, default="draft", index=True)   # draft | posted | received
     posted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=now)
@@ -457,6 +468,23 @@ class StockOutward(Base):
     @property
     def total_qty(self):
         return sum((l.qty or 0) for l in self.lines)
+
+    @property
+    def total_accepted(self):
+        """What the destination took in. Unreceived lines count as nothing
+        accepted YET — reading them as fully accepted would show a dispatch
+        nobody has looked at as if it had been checked and agreed."""
+        if self.status != "received":
+            return 0.0
+        return sum((l.accepted_qty if l.accepted_qty is not None else (l.qty or 0))
+                   for l in self.lines)
+
+    @property
+    def shortfall(self):
+        """Sent minus accepted — the transfer discrepancy, once received."""
+        if self.status != "received":
+            return 0.0
+        return round(self.total_qty - self.total_accepted, 3)
 
 
 class StockOutwardLine(Base):
@@ -472,6 +500,13 @@ class StockOutwardLine(Base):
 
     outward = relationship("StockOutward", back_populates="lines")
     product = relationship("Product")
+
+    @property
+    def short_qty(self):
+        """How many of this line failed to arrive (0 until it is received)."""
+        if self.accepted_qty is None:
+            return 0.0
+        return round(float(self.qty or 0) - float(self.accepted_qty or 0), 3)
 
 
 # ============================================================================
@@ -549,19 +584,36 @@ class PurchaseReturn(Base):
 
 
 class PurchaseReturnLine(Base):
+    """One product going back to the supplier, valued at what we PAID for it.
+
+    `rate` is the received price — the GRN cost of this exact item: the rate on
+    the invoice line, or, when the billed bundle was broken down, the rate of the
+    variant being returned. It is never the sale price or the MRP: a debit note
+    settles a supplier account, so it can only carry what that supplier charged
+    us. services/returns.grn_cost() is the single place that decides it, and it is
+    re-derived from the GRN at post time so a stale draft cannot slip through.
+
+    `purchase_line_id` / `split_id` record WHICH received row this line is
+    returning, which is what makes that re-derivation exact — and what lets the
+    screen show the batch and how many of it were bought in the first place."""
     __tablename__ = "purchase_return_lines"
     id = Column(Integer, primary_key=True)
     return_id = Column(Integer, ForeignKey("purchase_returns.id"))
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    purchase_line_id = Column(Integer, ForeignKey("purchase_lines.id"), nullable=True)
+    split_id = Column(Integer, ForeignKey("purchase_line_splits.id"), nullable=True)
     barcode = Column(String)
     description = Column(String)
     hsn = Column(String)
+    uom = Column(String)
     qty = Column(Float)                         # qty returned
-    rate = Column(Float)
+    rate = Column(Float)                        # GRN / received cost per unit
     amount = Column(Float)
 
     ret = relationship("PurchaseReturn", back_populates="lines")
     product = relationship("Product")
+    purchase_line = relationship("PurchaseLine")
+    split = relationship("PurchaseLineSplit")
 
 
 # ============================================================================

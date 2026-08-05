@@ -29,9 +29,20 @@ Invoice Entry, Inventory Entry and Stock Inward in the reference application.
 - **Inventory** — stock master with per-product **edit** and **stock
   adjustment** (physical-count correction), plus a movement ledger.
 - **Stock Outward** — dispatch stock to a store/customer; posting reduces
-  warehouse stock (guards against going negative).
+  warehouse stock (guards against going negative). Every line shows the whole
+  product record — **QR, name, size, colour, the rest of the attributes, and the
+  batch (GRN / invoice / carton) it was received on** — and a garment can be
+  scanned straight into the note, so the size that goes in the box is the size on
+  the paperwork.
+- **Stock Inward** — the receiving end of that dispatch. The destination scans
+  each piece in, accepts line by line against the same document (same full
+  product detail), and any shortfall is recorded as a transfer discrepancy
+  instead of quietly disappearing.
 - **Returns** — purchase return / **debit note** against a reference invoice:
-  reverses stock and reduces the supplier's payable.
+  reverses stock and reduces the supplier's payable. Lines are the items that
+  were actually *received* — a bundle broken down at GRN comes back as its
+  variants — and each is priced at its **purchase / GRN cost, never the sale
+  price or MRP**, so the debit reconciles against the supplier's own invoice.
 - **Payments** — supplier accounts-payable: search pending bills, settle with
   cash + **discount + TDS + debit-note**, generates receipts and a ledger.
 - **Reports** — Stock Report, Stock Movement, Purchase Register, Purchase Return
@@ -403,9 +414,10 @@ essa-intake/
 │  │  │  └─ engine.py       orchestrator: detect → extract → validate → learn
 │  │  ├─ services/
 │  │  │  ├─ inventory.py    GRN build + matching + stock posting/adjust (avg cost)
-│  │  │  ├─ outward.py      stock outward / dispatch (stock-out movements)
+│  │  │  ├─ outward.py      stock outward / inward (dispatch, then acceptance)
+│  │  │  ├─ stock_view.py   one product record for every stock screen (QR + batch)
 │  │  │  ├─ payments.py     accounts payable: pending bills, payments, ledger
-│  │  │  ├─ returns.py      purchase return / debit note (stock reverse + payable)
+│  │  │  ├─ returns.py      purchase return / debit note at GRN cost (+ payable)
 │  │  │  └─ reports.py      report catalogue (stock, purchase, finance, masters)
 │  │  ├─ routers/           documents · suppliers · purchases · inventory
 │  │  │                     · outward · payments · returns · reports API
@@ -456,7 +468,10 @@ for production), `ESSA_COMPANY_GSTIN`, `ESSA_COMPANY_NAME`.
 | GET | `/api/inventory/products` · `/products/{id}` | stock master + movement ledger |
 | POST | `/api/inventory/products/{id}/detail` | phone app: physical attributes + prices |
 | POST | `/api/inventory/products/{id}/adjust-stock` | correct stock to an exact figure |
-| GET/POST | `/api/outward` · `/api/outward/{id}` · `/{id}/post` | stock outward / dispatch |
+| GET | `/api/inventory/product-card?code=` | full product record for a scanned code (QR, attributes, batch) |
+| GET/POST | `/api/outward?status=` · `/api/outward/{id}` · `/{id}/post` | stock outward / dispatch |
+| POST | `/api/outward/{id}/receive` | stock inward: accept a transfer (per-line accepted qty) |
+| GET | `/api/outward/{id}/verify?code=` | is this scanned garment on that transfer? |
 | GET | `/api/payments/pending?supplier_id=` | unpaid invoices (Search Pendings) |
 | POST | `/api/payments` | record a payment (cash + discount + TDS + debit) |
 | GET | `/api/payments` · `/api/payments/supplier/{id}/ledger` | payment register + ledger |

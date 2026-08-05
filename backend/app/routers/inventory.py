@@ -316,6 +316,26 @@ def lookup(code: str, db: Session = Depends(get_db)):
     return _product_out(p)
 
 
+@router.get("/product-card")
+def product_card(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
+    """The full product record as the stock screens show it — QR, name, the
+    attribute tuple, and the batches it was received on.
+
+    Same projection Stock Outward, Stock Inward and Purchase Return use for their
+    lines, reachable on its own so a scan can be verified before anything is
+    added to a document."""
+    from ..services import stock_view
+    if product_id:
+        p = db.get(models.Product, product_id)
+        if not p:
+            raise HTTPException(404, "product not found")
+        return stock_view.product_card(db, p)
+    card = stock_view.card_for_code(db, code)
+    if not card:
+        raise HTTPException(404, f"no product for code '{code}'")
+    return card
+
+
 @router.get("/products/{prod_id}/barcode.svg")
 def product_barcode_svg(prod_id: int, db: Session = Depends(get_db)):
     """Bare SVG of the product's barcode — for inline preview in the UI."""

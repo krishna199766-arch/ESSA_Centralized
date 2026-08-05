@@ -1186,6 +1186,174 @@ function Inventory({ toast }) {
   )
 }
 
+// ---------- the product record, as every stock movement has to show it ----------
+//
+// Stock Outward, Stock Inward and Purchase Return are all somebody standing over
+// a carton matching a row on a screen against a garment in their hand. A barcode
+// and a description cannot settle that — four sizes of one style share both — so
+// these three render the whole record the backend sends (services/stock_view.py):
+// the QR that is actually scanned, the name, the attributes that tell one variant
+// from its siblings, and the batch the stock was received on.
+
+// One QR, sized for where it is shown. Renders the real code, so it scans off the
+// screen — a picker with a phone doesn't have to find the printed label first.
+function ProductQr({ product, size = 40, title }) {
+  if (!product) return <span style={{ color: 'var(--muted)' }}>—</span>
+  return (
+    <img className="pqr" src={api.qrSvgUrl(product.product_id, size > 60 ? 4 : 2)}
+      alt={`QR ${product.sku || ''}`} loading="lazy"
+      title={title || `${product.sku || ''} — scan or click to enlarge`}
+      style={{ width: size, height: size }} />
+  )
+}
+
+// The attribute tuple as chips. Blank attributes are dropped by the backend, so a
+// sparsely-detailed product shows what it has instead of a row of dashes.
+function ProductAttrs({ product, showCategory = true }) {
+  if (!product) return null
+  const chips = product.attributes || []
+  if (!chips.length && !product.category) {
+    return <span className="small" style={{ color: 'var(--muted)' }}>no details recorded yet</span>
+  }
+  return (
+    <div className="attrchips">
+      {chips.map((a) => (
+        <span key={a.key} className="attrchip" title={a.label}>
+          <i>{a.label}</i>{a.value}
+        </span>
+      ))}
+      {showCategory && product.category && <span className="attrchip cat">{product.category}</span>}
+    </div>
+  )
+}
+
+// Which receipt the goods came in on — this system's batch. Stock is pooled per
+// SKU, so a dispatch can draw on more than one GRN; the extras are named in the
+// tooltip rather than hidden behind a single "the" batch.
+function BatchTag({ product }) {
+  const b = product?.batch
+  if (!b) return <span style={{ color: 'var(--muted)' }}>—</span>
+  const more = (product.batches || []).slice(1)
+  return (
+    <span className="batchtag" title={[
+      b.grn_no ? `GRN ${b.grn_no}` : null,
+      b.invoice_number ? `Invoice ${b.invoice_number}${b.invoice_date ? ' · ' + b.invoice_date : ''}` : null,
+      b.bundle_code ? `Bundle ${b.bundle_code}` : null,
+      b.supplier ? `From ${b.supplier}` : null,
+      more.length ? `+ ${more.length} earlier receipt(s): ${more.map((x) => x.label).join(', ')}` : null,
+    ].filter(Boolean).join('\n')}>
+      {b.label}{more.length ? ` +${more.length}` : ''}
+    </span>
+  )
+}
+
+// The identity block used in a table cell: name, SKU, variant chips.
+function ProductIdent({ product, fallback }) {
+  if (!product) return <span>{fallback || '—'}</span>
+  return (
+    <div className="pident">
+      <div className="nm">{product.name}</div>
+      <div className="sub">
+        <span className="mono">{product.sku || product.code}</span>
+        {product.uom && <span>{product.uom}</span>}
+        {product.hsn && <span>HSN {product.hsn}</span>}
+        {product.supplier_barcode && (
+          <span className="mono" title="The supplier's own printed code">
+            ⌗ {product.supplier_barcode}</span>
+        )}
+      </div>
+      <ProductAttrs product={product} />
+    </div>
+  )
+}
+
+// The full card, opened by clicking a QR — everything about the item at once,
+// with the code big enough to scan across a packing bench.
+function ProductCardModal({ product, onClose }) {
+  if (!product) return null
+  const money2 = (v) => (v == null ? '—' : '₹ ' + money(v))
+  return (
+    <div className="piece-wrap" onClick={onClose}>
+      <div className="piece-card" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
+        <div className="piece-head">
+          <b className="mono">{product.sku || product.code}</b>
+          <span>{product.name}</span>
+          <button className="btn" style={{ marginLeft: 'auto' }} onClick={onClose}>✕</button>
+        </div>
+        <div className="piece-body" style={{ display: 'flex', gap: 20 }}>
+          <div style={{ textAlign: 'center' }}>
+            <img src={api.qrSvgUrl(product.product_id, 5)} alt="QR"
+              style={{ width: 190, height: 190, background: '#fff', borderRadius: 6, padding: 8 }} />
+            <div className="mono" style={{ fontSize: 12, marginTop: 4 }}>{product.sku || product.code}</div>
+            <a className="btn" style={{ marginTop: 8, display: 'inline-block' }}
+              href={api.labelUrl(product.product_id)} target="_blank" rel="noreferrer">🖨 Print label</a>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div className="kv" style={{ gridTemplateColumns: '110px 1fr' }}>
+              <div className="k">Product</div><div>{product.name}</div>
+              <div className="k">Category</div><div>{product.category || '—'}
+                {product.category_section ? <span className="small"> · {product.category_section}</span> : null}</div>
+              {(product.attributes || []).map((a) => (
+                <React.Fragment key={a.key}>
+                  <div className="k">{a.label}</div><div>{a.value}</div>
+                </React.Fragment>
+              ))}
+              <div className="k">HSN / UOM</div><div>{product.hsn || '—'} · {product.uom || '—'}</div>
+              <div className="k">Batch</div><div><BatchTag product={product} /></div>
+              <div className="k">Supplier</div><div>{product.supplier || '—'}</div>
+              <div className="k">In stock</div><div><b>{product.stock_qty}</b> {product.uom}</div>
+              {/* the two prices, kept visibly apart: one is what we paid, the
+                  other what we sell for, and a debit note may only use the first */}
+              <div className="k">GRN cost</div><div>{money2(product.grn_cost)}
+                <span className="small" style={{ color: 'var(--muted)' }}> — purchase price</span></div>
+              <div className="k">MRP / Sale</div><div>{money2(product.mrp)} / {money2(product.sale_price)}
+                <span className="small" style={{ color: 'var(--muted)' }}> — selling side</span></div>
+            </div>
+          </div>
+        </div>
+        <div className="piece-foot">
+          <span className="small">Scanning this QR anywhere in the app resolves to this product — it carries
+            the whole record, so it reads with no network too.</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// One dispatch / receipt / return line, rendered the same way on all three
+// screens. `cols` are the screen-specific numbers appended after the identity.
+function ProductRow({ line, onZoom, children, style }) {
+  const p = line.product
+  return (
+    <tr style={style}>
+      <td style={{ padding: 3, width: 46 }}>
+        <span onClick={() => p && onZoom?.(p)} style={{ cursor: p ? 'zoom-in' : 'default' }}>
+          <ProductQr product={p} />
+        </span>
+      </td>
+      <td><ProductIdent product={p} fallback={line.description} /></td>
+      <td className="small"><BatchTag product={p} /></td>
+      {children}
+    </tr>
+  )
+}
+
+// A scan field. The warehouse types nothing here — the imager sends the payload
+// and an Enter, which is why submit is on Enter rather than a button.
+function ScanBox({ onScan, placeholder, label }) {
+  const [code, setCode] = useState('')
+  const submit = () => { const c = code.trim(); if (!c) return; setCode(''); onScan(c) }
+  return (
+    <div className="scanbox">
+      <span className="ico">⌗</span>
+      <input value={code} autoFocus onChange={(e) => setCode(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit() } }}
+        placeholder={placeholder || 'Scan a QR / piece label / SKU…'} />
+      <button className="btn" onClick={submit}>{label || 'Add'}</button>
+    </div>
+  )
+}
+
 // ---------- stock outward ----------
 function StockOutward({ toast }) {
   const [list, setList] = useState([])
@@ -1199,14 +1367,45 @@ function StockOutward({ toast }) {
   const [form, setForm] = useState({ date: '', to_destination: '', packed_by: '',
     from_location: 'WAREHOUSE', lines: [] })
   const [q, setQ] = useState('')
+  const [zoom, setZoom] = useState(null)          // a product card, opened large
+  const [cards, setCards] = useState({})          // product_id -> full record, for the draft rows
   const refresh = useCallback(() => api.listOutwards().then(setList), [])
   useEffect(() => { refresh(); api.listProducts().then(setProducts) }, [refresh])
   useEffect(() => { if (sel) api.getOutward(sel).then(setForm2); function setForm2(o){ setDetail(o) } }, [sel])
   const [detail, setDetail] = useState(null)
 
+  // A line being packed shows the same record the posted one will: pull the card
+  // as soon as a product is chosen, so the picker verifies BEFORE it is dispatched
+  // rather than reading it back afterwards.
+  const loadCard = useCallback(async (id) => {
+    if (!id || cards[id]) return
+    try { const c = await api.productCard(id); setCards((m) => ({ ...m, [c.product_id]: c })) }
+    catch { /* a product with no card is still dispatchable — the row just stays plain */ }
+  }, [cards])
+
   const addLine = () => setForm({ ...form, lines: [...form.lines, { product_id: '', qty: 1 }] })
-  const updLine = (i, k, v) => { const l = form.lines.map(x => ({ ...x })); l[i][k] = v; setForm({ ...form, lines: l }) }
+  const updLine = (i, k, v) => {
+    const l = form.lines.map(x => ({ ...x })); l[i][k] = v; setForm({ ...form, lines: l })
+    if (k === 'product_id') loadCard(v)
+  }
   const rmLine = (i) => setForm({ ...form, lines: form.lines.filter((_, j) => j !== i) })
+  // Scanning is the fast path in and the safe one: the code resolves to exactly
+  // one product, so nobody picks the wrong size off a dropdown of look-alikes.
+  const addScanned = async (code) => {
+    try {
+      const c = await api.productCard(code)
+      setCards((m) => ({ ...m, [c.product_id]: c }))
+      const at = form.lines.findIndex((l) => +l.product_id === c.product_id)
+      if (at >= 0) {
+        const l = form.lines.map(x => ({ ...x })); l[at].qty = (+l[at].qty || 0) + 1
+        setForm({ ...form, lines: l })
+        toast(`+1 ${c.name}${c.variant ? ' · ' + c.variant : ''} (${l[at].qty})`, 'ok')
+      } else {
+        setForm({ ...form, lines: [...form.lines, { product_id: String(c.product_id), qty: 1 }] })
+        toast(`✓ ${c.name}${c.variant ? ' · ' + c.variant : ''}`, 'ok')
+      }
+    } catch (e) { toast(e.detail || `Nothing matches “${code}”`, 'err') }
+  }
   const save = async () => {
     const lines = form.lines.filter(l => l.product_id).map(l => ({ product_id: +l.product_id, qty: +l.qty }))
     if (!lines.length) { toast('Add at least one product', 'err'); return }
@@ -1223,7 +1422,16 @@ function StockOutward({ toast }) {
       else toast('Post failed', 'err')
     }
   }
-  const prodName = (id) => { const p = products.find(x => x.id === +id); return p ? `${p.description} · stock ${p.stock_qty}` : '' }
+  // scanning a garment against an open dispatch — is it on this note?
+  const verify = async (code) => {
+    try {
+      const r = await api.verifyOutward(sel, code)
+      setZoom(r.product)
+      toast(r.matched ? `✓ On this dispatch — ${r.product.name}`
+        : `⚠ NOT on this dispatch — ${r.product.name}${r.product.variant ? ' · ' + r.product.variant : ''}`,
+        r.matched ? 'ok' : 'err')
+    } catch (e) { toast(e.detail || `Nothing matches “${code}”`, 'err') }
+  }
   return (
     <div className="body">
       <div className="sidebar">
@@ -1256,19 +1464,41 @@ function StockOutward({ toast }) {
             </div>
             <div className="section" style={{ marginTop: 18 }}>
               <h4>Items to dispatch</h4>
-              <table className="items"><thead><tr><th style={{ width: '65%' }}>Product</th>
-                <th style={{ textAlign: 'right' }}>Qty</th><th></th></tr></thead>
-                <tbody>{form.lines.map((l, i) => (
-                  <tr key={i}>
-                    <td><select value={l.product_id} onChange={(e) => updLine(i, 'product_id', e.target.value)}
-                      style={{ width: '100%', background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 5, padding: '5px' }}>
-                      <option value="">— select product —</option>
-                      {products.map(p => <option key={p.id} value={p.id}>{p.description} (stock {p.stock_qty})</option>)}
-                    </select></td>
-                    <td className="num"><input value={l.qty} onChange={(e) => updLine(i, 'qty', e.target.value)} /></td>
-                    <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => rmLine(i)}>×</button></td>
-                  </tr>
-                ))}</tbody>
+              <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
+                Scan the garment’s QR (or a piece label) to add it — the full record
+                appears below, so the size and colour going into the box are the ones
+                on the note. Scanning the same item again adds one more.
+              </div>
+              <ScanBox onScan={addScanned} placeholder="Scan a QR / piece label / SKU to add…" />
+              <table className="items">
+                <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
+                  <th style={{ width: 230 }}>Or pick from inventory</th>
+                  <th style={{ textAlign: 'right' }}>Qty</th>
+                  <th style={{ textAlign: 'right' }}>On hand</th><th></th></tr></thead>
+                <tbody>{form.lines.map((l, i) => {
+                  const card = cards[+l.product_id]
+                  const short = card && +l.qty > (card.stock_qty ?? 0)
+                  return (
+                    <tr key={i}>
+                      <td style={{ padding: 3 }}>
+                        <span onClick={() => card && setZoom(card)} style={{ cursor: card ? 'zoom-in' : 'default' }}>
+                          <ProductQr product={card} /></span></td>
+                      <td><ProductIdent product={card} fallback="— nothing selected —" /></td>
+                      <td className="small"><BatchTag product={card} /></td>
+                      <td><select value={l.product_id} onChange={(e) => updLine(i, 'product_id', e.target.value)}
+                        style={{ width: '100%', background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 5, padding: '5px' }}>
+                        <option value="">— select product —</option>
+                        {products.map(p => <option key={p.id} value={p.id}>
+                          {p.description}{p.size ? ' · ' + p.size : ''}{p.color ? ' · ' + p.color : ''} (stock {p.stock_qty})</option>)}
+                      </select></td>
+                      <td className="num"><input value={l.qty} onChange={(e) => updLine(i, 'qty', e.target.value)} /></td>
+                      <td style={{ textAlign: 'right', color: short ? 'var(--danger)' : undefined }}
+                        title={short ? 'More than is on hand — posting will be refused' : ''}>
+                        {card ? card.stock_qty : '—'}{short ? ' ⚠' : ''}</td>
+                      <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => rmLine(i)}>×</button></td>
+                    </tr>
+                  )
+                })}</tbody>
               </table>
               <button className="btn" style={{ marginTop: 8 }} onClick={addLine}>+ add item</button>
             </div>
@@ -1286,28 +1516,226 @@ function StockOutward({ toast }) {
             <div className="kv" style={{ margin: '12px 0 20px', gridTemplateColumns: '130px 1fr 130px 1fr' }}>
               <div className="k">Code</div><div>{detail.code}</div><div className="k">Date</div><div>{detail.date || '—'}</div>
               <div className="k">From</div><div>{detail.from_location}</div><div className="k">Packed by</div><div>{detail.packed_by || '—'}</div>
+              {detail.status === 'received' && <>
+                <div className="k">Received by</div><div>{detail.received_by || '—'}</div>
+                <div className="k">Received on</div><div>{detail.received_date || (detail.received_at || '').slice(0, 10) || '—'}</div>
+              </>}
             </div>
+            {detail.status !== 'draft' && (
+              <div style={{ marginBottom: 14 }}>
+                <ScanBox onScan={verify} label="Verify"
+                  placeholder="Scan a garment to check it belongs to this dispatch…" />
+              </div>
+            )}
             <div className="section"><h4>Items</h4>
-              <table className="items"><thead><tr><th>Barcode</th><th>Description</th>
-                <th style={{ textAlign: 'right' }}>Qty</th><th style={{ textAlign: 'right' }}>Cost</th>
-                <th style={{ textAlign: 'right' }}>On hand</th></tr></thead>
+              <table className="items">
+                <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
+                  <th style={{ textAlign: 'right' }}>Qty</th>
+                  {detail.status === 'received' && <th style={{ textAlign: 'right' }}>Accepted</th>}
+                  <th style={{ textAlign: 'right' }}>Cost</th><th style={{ textAlign: 'right' }}>Value</th>
+                  <th style={{ textAlign: 'right' }}>On hand</th></tr></thead>
                 <tbody>{detail.lines.map(l => (
-                  <tr key={l.id}><td className="mono">{l.barcode || '—'}</td><td>{l.description}</td>
-                    <td style={{ textAlign: 'right' }}>{l.qty}</td><td style={{ textAlign: 'right' }}>{money(l.rate)}</td>
-                    <td style={{ textAlign: 'right' }}>{l.stock_on_hand}</td></tr>
+                  <ProductRow key={l.id} line={l} onZoom={setZoom}>
+                    <td style={{ textAlign: 'right' }}>{l.qty}</td>
+                    {detail.status === 'received' && (
+                      <td style={{ textAlign: 'right', color: l.short_qty > 0 ? 'var(--danger)' : 'var(--ok)' }}>
+                        {l.accepted_qty}{l.short_qty > 0 ? ` (−${l.short_qty})` : ''}</td>
+                    )}
+                    <td style={{ textAlign: 'right' }} title="Weighted-average purchase cost">{money(l.rate)}</td>
+                    <td style={{ textAlign: 'right' }}>{money(l.value)}</td>
+                    <td style={{ textAlign: 'right' }}>{l.stock_on_hand}</td>
+                  </ProductRow>
                 ))}</tbody>
               </table>
-              <div className="items-foot"><span>{detail.lines.length} items</span><span>Σ qty <b>{detail.total_qty}</b></span></div>
+              <div className="items-foot"><span>{detail.lines.length} items</span>
+                <span>Σ qty <b>{detail.total_qty}</b></span>
+                {detail.status === 'received' && <span>accepted <b>{detail.accepted_qty}</b></span>}
+                {detail.shortfall > 0 && <span style={{ color: 'var(--danger)' }}>short <b>{detail.shortfall}</b></span>}
+              </div>
             </div>
           </div>
           <div className="actionbar">
-            <span className="small">{detail.status === 'posted' ? 'Dispatched — stock reduced in Inventory.' : 'Posting reduces warehouse stock for each item.'}</span>
+            <span className="small">{detail.status === 'received'
+              ? `Received at ${detail.to_destination || 'the destination'}.`
+              : detail.status === 'posted'
+                ? 'Dispatched — stock reduced in Inventory. Accept it on Stock Inward when it lands.'
+                : 'Posting reduces warehouse stock for each item.'}</span>
             <div className="spacer" />
-            <button className="btn primary" disabled={detail.status === 'posted'} onClick={post}>
-              {detail.status === 'posted' ? 'Posted ✓' : 'Post Outward (reduce stock)'}</button>
+            <button className="btn primary" disabled={detail.status !== 'draft'} onClick={post}>
+              {detail.status === 'draft' ? 'Post Outward (reduce stock)' : 'Posted ✓'}</button>
           </div>
         </div>
       ) : <div className="empty">Select an outward, or click “+ New” to dispatch stock.</div>}
+      {zoom && <ProductCardModal product={zoom} onClose={() => setZoom(null)} />}
+    </div>
+  )
+}
+
+// ---------- stock inward (accepting a dispatched transfer at the destination) ----------
+function StockInward({ toast }) {
+  const [list, setList] = useState([])
+  const [sel, setSel] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [scope, setScope] = useState('posted')     // awaiting receipt | already received
+  const [acc, setAcc] = useState({})               // line_id -> accepted qty (blank = all)
+  const [who, setWho] = useState('')
+  const [date, setDate] = useState('')
+  const [q, setQ] = useState('')
+  const [zoom, setZoom] = useState(null)
+  const [hit, setHit] = useState(null)             // the line a scan just landed on
+
+  const refresh = useCallback(() => api.listOutwards(scope).then(setList), [scope])
+  useEffect(() => { refresh() }, [refresh])
+  const open = (id) => api.getOutward(id).then((o) => { setSel(id); setDetail(o); setAcc({}); setHit(null) })
+
+  // Scanning while counting the box in: it says which line the garment is, and
+  // ticks one more onto its accepted count. Something not on the note is the
+  // error worth shouting about — that is a mis-dispatch, not a miscount.
+  const scan = async (code) => {
+    try {
+      const r = await api.verifyOutward(sel, code)
+      if (!r.matched) {
+        setZoom(r.product)
+        toast(`⚠ NOT on this transfer — ${r.product.name}${r.product.variant ? ' · ' + r.product.variant : ''}`, 'err')
+        return
+      }
+      const line = detail.lines.find((l) => l.id === r.line_id)
+      const now = (acc[r.line_id] ?? '') === '' ? 1 : +acc[r.line_id] + 1
+      if (now > (line?.qty ?? 0)) {
+        toast(`All ${line.qty} of ${r.product.name} are already counted in`, 'err'); return
+      }
+      setAcc({ ...acc, [r.line_id]: now }); setHit(r.line_id)
+      toast(`✓ ${r.product.name}${r.product.variant ? ' · ' + r.product.variant : ''} — ${now} of ${line.qty}`, 'ok')
+    } catch (e) { toast(e.detail || `Nothing matches “${code}”`, 'err') }
+  }
+
+  const receive = async () => {
+    try {
+      const accepted = {}
+      Object.entries(acc).forEach(([k, v]) => { if (v !== '') accepted[k] = +v })
+      const r = await api.receiveOutward(sel, { received_by: who, date, accepted })
+      toast(r.shortfall > 0
+        ? `✓ Received ${r.accepted_qty} of ${r.total_qty} — ${r.shortfall} short`
+        : `✓ Received in full · ${r.accepted_qty} units`, r.shortfall > 0 ? 'err' : 'ok')
+      open(sel); refresh()
+    } catch (e) { toast('Receive failed: ' + (e.detail || e.message), 'err') }
+  }
+
+  const editable = detail && detail.status === 'posted'
+  const acceptedOf = (l) => ((acc[l.id] ?? '') === '' ? (l.qty || 0) : +acc[l.id] || 0)
+  const counted = detail ? detail.lines.reduce((s, l) => s + acceptedOf(l), 0) : 0
+
+  return (
+    <div className="body">
+      <div className="sidebar">
+        <div className="head"><h3>Stock Inward · {list.length}</h3></div>
+        <div style={{ display: 'flex', gap: 6, padding: '0 12px 8px' }}>
+          {[['posted', 'Awaiting'], ['received', 'Received'], ['all', 'All']].map(([k, label]) => (
+            <button key={k} className={'btn' + (scope === k ? ' primary' : '')} style={{ padding: '3px 9px', fontSize: 11 }}
+              onClick={() => { setScope(k); setSel(null); setDetail(null) }}>{label}</button>
+          ))}
+        </div>
+        {list.length > 0 && <SearchBox value={q} onChange={setQ} placeholder="Search destination, code…" />}
+        <div className="list">
+          {list.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
+            {scope === 'posted' ? 'Nothing in transit — dispatched transfers appear here to be received.' : 'Nothing here yet.'}</div>}
+          {list.filter((o) => matches(o, q, ['to_destination', 'code', 'status'])).map((o) => (
+            <div key={o.id} className={'doc-row' + (sel === o.id ? ' sel' : '')} onClick={() => open(o.id)}>
+              <div className="t">{o.to_destination || o.code}</div>
+              <div className="m"><span className={'badge ' + (o.status === 'received' ? 'confirmed' : 'review')}>
+                {o.status === 'received' ? 'received' : 'in transit'}</span>
+                <span>{o.code}</span><span style={{ marginLeft: 'auto' }}>{o.total_qty} units</span></div>
+              {o.status === 'received' && o.shortfall > 0 && (
+                <div className="m"><span style={{ color: 'var(--danger)' }}>{o.shortfall} short</span></div>)}
+            </div>
+          ))}
+        </div>
+      </div>
+      {detail ? (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div className="editor">
+            <div style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
+              <h2 style={{ margin: 0 }}>{detail.to_destination || detail.code}</h2>
+              <span className={'badge ' + (detail.status === 'received' ? 'confirmed' : 'review')}>
+                {detail.status === 'received' ? 'received' : 'in transit'}</span>
+            </div>
+            <div className="kv" style={{ margin: '12px 0 18px', gridTemplateColumns: '130px 1fr 130px 1fr' }}>
+              <div className="k">Package</div><div className="mono">{detail.code}</div>
+              <div className="k">Dispatched</div><div>{detail.date || (detail.posted_at || '').slice(0, 10) || '—'}</div>
+              <div className="k">From</div><div>{detail.from_company} · {detail.from_location}</div>
+              <div className="k">Packed by</div><div>{detail.packed_by || '—'}</div>
+              {detail.status === 'received' && <>
+                <div className="k">Received by</div><div>{detail.received_by || '—'}</div>
+                <div className="k">Received on</div><div>{detail.received_date || (detail.received_at || '').slice(0, 10) || '—'}</div>
+              </>}
+            </div>
+            {editable && (
+              <div style={{ marginBottom: 14 }}>
+                <ScanBox onScan={scan} label="Count in"
+                  placeholder="Scan each garment as it comes out of the box…" />
+                <div className="small" style={{ color: 'var(--muted)', marginTop: 6 }}>
+                  Every line is accepted in full unless you say otherwise — scan or type
+                  a lower figure for anything that didn’t turn up.
+                </div>
+              </div>
+            )}
+            <div className="section"><h4>{editable ? 'Check the goods in' : 'Goods received'}</h4>
+              <table className="items">
+                <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
+                  <th style={{ textAlign: 'right' }}>Sent</th>
+                  <th style={{ textAlign: 'right' }}>Accepted</th>
+                  <th style={{ textAlign: 'right' }}>Short</th>
+                  <th style={{ textAlign: 'right' }}>Cost</th></tr></thead>
+                <tbody>{detail.lines.map((l) => {
+                  const a = acceptedOf(l)
+                  const short = Math.round((l.qty - a) * 1000) / 1000
+                  return (
+                    <ProductRow key={l.id} line={l} onZoom={setZoom}
+                      style={hit === l.id ? { background: 'rgba(47,182,163,0.12)' } : undefined}>
+                      <td style={{ textAlign: 'right' }}>{l.qty}</td>
+                      <td className="num">{editable
+                        ? <input value={acc[l.id] ?? ''} placeholder={l.qty}
+                            onChange={(e) => setAcc({ ...acc, [l.id]: e.target.value })} />
+                        : l.accepted_qty}</td>
+                      <td style={{ textAlign: 'right', color: (editable ? short : l.short_qty) > 0 ? 'var(--danger)' : 'var(--muted)' }}>
+                        {(editable ? short : l.short_qty) > 0 ? (editable ? short : l.short_qty) : '—'}</td>
+                      <td style={{ textAlign: 'right' }}>{money(l.rate)}</td>
+                    </ProductRow>
+                  )
+                })}</tbody>
+              </table>
+              <div className="items-foot"><span>{detail.lines.length} items</span>
+                <span>sent <b>{detail.total_qty}</b></span>
+                <span>accepting <b>{Math.round(counted * 1000) / 1000}</b></span>
+                {detail.total_qty - counted > 0 && (
+                  <span style={{ color: 'var(--danger)' }}>short <b>{Math.round((detail.total_qty - counted) * 1000) / 1000}</b></span>)}
+              </div>
+            </div>
+          </div>
+          {editable ? (
+            <div className="actionbar">
+              <div className="field" style={{ width: 170 }}><label>Received by</label>
+                <input value={who} onChange={(e) => setWho(e.target.value)} placeholder="who took it in" /></div>
+              <div className="field" style={{ width: 130 }}><label>Date</label>
+                <input value={date} placeholder="2026-07-22" onChange={(e) => setDate(e.target.value)} /></div>
+              <div className="spacer" />
+              <span className="small">A shortfall is recorded as a transfer discrepancy — the stock already
+                left the warehouse, so settle it with a stock adjustment once it is traced.</span>
+              <button className="btn primary" onClick={receive}>Receive Goods</button>
+            </div>
+          ) : (
+            <div className="actionbar">
+              <span className="small">{detail.status === 'received'
+                ? (detail.shortfall > 0
+                  ? `Received with a shortfall of ${detail.shortfall} unit(s).`
+                  : 'Received in full.')
+                : 'This transfer has not been dispatched yet — post it on Stock Outward first.'}</span>
+              <div className="spacer" />
+            </div>
+          )}
+        </div>
+      ) : <div className="empty">Select a transfer to check it in.</div>}
+      {zoom && <ProductCardModal product={zoom} onClose={() => setZoom(null)} />}
     </div>
   )
 }
@@ -1456,6 +1884,7 @@ function Returns({ toast }) {
   const [reason, setReason] = useState('')
   const [date, setDate] = useState('')
   const [q, setQ] = useState('')
+  const [zoom, setZoom] = useState(null)
   const refresh = useCallback(() => api.listReturns().then(setList), [])
   useEffect(() => { refresh() }, [refresh])
 
@@ -1513,29 +1942,63 @@ function Returns({ toast }) {
               <h2 style={{ margin: 0 }}>{detail.code} · {detail.supplier_name}</h2>
               <span className={'badge ' + (detail.status === 'posted' ? 'confirmed' : 'uploaded')}>{detail.status}</span></div>
             <div className="kv" style={{ margin: '12px 0 20px', gridTemplateColumns: '140px 1fr 140px 1fr' }}>
-              <div className="k">Debit note vs</div><div className="mono">{detail.invoice_number}</div>
+              <div className="k">Debit note vs</div><div className="mono">{detail.invoice_number}
+                {detail.grn_no ? <span className="small"> · GRN {detail.grn_no}</span> : null}</div>
               <div className="k">Debit total</div><div>₹ {money(detail.status === 'posted' ? detail.total : draftTotal)}{editable ? ' + tax' : ''}</div>
+              <div className="k">Priced at</div>
+              <div style={{ gridColumn: 'span 3' }}>
+                <span className="badge confirmed">{detail.cost_basis_label || 'Purchase / GRN cost'}</span>
+                <span className="small" style={{ color: 'var(--muted)', marginLeft: 8 }}>
+                  what the supplier billed us for these goods — not the MRP or the sale price,
+                  so the debit reconciles against their invoice.
+                </span>
+              </div>
             </div>
             <div className="section"><h4>{editable ? 'Set return quantity per line' : 'Returned lines'}</h4>
-              <table className="items"><thead><tr><th>Barcode</th><th>Description</th><th>HSN</th>
-                <th style={{ textAlign: 'right' }}>Rate</th><th style={{ textAlign: 'right' }}>On hand</th>
-                <th style={{ textAlign: 'right' }}>{editable ? 'Return qty' : 'Qty'}</th>
-                <th style={{ textAlign: 'right' }}>Amount</th></tr></thead>
+              <table className="items">
+                <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
+                  <th style={{ textAlign: 'right' }}>Received</th>
+                  <th style={{ textAlign: 'right' }}>On hand</th>
+                  <th style={{ textAlign: 'right' }} title="The purchase price this item was received at — the debit note's basis">
+                    GRN cost</th>
+                  <th style={{ textAlign: 'right' }}>{editable ? 'Return qty' : 'Qty'}</th>
+                  <th style={{ textAlign: 'right' }}>Amount</th></tr></thead>
                 <tbody>{detail.lines.map(l => {
                   const q = editable ? (qtys[l.id] ?? '') : l.qty
                   const amt = editable ? (+qtys[l.id] || 0) * (l.rate || 0) : l.amount
                   if (!editable && !l.qty) return null
+                  const over = editable && +q > (l.available_qty ?? Infinity)
                   return (
-                    <tr key={l.id}><td className="mono">{l.barcode || '—'}</td><td>{l.description}</td><td>{l.hsn}</td>
-                      <td style={{ textAlign: 'right' }}>{money(l.rate)}</td>
+                    <ProductRow key={l.id} line={l} onZoom={setZoom}>
+                      <td style={{ textAlign: 'right' }} title={l.already_returned
+                        ? `${l.already_returned} already returned on an earlier debit note`
+                        : 'Received on this invoice'}>
+                        {l.purchased_qty || '—'}
+                        {l.already_returned > 0 && <span className="small" style={{ color: 'var(--warn)' }}> −{l.already_returned}</span>}
+                      </td>
                       <td style={{ textAlign: 'right' }}>{l.on_hand}</td>
+                      <td style={{ textAlign: 'right' }} title={{
+                        grn_variant_rate: 'The rate this variant was received at on the GRN breakdown',
+                        invoice_line_rate: 'The rate the supplier billed on this invoice line',
+                        weighted_avg_cost: 'Weighted-average purchase cost (no GRN rate survives for this line)',
+                      }[l.cost_source] || 'Purchase cost'}>
+                        {money(l.grn_rate ?? l.rate)}
+                        {l.cost_source === 'weighted_avg_cost' && <span className="small" style={{ color: 'var(--muted)' }}> avg</span>}
+                      </td>
                       <td className="num">{editable
-                        ? <input value={q} placeholder="0" onChange={(e) => setQtys({ ...qtys, [l.id]: e.target.value })} />
+                        ? <input value={q} placeholder="0" style={over ? { borderColor: 'var(--danger)' } : undefined}
+                            title={over ? `Only ${l.available_qty} available to return` : ''}
+                            onChange={(e) => setQtys({ ...qtys, [l.id]: e.target.value })} />
                         : l.qty}</td>
-                      <td style={{ textAlign: 'right' }}>{money(amt)}</td></tr>
+                      <td style={{ textAlign: 'right' }}>{money(amt)}</td>
+                    </ProductRow>
                   )
                 })}</tbody>
               </table>
+              <div className="items-foot">
+                <span>{detail.lines.length} received item(s)</span>
+                <span>a bundle broken down at GRN comes back as its variants — each at its own received cost</span>
+              </div>
             </div>
           </div>
           {editable && (
@@ -1543,12 +2006,14 @@ function Returns({ toast }) {
               <div className="field" style={{ width: 180 }}><label>Reason</label><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. damaged / wrong item" /></div>
               <div className="field" style={{ width: 120 }}><label>Date</label><input value={date} placeholder="2026-07-15" onChange={(e) => setDate(e.target.value)} /></div>
               <div className="spacer" />
-              <span className="small">Posting reverses stock and raises a debit note against the invoice.</span>
+              <span className="small">Posting reverses stock and raises a debit note against the invoice,
+                valued at the GRN cost of each item.</span>
               <button className="btn primary" onClick={post}>Post Debit Note</button>
             </div>
           )}
         </div>
       ) : <div className="empty">Select a return, or click “+ New” to return goods against an invoice.</div>}
+      {zoom && <ProductCardModal product={zoom} onClose={() => setZoom(null)} />}
     </div>
   )
 }
@@ -2508,6 +2973,7 @@ export default function App() {
           <button className={tab === 'purchases' ? 'active' : ''} onClick={() => setTab('purchases')}>GRN</button>
           <button className={tab === 'inventory' ? 'active' : ''} onClick={() => setTab('inventory')}>Inventory</button>
           <button className={tab === 'outward' ? 'active' : ''} onClick={() => setTab('outward')}>Stock Outward</button>
+          <button className={tab === 'inward' ? 'active' : ''} onClick={() => setTab('inward')}>Stock Inward</button>
           <button className={tab === 'returns' ? 'active' : ''} onClick={() => setTab('returns')}>Returns</button>
           <button className={tab === 'payments' ? 'active' : ''} onClick={() => setTab('payments')}>Payments</button>
           <button className={tab === 'reports' ? 'active' : ''} onClick={() => setTab('reports')}>Reports</button>
@@ -2559,6 +3025,8 @@ export default function App() {
         <Inventory toast={toast} />
       ) : tab === 'outward' ? (
         <StockOutward toast={toast} />
+      ) : tab === 'inward' ? (
+        <StockInward toast={toast} />
       ) : tab === 'returns' ? (
         <Returns toast={toast} />
       ) : tab === 'payments' ? (

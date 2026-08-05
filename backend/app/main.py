@@ -125,6 +125,27 @@ def _migrate():
                         "ALTER TABLE purchase_line_splits DROP COLUMN margin_pct"))
             except Exception:
                 pass
+    # stock_outwards: the receiving (Stock Inward) end of a dispatch
+    if "stock_outwards" in insp.get_table_names():
+        ocols = {c["name"] for c in insp.get_columns("stock_outwards")}
+        oadds = {"received_date": "VARCHAR", "received_at": "DATETIME"}
+        omissing = {k: v for k, v in oadds.items() if k not in ocols}
+        if omissing:
+            with engine.begin() as conn:
+                for name, typ in omissing.items():
+                    conn.execute(text(
+                        f"ALTER TABLE stock_outwards ADD COLUMN {name} {typ}"))
+    # purchase_return_lines: which received row each returned line came from, so
+    # the debit note can be re-valued from the GRN rather than from a stale rate
+    if "purchase_return_lines" in insp.get_table_names():
+        rcols = {c["name"] for c in insp.get_columns("purchase_return_lines")}
+        radds = {"purchase_line_id": "INTEGER", "split_id": "INTEGER", "uom": "VARCHAR"}
+        rmissing = {k: v for k, v in radds.items() if k not in rcols}
+        if rmissing:
+            with engine.begin() as conn:
+                for name, typ in rmissing.items():
+                    conn.execute(text(
+                        f"ALTER TABLE purchase_return_lines ADD COLUMN {name} {typ}"))
 
 
 _migrate()

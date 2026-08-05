@@ -103,14 +103,25 @@ export const api = {
   // map a free-text description onto the Product Category master
   categorize: (description) =>
     fetch('/api/inventory/categorize?description=' + encodeURIComponent(description || '')).then(J),
+  // the full product record as the stock screens show it — QR, name, size,
+  // colour, batch. Takes anything scannable: a product QR, a piece label, a SKU.
+  productCard: (code) => fetch('/api/inventory/product-card?code=' + encodeURIComponent(code || ''))
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('card'), { detail: j.detail }); return j }),
 
-  // stock outward
-  listOutwards: () => fetch('/api/outward').then(J),
+  // stock outward (dispatch) + stock inward (the destination accepting it)
+  listOutwards: (status) => fetch('/api/outward' + (status ? '?status=' + status : '')).then(J),
   getOutward: (id) => fetch(`/api/outward/${id}`).then(J),
   createOutward: (body) => fetch('/api/outward', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(J),
   postOutward: (id, allowNeg) => fetch(`/api/outward/${id}/post?allow_negative=${!!allowNeg}`, { method: 'POST' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('post'), { detail: j.detail }); return j }),
+  // stock inward: accept a dispatched transfer, line by line
+  receiveOutward: (id, body) => fetch(`/api/outward/${id}/receive`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('recv'), { detail: j.detail }); return j }),
+  // is this scanned garment on this transfer, and which line?
+  verifyOutward: (id, code) => fetch(`/api/outward/${id}/verify?code=` + encodeURIComponent(code || ''))
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('verify'), { detail: j.detail }); return j }),
 
   // payments
   pendingBills: (supplierId) => fetch(`/api/payments/pending${supplierId ? '?supplier_id=' + supplierId : ''}`).then(J),

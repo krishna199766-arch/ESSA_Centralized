@@ -302,3 +302,30 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
   color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; }
 .searchclear:hover { color: var(--text); }
 .sidebar .searchbox { padding: 8px 12px; }
+
+/* ---------- the product record on a stock movement ---------- */
+/* Stock Outward, Stock Inward and Purchase Return all show the same block: the
+   QR that is actually scanned, the name, the attributes that tell one variant
+   from its siblings, and the batch it was received on. Styled once, here, so the
+   three screens cannot drift apart. */
+.pqr { display: block; background: #fff; border-radius: 3px; padding: 1px; }
+.pident .nm { font-weight: 600; line-height: 1.25; }
+.pident .sub { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px;
+  color: var(--muted); margin: 2px 0 3px; }
+.attrchips { display: flex; flex-wrap: wrap; gap: 4px; }
+.attrchip { font-size: 10.5px; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 5px; padding: 1px 6px; color: var(--text); white-space: nowrap; }
+.attrchip i { color: var(--muted); font-style: normal; margin-right: 4px; }
+.attrchip.cat { border-color: #2c4a3c; color: var(--ok); background: #12241b; }
+/* the receipt a piece of stock came in on — GRN, invoice, carton */
+.batchtag { font-size: 11px; color: var(--muted); border-bottom: 1px dotted var(--line);
+  cursor: help; white-space: nowrap; }
+
+/* a scan field: the imager types for you and ends with Enter */
+.scanbox { display: flex; align-items: center; gap: 8px; position: relative;
+  background: var(--panel-2); border: 1px solid var(--accent); border-radius: 8px;
+  padding: 6px 8px 6px 28px; margin-bottom: 10px; }
+.scanbox .ico { position: absolute; left: 9px; color: var(--accent); font-size: 14px; }
+.scanbox input { flex: 1; background: transparent; border: none; color: var(--text);
+  font-size: 13px; padding: 2px 0; }
+.scanbox input:focus { outline: none; }

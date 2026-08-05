@@ -430,13 +430,25 @@ recordings:
 
 - **Code generation** — suppliers who don't pre-barcode (AMS, Matoshree, Mehak)
   get an `ESSA-#####` SKU on GRN post; the QR label prints from it.
-- **Stock Outward & Warehouse reports** — outward is a negative `StockMovement`;
-  the ledger already supports it and is the reporting spine.
+- **Stock Outward / Stock Inward & Warehouse reports** — outward is a negative
+  `StockMovement`; the ledger already supports it and is the reporting spine. The
+  two screens are two ends of ONE document: the warehouse packs and posts it,
+  the destination accepts it (`accepted_qty` per line), and a short delivery is
+  the difference between two columns rather than a second record to reconcile.
+  Both render the same product projection (`services/stock_view.py`) — QR, name,
+  attribute tuple, and the receipt the stock came in on — because a dispatch and
+  an acceptance are both someone matching a row against a garment in their hand.
 - **Payments (debit / discount / TDS)** — the taxes block already models TDS
   (GH Enterprises) and discounts (Mehak); a payables ledger keys off supplier +
   invoice number + grand total, all captured on the `Purchase`.
 - **Purchase Return** — a return references a posted `Purchase` and reverses the
-  relevant movements.
+  relevant movements. Its lines are the rows of that GRN which actually *became
+  stock* (a line broken down into variants is returned as its variants, never as
+  the bundle that never existed), and each is valued at the **received price** —
+  the variant's GRN rate, else the invoice line rate, else the weighted-average
+  cost. The rate is re-derived from the GRN at post time and never accepted from
+  a client, so a debit note cannot be raised at a selling price: it settles a
+  supplier account and has to reconcile against that supplier's own invoice.
 - **Analytical reports** — built on structured, reconciled data instead of
   re-keyed spreadsheets.
 
