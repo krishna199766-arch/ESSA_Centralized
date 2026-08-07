@@ -235,6 +235,8 @@ class PurchaseLine(Base):
     product = relationship("Product")
     splits = relationship("PurchaseLineSplit", back_populates="line",
                           cascade="all, delete-orphan", order_by="PurchaseLineSplit.id")
+    shortages = relationship("GrnShortage", back_populates="line",
+                             cascade="all, delete-orphan", order_by="GrnShortage.id")
 
     @property
     def split_qty(self):
@@ -244,6 +246,16 @@ class PurchaseLine(Base):
     @property
     def is_split(self):
         return bool(self.splits)
+
+    @property
+    def received_qty(self):
+        """What actually arrived — billed, less what was short, plus any excess.
+
+        This, not `qty`, is the quantity that becomes stock. `qty` stays the
+        supplier's figure so the invoice keeps reconciling against their document;
+        the difference between the two is exactly the set of GrnShortage rows."""
+        net = sum((s.signed_qty for s in self.shortages), 0.0)
+        return round(float(self.qty or 0) + net, 3)
 
 
 class ProductUnit(Base):
@@ -412,6 +424,97 @@ class PurchaseLineSplit(Base):
     @property
     def amount(self):
         return round((self.qty or 0) * (self.effective_rate or 0), 2)
+
+
+class GrnShortage(Base):
+    """What the invoice billed and the cartons did not deliver.
+
+    A supplier bills 50 pieces; 40 come out of the boxes. Until now the receiving
+    screen had only two answers, and both were lies: invent ten pieces so the
+    breakdown balances (stock gains units that do not exist), or leave the GRN
+    unpostable forever. This is the third and true answer — *ten were short* — and
+    it is recorded here, on the floor, at the moment the boxes are opened, by the
+    only person who can know it.
+
+    That timing is the whole point, and it is why this belongs to the Receive flow
+    and not to Inventory. Once a GRN posts, the difference has already been
+    absorbed: the stock figure is 40, the invoice says 50, and nothing on the
+    system remembers why. Recorded *before* posting, the gap is a document — with
+    a quantity, a reason and a name against it — that the debit note is later
+    built from without anyone re-counting anything.
+
+    `kind` says what happened to the units, and the only thing that separates the
+    three is which side of the count they land on:
+
+      * **short** — never arrived. Never becomes stock.
+      * **damaged** — arrived, but rejected at the dock and set aside for the
+        supplier. Also never becomes stock: taking it in and writing it off again
+        would put goods we refused into the valuation for as long as the paperwork
+        takes. Damage found *later*, in stock we already accepted, is a purchase
+        return — that is the existing module, and it reverses stock because there
+        is stock to reverse.
+      * **excess** — more arrived than was billed. The mirror case, and it *does*
+        become stock: the goods are on the floor whatever the invoice says.
+
+    So `PurchaseLine.received_qty` = billed − short − damaged + excess, and it is
+    that figure the attribute breakdown has to add up to and that posting turns
+    into stock. The invoice line is left alone, exactly as it is for a breakdown:
+    it stays the record of what the supplier billed, so the payables side keeps
+    reconciling against their own document.
+
+    Money is deliberately absent from this table. A shortage is a *fact about a
+    count*; what it is worth is a fact about the GRN, derived from the line rate
+    whenever it is asked for (services/shortages.unit_cost). Freezing a rate here
+    would be a second place for the same number to live, and the debit note —
+    which is where it becomes financial — re-derives from the GRN anyway.
+
+    `waived` is the one decision a human makes afterwards: the supplier is sending
+    the rest, or it is not worth the paperwork. A waived shortage stays on the
+    record and stops being offered for claim; a claimed one is answered by the
+    posted debit note that references it."""
+    __tablename__ = "grn_shortages"
+    id = Column(Integer, primary_key=True)
+    purchase_id = Column(Integer, ForeignKey("purchases.id"), index=True)
+    line_id = Column(Integer, ForeignKey("purchase_lines.id"), index=True)
+    kind = Column(String, default="short", index=True)   # short | damaged | excess
+    qty = Column(Float, default=0.0)                     # always positive
+    # Which variant it was, when the person opening the carton could tell — free
+    # text, not a link to a breakdown row. The breakdown is cleared and rebuilt
+    # every time it is edited, so a foreign key into it would dangle; and the
+    # arithmetic is at line level regardless, because the supplier billed a bundle
+    # and never said what was in it.
+    variant = Column(String)
+    reason = Column(String)                              # torn / wet / not in box / …
+    note = Column(Text)
+    recorded_by = Column(String)
+    recorded_at = Column(DateTime, default=now)
+    # accepted rather than claimed — the supplier is re-sending, or it is too small
+    # to raise a debit note for. Kept on the record either way.
+    waived = Column(Boolean, default=False, index=True)
+    waived_reason = Column(String)
+    waived_by = Column(String)
+    waived_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    purchase = relationship("Purchase")
+    line = relationship("PurchaseLine", back_populates="shortages")
+
+    #: kinds that reduce what was received — the ones a supplier can be debited for
+    CLAIMABLE_KINDS = ("short", "damaged")
+
+    @property
+    def signed_qty(self):
+        """This row's effect on the received count: negative for goods that never
+        made it in, positive for goods that turned up over and above the bill."""
+        q = float(self.qty or 0)
+        return q if self.kind == "excess" else -q
+
+    @property
+    def claimable(self):
+        """Whether this row can be put on a debit note at all. Excess is the
+        mirror case — the supplier under-billed us, which is their credit to raise
+        and not ours to debit."""
+        return self.kind in self.CLAIMABLE_KINDS
 
 
 class StockMovement(Base):
@@ -595,13 +698,21 @@ class PurchaseReturnLine(Base):
 
     `purchase_line_id` / `split_id` record WHICH received row this line is
     returning, which is what makes that re-derivation exact — and what lets the
-    screen show the batch and how many of it were bought in the first place."""
+    screen show the batch and how many of it were bought in the first place.
+
+    `shortage_id` marks the other kind of line entirely: goods the supplier billed
+    and never delivered (see GrnShortage). Financially it settles the same way —
+    it reduces what we owe on that invoice at the same GRN rate — but it must NOT
+    move stock, because the units it debits never entered stock in the first
+    place. `post()` reads this column for exactly that reason."""
     __tablename__ = "purchase_return_lines"
     id = Column(Integer, primary_key=True)
     return_id = Column(Integer, ForeignKey("purchase_returns.id"))
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
     purchase_line_id = Column(Integer, ForeignKey("purchase_lines.id"), nullable=True)
     split_id = Column(Integer, ForeignKey("purchase_line_splits.id"), nullable=True)
+    # set when this line claims a receiving shortage instead of returning goods
+    shortage_id = Column(Integer, ForeignKey("grn_shortages.id"), nullable=True)
     barcode = Column(String)
     description = Column(String)
     hsn = Column(String)
@@ -614,6 +725,13 @@ class PurchaseReturnLine(Base):
     product = relationship("Product")
     purchase_line = relationship("PurchaseLine")
     split = relationship("PurchaseLineSplit")
+    shortage = relationship("GrnShortage")
+
+    @property
+    def is_shortage_claim(self):
+        """True when this line debits goods that were never received, so posting
+        it must value the claim without touching the stock ledger."""
+        return self.shortage_id is not None
 
 
 # ============================================================================

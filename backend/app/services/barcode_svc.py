@@ -33,6 +33,7 @@ code is accepted, so nothing downstream needs to know which symbology was used.
 """
 import io
 import json
+import re
 from .. import models
 
 try:
@@ -232,25 +233,14 @@ def _resolve_unit_row(db, code):
 
 
 def _unit_label_card(u) -> str:
+    """One piece's tag. Identical to the SKU tag except that the code is this
+    garment's own — which is the whole point of it."""
     p = u.product
-    bits = [b for b in [getattr(p, "size", None), getattr(p, "color", None),
-                        getattr(p, "material", None)] if b]
-    mrp = f"₹{p.mrp:g}" if p and p.mrp else ""
-    return f"""
-    <div class="label">
-      <div class="head">
-        <div class="txt">
-          <div class="name">{_hesc(((p.description if p else '') or '')[:34])}</div>
-          <div class="meta">{_hesc(' · '.join(str(b) for b in bits))}</div>
-          <div class="cat">{_hesc((p.category if p else '') or '')}</div>
-          <div class="foot"><span class="sku">{_hesc(p.sku if p else '')}</span><span class="mrp">{mrp}</span></div>
-        </div>
-        <div class="qr">
-          {unit_qr_svg(u, scale=3)}
-          <div class="code">{_hesc(u.code)}</div>
-        </div>
-      </div>
-    </div>"""
+    g = lambda a: getattr(p, a, None) if p else None       # noqa: E731
+    return _garment_card(
+        unit_qr_svg(u, scale=3), u.code, g("sku"), g("description"),
+        g("size"), g("color"), g("material"), g("category"),
+        f"₹{p.mrp:g}" if p and p.mrp else "")
 
 
 def unit_labels_sheet(units) -> str:
@@ -349,6 +339,44 @@ def parse_qr_payload(text):
     return None
 
 
+# The quiet zone is part of the symbol, not decoration. ISO/IEC 18004 requires four
+# clear modules on every side; a decoder uses that margin to find the symbol's edge
+# at all, so a code printed with less is not a slightly worse code, it is one a
+# scanner may never locate. It lives here rather than in each stylesheet so it
+# travels with the symbol everywhere it is drawn — sheet, screen, phone PNG.
+QUIET_ZONE = 4
+
+_SVG_HEAD_RE = re.compile(
+    r'<svg([^>]*?)\bwidth="([\d.]+)"\s+height="([\d.]+)"')
+
+
+def _scalable(svg: str) -> str:
+    """Give a segno symbol a viewBox and crisp edges.
+
+    segno emits `width`/`height` in pixels and no viewBox. An SVG without one has
+    no mapping from user units to its viewport, so CSS `width: 32mm` resizes the
+    viewport and leaves the drawing at its intrinsic size — and because the
+    outermost svg clips by default, the overflow is silently cut off rather than
+    scaled. A 41-module symbol rendered at scale 3 is 135px of drawing inside a
+    98px box: the outer quarter of the code, finder pattern and all, simply is not
+    there. It looks like a QR and cannot be decoded.
+
+    `crispEdges` turns off antialiasing on the module boundaries. At label sizes a
+    softened edge costs real contrast, and contrast is what a phone camera in
+    warehouse light has least of."""
+    if "viewBox" in svg:
+        return svg
+    m = _SVG_HEAD_RE.search(svg)
+    if not m:
+        return svg
+    attrs, w, h = m.group(1), m.group(2), m.group(3)
+    return svg.replace(
+        m.group(0),
+        f'<svg{attrs}width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+        f'shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"',
+        1)
+
+
 def qr_svg(payload: str, scale: int = 3) -> str:
     """Render a payload as an inline SVG QR code.
 
@@ -363,14 +391,28 @@ def qr_svg(payload: str, scale: int = 3) -> str:
             # svgns=True keeps the xmlns, which the /qr.svg response requires and
             # which is harmless when the same markup is inlined into a label.
             buf = io.BytesIO()
-            qr.save(buf, kind="svg", scale=scale, border=2,
+            qr.save(buf, kind="svg", scale=scale, border=QUIET_ZONE,
                     xmldecl=False, svgns=True)
-            return buf.getvalue().decode()
+            return _scalable(buf.getvalue().decode())
         except Exception:
             pass
-    return ('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">'
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" '
+            'viewBox="0 0 80 80">'
             '<rect width="80" height="80" fill="#eee"/>'
             '<text x="6" y="44" font-family="monospace" font-size="9">no QR lib</text></svg>')
+
+
+def qr_module_size_mm(payload: str, box_mm: float) -> float:
+    """How many millimetres one module gets when this payload is drawn at `box_mm`.
+
+    The number that decides whether a label scans. Roughly 0.33mm is the floor for
+    a phone camera in warehouse light; the sizes chosen for the sheets below keep
+    the worst realistic payload comfortably above it. Exposed so a test can assert
+    that rather than trusting a comment."""
+    if not (_HAVE_QR and payload):
+        return 0.0
+    n = _segno.make(str(payload), error="m").symbol_size(border=QUIET_ZONE)[0]
+    return box_mm / n if n else 0.0
 
 
 def product_qr_svg(p, scale: int = 3) -> str:
@@ -389,7 +431,8 @@ def qr_png(payload: str, scale: int = 6) -> bytes:
     if _HAVE_QR and payload:
         try:
             buf = io.BytesIO()
-            _segno.make(payload, error="m").save(buf, kind="png", scale=scale, border=2)
+            _segno.make(payload, error="m").save(
+                buf, kind="png", scale=scale, border=QUIET_ZONE)
             return buf.getvalue()
         except Exception:
             pass
@@ -485,28 +528,55 @@ def _hesc(s) -> str:
     return (str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-def _label_card(p) -> str:
-    bits = [b for b in [p.size, p.color, p.material] if b]
-    sub = " · ".join(str(b) for b in bits)
-    mrp = f"₹{p.mrp:g}" if p.mrp else ""
-    # our SKU, never p.barcode — that is the supplier's number, and printing it
-    # under our QR would put someone else's code on our label
-    code = p.sku or str(p.id)
+def _garment_card(qr_svg_markup, code, sku, description, size, color, material,
+                  category, mrp) -> str:
+    """One garment tag. The SKU label and the per-piece label differ only in the
+    code beneath the symbol, so they are built here and the warehouse only ever
+    learns to read one thing.
+
+    Text is capped generously and then clipped by CSS rather than by character
+    count: only the browser knows how wide 'Cotton Saree' actually renders, and a
+    count that guesses either truncates a name that would have fitted or lets one
+    through that doesn't.
+
+    `sku` and `code` are separate on purpose. On a piece tag they differ — the foot
+    says which product this is (ESSA-00002) and the line under the symbol says
+    which of its garments (ESSA-00002-101) — and losing either leaves someone
+    holding a tag that answers only half the question."""
+    bits = [b for b in (size, color, material) if b]
+    # size first and in bold — on a rack it is the field someone reads before any
+    # other, and it is the one a mis-pick turns on
+    meta = ""
+    if bits:
+        head, rest = bits[0], bits[1:]
+        meta = f"<b>{_hesc(head)}</b>" + (" · " + _hesc(" · ".join(str(b) for b in rest)) if rest else "")
     return f"""
     <div class="label">
       <div class="head">
         <div class="txt">
-          <div class="name">{_hesc((p.description or '')[:34])}</div>
-          <div class="meta">{_hesc(sub)}</div>
-          <div class="cat">{_hesc(p.category or '')}</div>
-          <div class="foot"><span class="sku">{_hesc(p.sku or '')}</span><span class="mrp">{mrp}</span></div>
+          <div class="name">{_hesc((description or '')[:48])}</div>
+          <div class="meta">{meta}</div>
+          <div class="cat">{_hesc((category or '')[:34])}</div>
+          <div class="foot">
+            <span class="sku">{_hesc(sku or code or '')}</span>
+            <span class="mrp">{_hesc(mrp)}</span>
+          </div>
         </div>
         <div class="qr">
-          {product_qr_svg(p, scale=3)}
-          <div class="code">{_hesc(code)}</div>
+          {qr_svg_markup}
+          <div class="code">{_hesc(code or '')}</div>
         </div>
       </div>
     </div>"""
+
+
+def _label_card(p) -> str:
+    # our SKU, never p.barcode — that is the supplier's number, and printing it
+    # under our QR would put someone else's code on our label
+    return _garment_card(
+        product_qr_svg(p, scale=3), p.sku or str(p.id), p.sku, p.description,
+        p.size, p.color, p.material, p.category,
+        f"₹{p.mrp:g}" if p.mrp else "")
 
 
 def bundle_labels_sheet(bundles) -> str:
@@ -547,31 +617,46 @@ def bundle_labels_sheet(bundles) -> str:
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Bundle labels ({n})</title>
 <style>
-  body {{ font-family: Arial, Helvetica, sans-serif; margin: 10px; }}
+  @page {{ size: A4; margin: 8mm; }}
+  body {{ font-family: Arial, Helvetica, sans-serif; margin: 10px; color: #000; }}
   .bar {{ margin: 0 0 10px; }}
   .bar button {{ padding: 8px 16px; font-size: 14px; cursor: pointer; }}
-  .sheet {{ display: flex; flex-wrap: wrap; gap: 10px; }}
-  .blabel {{ width: 99mm; border: 2px solid #000; border-radius: 5px; padding: 8px 10px;
-             box-sizing: border-box; page-break-inside: avoid; }}
-  .top {{ display: flex; align-items: stretch; gap: 8px; }}
-  .txt {{ flex: 1 1 auto; min-width: 0; }}
-  .bname {{ font-size: 15px; font-weight: 700; }}
-  .qty {{ font-size: 20px; font-weight: 800; margin-top: 2px; }}
+  .hint {{ font-size: 12px; color: #555; margin: 0 0 10px; }}
+  .sheet {{ display: flex; flex-wrap: wrap; gap: 4mm; }}
+  .blabel {{ width: 110mm; box-sizing: border-box; padding: 4mm 5mm; background: #fff;
+             border: .6mm solid #000; border-radius: 2mm;
+             page-break-inside: avoid; break-inside: avoid; }}
+  .top {{ display: flex; align-items: stretch; gap: 5mm; }}
+  .txt {{ flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }}
+  /* clipped, every one of them — a carton description off a supplier bill is as
+     long as the supplier felt like making it */
+  .bname, .mix, .grn, .skus {{
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .bname {{ font-size: 15px; font-weight: 700; line-height: 1.25; min-height: 19px; }}
+  .qty {{ font-size: 22px; font-weight: 800; margin-top: 1mm; line-height: 1.1; }}
   .items {{ font-size: 12px; font-weight: 600; color: #444; }}
-  .mix {{ font-size: 10px; color: #333; margin-top: 3px; }}
-  .grn {{ font-size: 10px; color: #555; margin-top: 2px; }}
-  /* 34mm: a carton label is scanned from further away than a garment tag, and the
-     payload is smaller, so the modules can afford to be much bigger */
-  .bqr {{ flex: 0 0 34mm; }}
-  .bqr svg {{ width: 34mm; height: 34mm; display: block; }}
-  .bcode {{ font-family: monospace; font-size: 10px; text-align: center; font-weight: 700; }}
-  .loc {{ margin-top: 6px; border-top: 1px dashed #999; padding-top: 4px;
-          font-size: 12px; font-weight: 700; letter-spacing: .5px; }}
-  .skus {{ font-family: monospace; font-size: 8px; color: #666; margin-top: 3px;
-           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  @media print {{ .bar {{ display: none; }} }}
+  .mix {{ font-size: 10.5px; color: #222; margin-top: 1.2mm; min-height: 13px; }}
+  .grn {{ font-size: 10.5px; color: #444; margin-top: .8mm; min-height: 13px; }}
+  /* 40mm: read across a rack rather than in the hand, and the payload is smaller
+     than a garment's, so every module gets ~1mm — legible at arm's length and
+     forgiving of a carton that has been dragged along a shelf edge */
+  .bqr {{ flex: 0 0 {BUNDLE_QR_MM}mm; display: flex; flex-direction: column;
+          align-items: center; background: #fff; }}
+  .bqr svg {{ width: {BUNDLE_QR_MM}mm; height: {BUNDLE_QR_MM}mm; display: block; }}
+  .bcode {{ font-family: "Courier New", monospace; font-size: 11px; font-weight: 700;
+            text-align: center; margin-top: 1.2mm; letter-spacing: -.2px; }}
+  .loc {{ margin-top: 2.5mm; border-top: .3mm dashed #999; padding-top: 1.5mm;
+          font-size: 13px; font-weight: 700; letter-spacing: .5px; }}
+  .skus {{ font-family: "Courier New", monospace; font-size: 8.5px; color: #666;
+           margin-top: 1mm; }}
+  @media print {{
+    .bar, .hint {{ display: none; }}
+    * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  }}
 </style></head><body>
   <div class="bar"><button onclick="window.print()">🖨 Print {n} bundle label{'s' if n != 1 else ''}</button></div>
+  <div class="hint">Print at 100% / “Actual size” — any scaling shrinks the modules
+    and the quiet zone with them.</div>
   <div class="sheet">{cards}</div>
 </body></html>"""
 
@@ -585,41 +670,86 @@ def labels_sheet(products) -> str:
                           [_label_card(p) for p in products])
 
 
+#: Printed size of a garment tag's QR. 32mm keeps the worst realistic payload
+#: (a long supplier description with every attribute filled — 53 modules plus the
+#: 4-module quiet zone) at ~0.52mm per module, and a typical one at ~0.65mm. The
+#: floor for a phone camera in warehouse light is around 0.33mm, so this leaves
+#: room for thermal-printer bleed and a scuffed sticker rather than sitting on the
+#: limit. `test` asserts it; see qr_module_size_mm.
+GARMENT_QR_MM = 32
+#: Read across a rack rather than in the hand, and carrying a smaller payload.
+BUNDLE_QR_MM = 40
+
+
 def _garment_sheet(title, noun, cards) -> str:
     """The shared garment-tag sheet: same stylesheet whether the code under each QR
-    is a SKU or one piece's own, so the warehouse only ever learns one label."""
+    is a SKU or one piece's own, so the warehouse only ever learns one label.
+
+    LAYOUT RULES, all of them about the symbol staying readable:
+
+    * The QR is a fixed column of its own and the details never share it. Every
+      text row is clipped with an ellipsis — a single un-clipped row (the old
+      `.meta` had no overflow rule) is enough to push a long "S · Orange · Cotton"
+      into the code and take the label with it.
+    * The 4-module quiet zone is inside the symbol; the flex gap adds ~4mm more of
+      guaranteed white beside it, and the QR box paints itself white so a tinted
+      label stock or a background rule cannot creep into the margin.
+    * Rows have fixed minimum heights, so a product with no category and a product
+      with one produce the same card and a sheet of them lines up in a grid — which
+      is what makes a page of labels cuttable.
+    """
     cards = "".join(cards)
     n = len(cards.split('<div class="label">')) - 1
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>{title} ({n})</title>
 <style>
-  body {{ font-family: Arial, Helvetica, sans-serif; margin: 10px; }}
+  @page {{ size: A4; margin: 8mm; }}
+  body {{ font-family: Arial, Helvetica, sans-serif; margin: 10px; color: #000; }}
   .bar {{ margin: 0 0 10px; }}
   .bar button {{ padding: 8px 16px; font-size: 14px; cursor: pointer; }}
-  .sheet {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-  .label {{ width: 58mm; border: 1px solid #bbb; border-radius: 4px; padding: 6px 8px;
-            box-sizing: border-box; page-break-inside: avoid; }}
-  .name {{ font-size: 11px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  .meta {{ font-size: 9px; color: #444; min-height: 11px; }}
-  .cat {{ font-size: 8.5px; color: #666; font-family: monospace; min-height: 10px;
-          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  /* The QR is the only code on the label, so it takes the space the EAN-13 stripe
-     used to occupy: 26mm square instead of 20mm. At ~45 modules that is ~0.55mm
-     per module, comfortably above the ~0.33mm a phone camera needs in warehouse
-     light. Text column sits beside it and carries sku/MRP at its foot — hence
-     `stretch`, so that column matches the QR's height and `margin-top:auto` can
-     pin sku/MRP to the bottom of the label. */
-  .head {{ display: flex; align-items: stretch; gap: 6px; }}
+  .hint {{ font-size: 12px; color: #555; margin: 0 0 10px; }}
+  .sheet {{ display: flex; flex-wrap: wrap; gap: 4mm; }}
+  .label {{ width: 76mm; box-sizing: border-box; padding: 3.5mm 4mm;
+            border: 1px solid #999; border-radius: 1.5mm; background: #fff;
+            page-break-inside: avoid; break-inside: avoid; }}
+  /* the QR column and the text column, side by side and never overlapping */
+  .head {{ display: flex; align-items: stretch; gap: 4mm; }}
   .txt {{ flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }}
-  .qr {{ flex: 0 0 26mm; }}
-  .qr svg {{ width: 26mm; height: 26mm; display: block; }}
-  .code {{ font-family: monospace; font-size: 8px; text-align: center; letter-spacing: .3px; }}
-  .foot {{ display: flex; justify-content: space-between; font-size: 10px; margin-top: auto;
-           padding-top: 4px; }}
-  .sku {{ font-family: monospace; }}
-  .mrp {{ font-weight: 700; }}
-  @media print {{ .bar {{ display: none; }} .label {{ border-color: #000; }} }}
+  /* every row clipped: content varies per product, the label must not */
+  .name, .meta, .cat, .sku, .mrp {{
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .name {{ font-size: 13px; font-weight: 700; line-height: 1.25; min-height: 16px;
+           letter-spacing: -.1px; }}
+  .meta {{ font-size: 11px; color: #222; line-height: 1.3; min-height: 14px;
+           margin-top: 1mm; }}
+  .cat {{ font-size: 9.5px; color: #555; font-family: "Courier New", monospace;
+          line-height: 1.3; min-height: 12px; margin-top: .8mm; letter-spacing: -.2px; }}
+  /* pinned to the foot of the text column, which stretches to the QR's height —
+     so SKU and MRP sit on one baseline across every label on the sheet */
+  .foot {{ display: flex; align-items: baseline; justify-content: space-between;
+           gap: 3mm; margin-top: auto; padding-top: 1.5mm;
+           border-top: .4mm solid #ddd; }}
+  .sku {{ font-family: "Courier New", monospace; font-size: 11px; font-weight: 700;
+          letter-spacing: -.2px; }}
+  .mrp {{ font-size: 13px; font-weight: 700; flex: 0 0 auto; }}
+  /* white behind the symbol so nothing can tint the quiet zone */
+  .qr {{ flex: 0 0 {GARMENT_QR_MM}mm; display: flex; flex-direction: column;
+         align-items: center; background: #fff; }}
+  .qr svg {{ width: {GARMENT_QR_MM}mm; height: {GARMENT_QR_MM}mm; display: block; }}
+  /* clear of the quiet zone — this text must not be the first thing a decoder
+     finds when it looks for the symbol's lower edge */
+  .code {{ font-family: "Courier New", monospace; font-size: 9px; font-weight: 700;
+           text-align: center; letter-spacing: -.2px; margin-top: 1.2mm;
+           max-width: {GARMENT_QR_MM}mm; overflow: hidden; white-space: nowrap; }}
+  @media print {{
+    .bar, .hint {{ display: none; }}
+    .label {{ border-color: #000; }}
+    /* keep the white QR backing when the browser strips backgrounds */
+    * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  }}
 </style></head><body>
   <div class="bar"><button onclick="window.print()">🖨 Print {n} {noun}{'s' if n != 1 else ''}</button></div>
+  <div class="hint">Print at 100% / “Actual size” — any scaling shrinks the modules
+    and the quiet zone with them.</div>
   <div class="sheet">{cards}</div>
 </body></html>"""

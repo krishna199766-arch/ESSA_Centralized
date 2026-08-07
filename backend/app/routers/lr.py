@@ -11,6 +11,7 @@ from ..config import UPLOAD_DIR
 from ..services import lr as lr_svc
 from ..services import lr_link
 from ..services import masters as masters_svc
+from ..services import dates
 
 router = APIRouter(prefix="/api/lr", tags=["lr-entry"])
 
@@ -29,6 +30,11 @@ WRITABLE = [
 _NUMERIC = {"agent_commission", "stock_holding_days", "additional_margin",
             "bundle", "boxes", "qty", "amount", "freight_amount"}
 _BOOLEAN = {"freight_applicable"}
+# Stored as ISO text so the range filter below (`recv_date >= date_from`, a plain
+# SQL string comparison) is arithmetic rather than alphabetical. With "31/07/2026"
+# in the column, "01/08/2026" sorts before it and a July-to-August search quietly
+# returns the wrong rows — see services/dates.py.
+_DATES = {"recv_date", "lr_date", "lr_entry_date", "inv_date"}
 
 # Marked * on the Transport Entry form. Enforced on MANUAL entry only: a
 # register page carries none of Company/Agent, so holding an import to the same
@@ -45,10 +51,13 @@ _LEARNS = {"purchase_manager": "purchase_manager"}
 
 
 def _coerce(field, value):
-    """Blank → None; numeric columns → float; checkbox columns → bool.
+    """Blank → None; numeric columns → float; checkbox columns → bool; dates → ISO.
 
     Everything arrives as a string from a form, and a blank numeric must become
-    NULL rather than 0 — "no weight recorded" and "weighed nil" are different."""
+    NULL rather than 0 — "no weight recorded" and "weighed nil" are different.
+
+    The single funnel for every LR write — save, create and patch all pass through
+    here — which is why date normalisation belongs here and not in three places."""
     if value is None:
         return None
     if field in _BOOLEAN:
@@ -62,6 +71,10 @@ def _coerce(field, value):
             return float(value)
         except (TypeError, ValueError):
             return None
+    if field in _DATES:
+        # readable → ISO; unreadable → kept verbatim, because a date this cannot
+        # parse is still what the register page said
+        return dates.normalise(value)
     return value
 
 
@@ -249,10 +262,12 @@ def _filtered(db, received="all", q="", supplier="", transport="",
                      (models.LREntry.transport, transport)):
         if val:
             query = query.filter(col.ilike(f"%{val}%"))
-    if date_from:
-        query = query.filter(models.LREntry.recv_date >= date_from)
-    if date_to:
-        query = query.filter(models.LREntry.recv_date <= date_to)
+    # both sides normalised to ISO, so this stays a string comparison that happens
+    # to be chronological — the only form in which it is correct
+    if dates.to_iso(date_from):
+        query = query.filter(models.LREntry.recv_date >= dates.to_iso(date_from))
+    if dates.to_iso(date_to):
+        query = query.filter(models.LREntry.recv_date <= dates.to_iso(date_to))
     if q:
         like = f"%{q}%"
         query = query.filter(

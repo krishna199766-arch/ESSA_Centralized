@@ -44,14 +44,23 @@ def create_for_purchase(db, purchase):
     for line in purchase.lines:
         if line.bundle:
             continue
-        items = [s.product for s in line.splits if s.product] if line.is_split \
-            else ([line.product] if line.product else [])
+        # counted by product_id, not through the `product` relationship: post_grn
+        # has just assigned the ids in this same session, and the loaded
+        # relationship still reads None until it is refreshed
+        holders = line.splits if line.is_split else [line]
+        items = {h.product_id for h in holders if h.product_id}
+        # A carton label describes what is IN the carton, so it carries the
+        # received quantity — never the billed one. A line the supplier invoiced
+        # and did not deliver gets no label at all: there is no box to stick it on.
+        qty = line.received_qty
+        if not items or qty <= 0:
+            continue
         b = models.Bundle(
             code=next_code(db),
             purchase_id=purchase.id, line_id=line.id,
             supplier_id=purchase.supplier_id,
             description=line.description or "(unnamed)",
-            hsn=line.hsn, uom=line.uom or "PCS", qty=line.qty,
+            hsn=line.hsn, uom=line.uom or "PCS", qty=qty,
             item_count=len(items),
             grn_no=purchase.grn_no, invoice_number=purchase.invoice_number,
             status="stored",

@@ -18,6 +18,7 @@ To destination, Received By, and a sent vs accepted qty per line.
 """
 import datetime as dt
 from .. import models
+from . import dates
 from . import barcode_svc
 
 
@@ -48,7 +49,7 @@ def create_outward(db, payload):
     """payload: {date, to_destination, packed_by, received_by, from_location,
                  lines:[{barcode|product_id, qty, accepted_qty}]}"""
     o = models.StockOutward(
-        code=_next_code(db), date=payload.get("date"),
+        code=_next_code(db), date=dates.normalise(payload.get("date")),
         to_destination=payload.get("to_destination"),
         packed_by=payload.get("packed_by"), received_by=payload.get("received_by"),
         from_location=payload.get("from_location", "WAREHOUSE"),
@@ -151,7 +152,7 @@ def receive_outward(db, outward, accepted=None, received_by=None, date=None):
             l.accepted_qty = sent
 
     outward.received_by = received_by or outward.received_by
-    outward.received_date = date or outward.received_date
+    outward.received_date = dates.normalise(date) if date else outward.received_date
     outward.received_at = dt.datetime.utcnow()
     outward.status = "received"
     db.flush()

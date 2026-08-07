@@ -3,21 +3,21 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#0f1420" />
+<meta name="theme-color" content="#5A3428" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <meta name="apple-mobile-web-app-title" content="ESSA Warehouse" />
 <link rel="manifest" href="/m/manifest.webmanifest" />
 <link rel="apple-touch-icon" href="/m/icon.png" />
 <title>ESSA Warehouse</title>
 <style>
-:root{--bg:#0f1420;--panel:#171d2b;--panel2:#1e2636;--line:#2a3346;--text:#e8edf5;--muted:#8a95a8;--accent:#4f8cff;--ok:#35c07a;--warn:#f2b544;--danger:#f2685f}
+:root{--bg:#F5F2F0;--panel:#FFFFFF;--panel2:#F2EEEB;--line:#E4DCD7;--line2:#96867C;--text:#2A2320;--muted:#7C6F68;--accent:#5A3428;--accent2:#7A4C3D;--ok:#1E7A4D;--okbg:#E7F4ED;--warn:#B45309;--warnbg:#FDF2E3;--danger:#C0392B;--dangerbg:#FBEBE9}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:16px}
 #app{min-height:100%;display:flex;flex-direction:column}
 .pad{padding:env(safe-area-inset-top) 0 0 0}
 input,select,button,textarea{font:inherit;color:var(--text)}
-input,select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 12px;font-size:16px}
+input,select{width:100%;background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:12px 12px;font-size:16px}
 input:focus,select:focus{outline:none;border-color:var(--accent)}
 label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
 .field{margin-bottom:13px}
@@ -37,6 +37,11 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
 .link{color:var(--accent);font-size:13px;background:none;border:none;padding:6px}
 .controls{padding:12px 14px;display:flex;flex-direction:column;gap:9px;background:var(--bg)}
 .row{display:flex;gap:8px}
+/* A flex item defaults to min-width:auto, so a 100%-wide <input> beside two
+   buttons refuses to shrink below its intrinsic size and pushes the whole
+   page wider than the phone — every row then sits shifted with its right
+   edge off-screen. Letting row children shrink is the fix. */
+.row>*{min-width:0}
 .chip{flex:0 0 auto;background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:8px 15px;font-size:14px;color:var(--muted);text-transform:capitalize}
 .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
 /* camera scanner overlay */
@@ -53,12 +58,12 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
 .prow .t{font-weight:600}
 .prow .m{color:var(--muted);font-size:12px;margin-top:3px}
 .badge{border-radius:20px;padding:4px 10px;font-size:11px;flex:0 0 auto}
-.bpend{background:#3a2f13;color:var(--warn)}
-.bdone{background:#12301f;color:var(--ok)}
+.bpend{background:var(--warnbg);color:var(--warn)}
+.bdone{background:var(--okbg);color:var(--ok)}
 .detwrap{flex:1;overflow:auto;padding:16px}
 .detname{font-size:20px;font-weight:700}
 .detmeta{color:var(--muted);font-size:13px;margin-top:4px}
-.sheet{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;z-index:20}
+.sheet{position:fixed;inset:0;background:rgba(42,35,32,.45);display:flex;align-items:flex-end;z-index:20}
 .sheetcard{background:var(--panel);width:100%;border-radius:16px 16px 0 0;max-height:80vh;display:flex;flex-direction:column}
 .sheethd{display:flex;align-items:center;justify-content:space-between;padding:15px 16px;border-bottom:1px solid var(--line);font-weight:700}
 .opt{padding:15px 18px;border-bottom:1px solid var(--line);font-size:16px}
@@ -83,6 +88,8 @@ const S = { token: localStorage.getItem('essa_token')||'', user: localStorage.ge
             // goods receipts: the bundle a supplier billed, broken into what arrived
             grns:[], grnFilter:'draft', grn:null, grnLine:null, srows:[], sopen:{},
             cats:[], postResult:null,
+            // shortage entry: what was billed and wasn't in the box
+            shortLine:null, shrows:[], shortOpts:null,
             // cartons: the first label, printed at GRN and scanned around the warehouse
             bundles:[], bundleFilter:'stored', bundle:null, locations:[] };
 const app = document.getElementById('app');
@@ -117,6 +124,7 @@ function render(){
   if(S.screen==='grn') return renderGrnList();
   if(S.screen==='grndetail') return renderGrn();
   if(S.screen==='grnbreak') return renderBreak();
+  if(S.screen==='grnshort') return renderShort();
   if(S.screen==='grnposted') return renderPosted();
   if(S.screen==='bundles') return renderBundles();
   if(S.screen==='bundle') return renderBundle();
@@ -349,6 +357,7 @@ async function paintGrns(){
         <div class="t">${esc(g.supplier_name||('GRN #'+g.id))}</div>
         <div class="m">Inv ${esc(g.invoice_number||'—')}${g.invoice_date?' · '+esc(g.invoice_date):''} · ₹ ${money(g.grand_total)}</div>
         <div class="m">${g.line_count} line${g.line_count===1?'':'s'}${g.new_products?` · ${g.new_products} new product${g.new_products===1?'':'s'}`:''}${g.grn_no?' · GRN '+esc(g.grn_no):''}</div>
+        ${g.short_qty?`<div class="m" style="color:var(--warn)">⚠ ${qtyOf(g.short_qty)} short — ₹${money(g.short_value)} to claim</div>`:''}
       </div>
       <div class="badge ${g.status==='posted'?'bdone':'bpend'}">${esc(g.status)}</div></div>`).join('');
   list.querySelectorAll('.prow').forEach(r=>r.onclick=()=>openGrn(rows[+r.dataset.i].id));
@@ -364,21 +373,36 @@ function renderGrn(){
   const g=S.grn; if(!g){ S.screen='grn'; return render(); }
   const editable=g.status!=='posted';
   const unbal=(g.unbalanced_splits||[]).length;
+  const short=g.shortages||{claimable_qty:0,claimable_value:0};
   // the server says outright whether the bundle is split; falling back to the rows
   // keeps an older server from making a broken-down bundle read as a plain product
   const split=(l)=>l.is_split!=null?l.is_split:l.splits.length>0;
+  // the balance the breakdown hasn't accounted for — the number that is either a
+  // shortage or still to be typed, and the whole reason this screen used to dead-end
+  const gap=(l)=>qtyOf((l.received_qty!=null?l.received_qty:l.qty)-(l.split_qty||0));
   const lineHtml=(l,i)=>`<div class="prow" style="display:block">
       <div class="row" style="align-items:flex-start">
         <div style="flex:1;min-width:0">
           <div class="t">${esc(l.description||'(unnamed)')}</div>
           <div class="m">HSN ${esc(l.hsn||'—')} · ${qtyOf(l.qty)} ${esc(l.uom||'')} × ₹${money(l.rate)} = ₹${money(l.amount)}</div>
+          ${l.has_shortage?`<div class="m" style="color:var(--warn)">Billed ${qtyOf(l.qty)}, received <b>${qtyOf(l.received_qty)}</b>${
+              l.missing_qty?` — ${qtyOf(l.missing_qty)} ${l.damaged_qty&&!l.short_qty?'damaged':'short'}, ₹${money(l.shortage_value)} to claim`:''}${
+              l.excess_qty?` — ${qtyOf(l.excess_qty)} extra`:''}</div>`:''}
           ${split(l)?`<div class="m">Bundle split into ${l.splits.length} item${l.splits.length===1?'':'s'} — the rows below carry the stock, not this line.</div>`:''}
-          ${l.splits.length&&!l.split_balanced?`<div class="m" style="color:var(--warn)">${qtyOf(l.split_remainder)} of ${qtyOf(l.qty)} still to break down</div>`:''}
+          ${l.splits.length&&!l.split_balanced?`<div class="m" style="color:var(--warn)">${qtyOf(l.split_remainder)} of ${qtyOf(l.received_qty!=null?l.received_qty:l.qty)} still to break down</div>`:''}
         </div>
         ${split(l)
           ? `<div class="badge ${l.split_balanced?'bdone':'bpend'}">split · ${l.splits.length}${l.split_balanced?'':' ⚠'}</div>`
           : `<div class="badge ${l.is_new_product?'bpend':'bdone'}">${l.is_new_product?'new':'matched'}</div>`}
       </div>
+      ${/* The moment the receiver is stuck: the rows don't reach the billed
+            quantity because the pieces aren't there. One tap says so, with the
+            number already filled in, instead of leaving invent-or-abandon as the
+            only two options. */''}
+      ${editable&&!l.has_shortage&&l.splits.length&&!l.split_balanced&&gap(l)>0
+        ? `<button class="link" style="padding:8px 0;display:block;text-align:left;color:var(--warn)" data-shortgap="${i}">
+             ${gap(l)} not in the box? record as shortage →</button>`
+        : ''}
       <div class="row" style="align-items:center;gap:8px;margin-top:10px">
         <span style="color:var(--muted);font-size:12px;flex:0 0 62px">Category</span>
         ${editable
@@ -403,10 +427,20 @@ function renderGrn(){
           ${editable&&!sp.product_id
             ? `<button class="btn sec" style="width:auto;padding:9px 12px" data-scan="${i}" data-split="${sp.id}">⌗ QR</button>` : ''}
         </div>`).join('')}
+      ${(l.shortages||[]).map(sh=>`<div class="row" style="align-items:center;gap:10px;border-top:1px solid var(--line);margin-top:9px;padding-top:9px">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600;color:${sh.kind==='excess'?'var(--ok)':'var(--warn)'}">
+              ⚠ ${qtyOf(sh.qty)} ${esc(sh.kind)}${sh.variant?' · '+esc(sh.variant):''}</div>
+            <div class="m">${esc(sh.reason||'no reason given')}${sh.claimable?` · ₹${money(sh.amount)} to claim`:''}</div>
+            <div class="m">${esc(sh.recorded_by?('by '+sh.recorded_by):'')}${sh.status!=='open'?' · '+esc(sh.status):''}</div>
+          </div>
+        </div>`).join('')}
       ${editable?`<div class="row" style="margin-top:11px;gap:8px">
           <button class="btn sec" data-break="${i}">${l.splits.length?'Edit breakdown':'Break down into sizes'}</button>
           ${!l.splits.length?`<button class="btn sec" style="width:auto;padding:12px 14px" data-scan="${i}">⌗ QR</button>`:''}
-        </div>`:''}
+        </div>
+        <button class="btn sec" style="margin-top:8px${l.has_shortage?'':';color:var(--muted)'}" data-short="${i}">
+          ${l.has_shortage?'Edit shortage':'⚠ Something missing or damaged?'}</button>`:''}
     </div>`;
 
   app.innerHTML=`<div class="topbar"><button class="link" id="back">‹ GRNs</button>
@@ -421,9 +455,12 @@ function renderGrn(){
       ${g.lines.map(lineHtml).join('')}
     </div>
     <div class="actionbar">
+      ${short.claimable_qty?`<div class="hint" style="margin-bottom:7px;color:var(--warn)">
+        ⚠ ${qtyOf(short.claimable_qty)} short or damaged across this receipt — ₹${money(short.claimable_value)} to claim back.
+        ${g.status==='posted'?'Raise the debit note from Returns on the desktop.':'It stays off the stock; the invoice keeps its own figure.'}</div>`:''}
       <div class="hint" style="margin-bottom:9px">${g.status==='posted'
         ? 'Posted — stock is updated. Correct it by unposting on the desktop app.'
-        : unbal ? `⚠ ${unbal} line${unbal===1?'':'s'} broken down to the wrong total — fix before posting.`
+        : unbal ? `⚠ ${unbal} line${unbal===1?'':'s'} broken down to the wrong total — fix, or record what didn't arrive as a shortage.`
         : 'Posting creates a product and a QR for every size, adds the stock, and averages the cost.'}</div>
       ${g.status==='posted'
         ? `<button class="btn" id="showqr">Show QR codes</button>`
@@ -432,6 +469,11 @@ function renderGrn(){
 
   document.getElementById('back').onclick=()=>{ S.screen='grn'; render(); };
   app.querySelectorAll('[data-break]').forEach(b=>b.onclick=()=>openBreak(g.lines[+b.dataset.break]));
+  app.querySelectorAll('[data-short]').forEach(b=>b.onclick=()=>openShort(g.lines[+b.dataset.short]));
+  // arrives with the unaccounted quantity already filled in — it is the number
+  // the receiver has just been told about, so retyping it is only a chance to err
+  app.querySelectorAll('[data-shortgap]').forEach(b=>b.onclick=()=>{
+    const l=g.lines[+b.dataset.shortgap]; openShort(l, gap(l)); });
   // a category chosen here means the products are born mapped, instead of landing
   // "unmapped" in Inventory for someone to fix one by one — and the server learns
   // the wording, so the next invoice phrased that way maps itself
@@ -470,13 +512,170 @@ function scanInto(line, splitId){
 
 async function postGrn(){
   const rows=S.grn.lines.reduce((n,l)=>n+(l.splits.length||1),0);
-  if(!confirm(`Post this GRN?\n\n${rows} item${rows===1?'':'s'} go into stock. Each new one gets its own SKU and QR code, and its cost is averaged into inventory.\n\nCorrecting a posted GRN means unposting it on the desktop app.`)) return;
+  const sh=S.grn.shortages||{};
+  // A shortage is stated at the moment it stops being editable, because posting
+  // is what turns "40 arrived" into the stock figure and "10 short" into a claim.
+  if(!confirm(`Post this GRN?\n\n${rows} item${rows===1?'':'s'} go into stock. Each new one gets its own SKU and QR code, and its cost is averaged into inventory.`
+      +(sh.claimable_qty?`\n\n⚠ ${qtyOf(sh.claimable_qty)} short or damaged (₹${money(sh.claimable_value)}) stays OUT of stock and becomes a claim against the supplier. The invoice keeps its own quantity.`:'')
+      +`\n\nCorrecting a posted GRN means unposting it on the desktop app.`)) return;
   const btn=document.getElementById('post'); if(btn) btn.disabled=true;
   try{
     S.postResult=await api(`/api/purchases/${S.grn.id}/post`,{method:'POST'});
     await reloadGrn();                       // now carries each variant's product
     S.screen='grnposted'; render();
+    if(S.postResult.short_qty) toast(`Posted · ${qtyOf(S.postResult.short_qty)} short, ₹${money(S.postResult.short_value)} to claim`);
   }catch(e){ toast('Post failed: '+e.message); if(btn) btn.disabled=false; }
+}
+
+// ---------- shortage entry: what was billed and wasn't in the box ----------
+// The step that has to happen before Post to inventory, and the only person who
+// can do it is the one opening the cartons. Without it the receiver's choices are
+// both lies — type in ten pieces that don't exist so the breakdown balances, or
+// leave the receipt unpostable — and after posting the gap is invisible: stock
+// says 40, the invoice says 50, and nothing remembers why. Recorded here it is a
+// document the debit note is later built from without anyone counting again.
+const SHORT_KINDS=[['short','Short','not in the box'],
+                   ['damaged','Damaged','arrived unusable, rejected'],
+                   ['excess','Excess','more arrived than billed']];
+const shortTotals=(rows)=>{
+  let missing=0, excess=0;
+  (rows||[]).forEach(r=>{ const q=+r.qty||0; if(r.kind==='excess') excess+=q; else missing+=q; });
+  return {missing:qtyOf(missing), excess:qtyOf(excess)};
+};
+const blankShort=(kind,qty)=>({kind:kind||'short', qty:qty!=null?String(qty):'',
+                               variant:'', reason:'', note:''});
+
+async function loadShortOpts(){
+  if(S.shortOpts) return S.shortOpts;
+  try{ S.shortOpts=await api('/api/purchases/shortage-options'); }
+  catch(e){ S.shortOpts={reasons:[]}; }
+  return S.shortOpts;
+}
+
+// `preset` is the quantity the breakdown couldn't account for — arriving here
+// from "not received?" means the number is already known and shouldn't be retyped
+async function openShort(line, preset){
+  S.shortLine=line;
+  await loadShortOpts();
+  S.shrows=(line.shortages&&line.shortages.length)
+    ? line.shortages.map(sh=>({kind:sh.kind, qty:String(sh.qty), variant:sh.variant||'',
+                               reason:sh.reason||'', note:sh.note||''}))
+    : [blankShort('short', preset)];
+  S.screen='grnshort'; render();
+}
+
+function renderShort(){
+  const l=S.shortLine; if(!l){ S.screen='grndetail'; return render(); }
+  const billed=+l.qty||0;
+  const t=shortTotals(S.shrows);
+  const received=qtyOf(billed-t.missing+t.excess);
+  const reasons=(S.shortOpts&&S.shortOpts.reasons)||[];
+
+  const rowHtml=(r,i)=>`<div class="prow" style="display:block">
+      <div class="row" style="align-items:center;gap:8px">
+        <span style="color:var(--muted);font-size:12px;font-weight:700">${i+1}</span>
+        <div class="t" style="flex:1;min-width:0">${esc((SHORT_KINDS.find(k=>k[0]===r.kind)||[])[1]||r.kind)}${r.qty?' · '+qtyOf(r.qty)+' '+esc(l.uom||''):''}</div>
+        <button class="link" style="font-size:20px;color:var(--muted)" data-shdel="${i}">×</button>
+      </div>
+      <div class="row" style="overflow:auto;gap:8px;margin-top:9px">
+        ${SHORT_KINDS.map(([k,lab])=>`<div class="chip ${r.kind===k?'on':''}" data-shkind="${i}:${k}">${lab}</div>`).join('')}
+      </div>
+      <div class="hint" style="margin-top:6px">${esc((SHORT_KINDS.find(k=>k[0]===r.kind)||[])[2]||'')}</div>
+      <div class="row" style="gap:8px;align-items:flex-end;margin-top:9px">
+        <div style="flex:1"><label>How many</label>
+          <input inputmode="decimal" data-shqty="${i}" value="${esc(r.qty)}" placeholder="0" style="padding:10px 12px"></div>
+        <button class="btn sec" style="width:auto;padding:11px 13px" data-shrest="${i}">rest</button>
+      </div>
+      <div class="field" style="margin-top:11px"><label>Reason</label>
+        <button class="selbtn ${r.reason?'':'empty'}" data-shreason="${i}">${esc(r.reason||'Why?')}</button></div>
+      <div class="field"><label>Which ones (if you can tell)</label>
+        <input data-shtxt="${i}:variant" value="${esc(r.variant)}" placeholder="e.g. S / White — leave blank if unknown"></div>
+      <div class="field" style="margin-bottom:0"><label>Note</label>
+        <input data-shtxt="${i}:note" value="${esc(r.note)}" placeholder="anything the office should see"></div>
+    </div>`;
+
+  app.innerHTML=`<div class="topbar"><button class="link" id="shcancel">‹ Cancel</button><h1>Shortage</h1></div>
+    <div class="controls">
+      <div class="detname" style="font-size:18px">${esc(l.description||'(unnamed)')}</div>
+      <div class="detmeta">Billed ${qtyOf(billed)} ${esc(l.uom||'')} × ₹${money(l.rate)}</div>
+      <div class="detmeta" id="shprog"></div>
+      <div class="hint">Record what the supplier billed and the boxes didn't hold. The
+        invoice still says ${qtyOf(billed)} — only ${received} goes into stock, and the
+        difference becomes a claim against the supplier.</div>
+    </div>
+    <div class="list">
+      ${S.shrows.map(rowHtml).join('')}
+      <button class="btn sec" id="shadd" style="margin-bottom:10px">+ add another</button>
+      ${(l.shortages&&l.shortages.length)?`<button class="btn sec" id="shclear" style="color:var(--danger)">No shortage after all</button>`:''}
+    </div>
+    <div class="actionbar"><button class="btn" id="shsave">Save shortage</button></div>`;
+  updShortProg();
+
+  document.getElementById('shcancel').onclick=()=>{ S.screen='grndetail'; render(); };
+  document.getElementById('shadd').onclick=()=>{ S.shrows.push(blankShort('short')); render(); };
+  app.querySelectorAll('[data-shdel]').forEach(b=>b.onclick=()=>{
+    S.shrows.splice(+b.dataset.shdel,1); if(!S.shrows.length) S.shrows.push(blankShort('short')); render(); });
+  app.querySelectorAll('[data-shkind]').forEach(c=>c.onclick=()=>{
+    const p=c.dataset.shkind.split(':'); S.shrows[+p[0]].kind=p[1]; render(); });
+  // typing updates state and the running total only — re-rendering on every
+  // keystroke would take the keyboard's focus with it
+  app.querySelectorAll('[data-shqty]').forEach(inp=>inp.addEventListener('input',e=>{
+    S.shrows[+inp.dataset.shqty].qty=e.target.value; updShortProg(); }));
+  app.querySelectorAll('[data-shtxt]').forEach(inp=>inp.addEventListener('input',e=>{
+    const p=inp.dataset.shtxt.split(':'); S.shrows[+p[0]][p[1]]=e.target.value; }));
+  app.querySelectorAll('[data-shrest]').forEach(b=>b.onclick=()=>{
+    // "rest" here means the balance the breakdown could not account for — the
+    // number the receiver is staring at on the previous screen
+    const i=+b.dataset.shrest;
+    const others=S.shrows.reduce((n,r,j)=>n+(j===i||r.kind==='excess'?0:(+r.qty||0)),0);
+    const assigned=(l.splits||[]).reduce((n,s)=>n+(+s.qty||0),0);
+    const gap=assigned>0 ? billed-assigned-others : billed-others;
+    S.shrows[i].qty=String(qtyOf(Math.max(0,gap)));
+    const inp=app.querySelector(`[data-shqty="${i}"]`); if(inp) inp.value=S.shrows[i].qty;
+    updShortProg();
+  });
+  app.querySelectorAll('[data-shreason]').forEach(b=>b.onclick=()=>{
+    const i=+b.dataset.shreason;
+    pickSheet('Reason', reasons, S.shrows[i].reason, (v)=>{ S.shrows[i].reason=v; render(); }, true);
+  });
+  const sc=document.getElementById('shclear');
+  if(sc) sc.onclick=()=>{ if(confirm('Clear the shortage?\n\nThe whole billed quantity goes back to being expected in stock.')) saveShort([]); };
+  document.getElementById('shsave').onclick=submitShort;
+}
+
+function updShortProg(){
+  const l=S.shortLine, billed=+l.qty||0;
+  const t=shortTotals(S.shrows);
+  const received=qtyOf(billed-t.missing+t.excess);
+  const el=document.getElementById('shprog');
+  if(!el) return;
+  const rate=+l.rate||0;
+  el.innerHTML=`Into stock <b>${received}</b> of ${qtyOf(billed)} billed`
+    +(t.missing?` · <span style="color:var(--warn)">${t.missing} short — ₹${money(t.missing*rate)} to claim</span>`:'')
+    +(t.excess?` · <span style="color:var(--ok)">${t.excess} extra</span>`:'');
+}
+
+function submitShort(){
+  const l=S.shortLine, billed=+l.qty||0;
+  const kept=S.shrows.filter(r=>+r.qty>0);
+  if(!kept.length){ toast('Enter how many were missing, damaged or extra'); return; }
+  const t=shortTotals(kept);
+  if(t.missing>billed+0.001){
+    toast(`${t.missing} short of ${qtyOf(billed)} billed — that's more than the invoice`); return; }
+  if(kept.some(r=>!r.reason)&&!confirm('No reason on one of these rows.\n\nThe office will be claiming money back from the supplier — a reason is what they argue with.\n\nSave anyway?')) return;
+  saveShort(kept);
+}
+
+async function saveShort(rows){
+  const l=S.shortLine;
+  try{
+    await api(`/api/purchases/lines/${l.id}/shortages`,{
+      method:'PUT', body:JSON.stringify({rows:rows, recorded_by:S.employee||S.user||''})});
+    await reloadGrn();
+    S.screen='grndetail'; render();
+    const t=shortTotals(rows);
+    toast(rows.length ? `✓ ${t.missing?t.missing+' short':t.excess+' extra'} recorded` : '✓ Shortage cleared');
+  }catch(e){ toast(e.message); }
 }
 
 // ---------- the breakdown editor ----------
@@ -491,20 +690,34 @@ function openBreak(line){
   S.screen='grnbreak'; render();
 }
 
+// The target is what ARRIVED, not what was billed — once a shortage is recorded
+// the rows only have to reach the received quantity, which is the whole point of
+// recording it.
+function breakTarget(l){ return +(l.received_qty!=null?l.received_qty:l.qty)||0; }
+
 function updProgress(){
-  const l=S.grnLine, billed=+l.qty||0;
+  const l=S.grnLine, target=breakTarget(l), billed=+l.qty||0;
   const assigned=S.srows.reduce((n,r)=>n+(+r.qty||0),0);
-  const done=sameQty(assigned,billed);
+  const done=sameQty(assigned,target);
+  const left=qtyOf(target-assigned);
   const p=document.getElementById('prog');
   if(p){
-    p.textContent=`${qtyOf(assigned)} of ${qtyOf(billed)} ${l.uom||''} assigned`
-      +(done?' ✓':` · ${qtyOf(billed-assigned)} left`);
+    p.textContent=`${qtyOf(assigned)} of ${qtyOf(target)} ${l.uom||''} assigned`
+      +(l.has_shortage?` (${qtyOf(billed)} billed, ${qtyOf(l.missing_qty)} short)`:'')
+      +(done?' ✓':` · ${left} left`);
     p.style.color=done?'var(--ok)':'var(--muted)';
   }
   const bar=document.getElementById('bar');
   if(bar){
-    bar.style.width=Math.min(100,billed?(assigned/billed)*100:0)+'%';
+    bar.style.width=Math.min(100,target?(assigned/target)*100:0)+'%';
     bar.style.background=done?'var(--ok)':'var(--accent)';
+  }
+  // offered here as well as on the line: this is where a receiver first notices
+  // the sizes don't add up, and "the rest never came" is a real answer
+  const sg=document.getElementById('shortgap');
+  if(sg){
+    sg.style.display=(!l.has_shortage&&left>0&&assigned>0)?'block':'none';
+    sg.textContent=`${left} not in the box? record as shortage →`;
   }
 }
 
@@ -553,6 +766,7 @@ function renderBreak(){
       <div class="detname" style="font-size:18px">${esc(l.description||'(unnamed)')}</div>
       <div class="detmeta" id="prog"></div>
       <div style="height:5px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="bar" style="height:5px;width:0%"></div></div>
+      <button class="link" id="shortgap" style="display:none;padding:8px 0;text-align:left;color:var(--warn)"></button>
       <div class="hint">Fill only what differs. Each row becomes its own product with its own SKU and QR.</div>
       <div class="row" style="overflow:auto;gap:8px">
         ${(S.options.size||[]).slice(0,8).map(sz=>`<div class="chip" data-size="${esc(sz)}" style="text-transform:none">${esc(sz)}</div>`).join('')}
@@ -570,6 +784,18 @@ function renderBreak(){
   updProgress();
 
   document.getElementById('cancel').onclick=()=>{ S.screen='grndetail'; render(); };
+  document.getElementById('shortgap').onclick=()=>{
+    const assigned=S.srows.reduce((n,r)=>n+(+r.qty||0),0);
+    // save what has been keyed so far, so switching screens doesn't lose it
+    const kept=S.srows.filter(r=>vLabel(r)&&+r.qty>0);
+    const go=()=>openShort(S.grnLine, qtyOf(breakTarget(l)-assigned));
+    if(!kept.length) return go();
+    api(`/api/purchases/lines/${l.id}/splits`,{method:'PUT',body:JSON.stringify({rows:kept})})
+      .then(reloadGrn).then(()=>{
+        S.shortLine=(S.grn.lines.find(x=>x.id===l.id))||l;
+        openShort(S.shortLine, qtyOf(breakTarget(l)-assigned));
+      }).catch(e=>toast(e.message));
+  };
   app.querySelectorAll('[data-size]').forEach(c=>c.onclick=()=>addRow(c.dataset.size));
   document.getElementById('addrow').onclick=()=>addRow(null);
   document.getElementById('duprow').onclick=()=>{
@@ -583,9 +809,9 @@ function renderBreak(){
   app.querySelectorAll('[data-txt]').forEach(inp=>inp.addEventListener('input',e=>{
     const p=inp.dataset.txt.split(':'); S.srows[+p[0]][p[1]]=e.target.value; }));
   app.querySelectorAll('[data-rest]').forEach(b=>b.onclick=()=>{
-    const i=+b.dataset.rest, billed=+l.qty||0;
+    const i=+b.dataset.rest, target=breakTarget(l);   // received, not billed
     const others=S.srows.reduce((n,r,j)=>n+(j===i?0:(+r.qty||0)),0);
-    S.srows[i].qty=String(qtyOf(Math.max(0,billed-others)));
+    S.srows[i].qty=String(qtyOf(Math.max(0,target-others)));
     const inp=app.querySelector(`[data-qty="${i}"]`); if(inp) inp.value=S.srows[i].qty;
     updProgress();
   });
@@ -617,9 +843,17 @@ function submitBreak(){
   const dup=keys.findIndex((x,i)=>keys.indexOf(x)!==i);
   if(dup>-1){ toast(`“${vLabel(kept[dup])}” appears twice — merge those rows`); return; }
   const assigned=kept.reduce((n,r)=>n+(+r.qty||0),0);
-  if(kept.length&&!sameQty(assigned,+l.qty||0)
-     && !confirm(`The rows add up to ${qtyOf(assigned)} of ${qtyOf(l.qty)} billed.\n\n`
-        +`That's fine to save and come back to — the GRN just can't be posted until it balances.\n\nSave anyway?`)) return;
+  const target=breakTarget(l);
+  // short of the target: say so, and say the thing the receiver may not know —
+  // that "the rest never came" is an answer the system will take
+  if(kept.length&&!sameQty(assigned,target)
+     && !confirm(`The rows add up to ${qtyOf(assigned)} of ${qtyOf(target)}`
+        +(l.has_shortage?` received (${qtyOf(l.qty)} billed).`:` billed.`)+`\n\n`
+        +(assigned<target&&!l.has_shortage
+          ? `If the missing ${qtyOf(target-assigned)} simply weren't in the box, don't invent them — `
+            +`save, then use “Something missing or damaged?” to record them as a shortage.\n\n`
+          : `That's fine to save and come back to — the GRN just can't be posted until it balances.\n\n`)
+        +`Save anyway?`)) return;
   saveBreak(kept);
 }
 

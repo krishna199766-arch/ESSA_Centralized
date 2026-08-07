@@ -6,6 +6,7 @@ from ..database import get_db
 from .. import models
 from ..services import inventory as inv
 from ..services import barcode_svc
+from ..services import shortages as short_svc
 
 router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 
@@ -13,6 +14,20 @@ router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 class SplitRows(BaseModel):
     """Attribute breakdown of one billed line. An empty list clears it."""
     rows: List[Dict[str, Any]]
+
+
+class ShortageRows(BaseModel):
+    """What the supplier billed on this line and the boxes did not hold. An empty
+    list clears it. Each row: {kind, qty, variant, reason, note, recorded_by}."""
+    rows: List[Dict[str, Any]]
+    recorded_by: Optional[str] = None
+
+
+class WaiveShortage(BaseModel):
+    """Accept a shortage rather than claim it — the supplier is sending the
+    balance, or it is too small to raise a debit note for."""
+    reason: Optional[str] = None
+    by: Optional[str] = None
 
 
 class ScanCode(BaseModel):
@@ -49,12 +64,16 @@ def _split_out(s: models.PurchaseLineSplit):
     return d
 
 
-def _line_out(l: models.PurchaseLine, db: Session = None):
+def _line_out(l: models.PurchaseLine, db: Session = None, suggest: bool = True):
+    """One GRN line. `suggest` is off for a posted GRN — a category suggestion is
+    only useful while the line can still be edited. Shortages are returned either
+    way: on a posted GRN they are the outstanding claim against the supplier."""
     st = inv.split_status(l)
+    short = short_svc.line_totals(l)
     # what the description would map to, so the grid can show (and one-click accept)
     # the mapping instead of letting products land "unmapped" for someone to fix
     suggestion = None
-    if db is not None and not l.category:
+    if db is not None and suggest and not l.category:
         from ..services import categorize
         s = categorize.suggest(db, l.description, limit=4)
         # `via` lets the screen say WHY: "rules" is the engine's own reading,
@@ -80,6 +99,17 @@ def _line_out(l: models.PurchaseLine, db: Session = None):
         "splits": [_split_out(s) for s in l.splits],
         "split_qty": st["split_qty"], "split_remainder": st["remainder"],
         "split_balanced": st["balanced"],
+        # --- what actually arrived ---
+        # `qty` above stays the supplier's figure; THIS is the number that becomes
+        # stock, that the breakdown has to add up to, and that goes in the carton.
+        # The two differ by exactly the shortage rows below.
+        "received_qty": short["received_qty"],
+        "short_qty": short["short_qty"], "damaged_qty": short["damaged_qty"],
+        "excess_qty": short["excess_qty"], "missing_qty": short["missing_qty"],
+        "has_shortage": short["rows"] > 0,
+        "shortage_value": round(sum(short_svc.value(s) for s in l.shortages), 2),
+        "shortages": ([short_svc.shortage_out(db, s) for s in l.shortages]
+                      if db is not None else []),
     }
 
 
@@ -105,9 +135,20 @@ def _purchase_out(p: models.Purchase, with_lines=False, db: Session = None):
         prods = [h.product for h in holders if h.product]
         d["items"] = len(holders)
         d["items_pending_detail"] = sum(1 for x in prods if not x.detailed)
+    # What the supplier billed and the boxes did not hold. On a draft it is the
+    # thing standing between the receipt and a truthful post; on a posted GRN it
+    # is an open claim — so it is reported in both states. The headline figures
+    # need no queries, which keeps them affordable on the list screen; the full
+    # per-row detail (including what has already been claimed) comes with the lines.
+    shorts = [sh for l in p.lines for sh in l.shortages if sh.claimable]
+    d["short_qty"] = round(sum(float(sh.qty or 0) for sh in shorts), 3)
+    d["short_value"] = round(sum(short_svc.value(sh) for sh in shorts), 2)
+    d["short_lines"] = len(shorts)
+    if with_lines and db is not None:
+        d["shortages"] = short_svc.purchase_summary(db, p)
     if with_lines:
         # category suggestions are only useful while the GRN can still be edited
-        d["lines"] = [_line_out(l, db if p.status != "posted" else None) for l in p.lines]
+        d["lines"] = [_line_out(l, db, suggest=p.status != "posted") for l in p.lines]
         d["unbalanced_splits"] = [l.id for l in p.lines
                                   if l.is_split and not inv.split_status(l)["balanced"]]
     return d
@@ -117,6 +158,15 @@ def _purchase_out(p: models.Purchase, with_lines=False, db: Session = None):
 def list_purchases(db: Session = Depends(get_db)):
     ps = db.query(models.Purchase).order_by(models.Purchase.id.desc()).all()
     return [_purchase_out(p) for p in ps]
+
+
+# registered before "/{pid}", or the literal path is swallowed by the id route
+@router.get("/shortage-options")
+def shortage_options():
+    """The shortage kinds and the suggested reasons, so the desktop and the phone
+    offer one vocabulary. Reasons are a convenience — free text is accepted."""
+    return {"kinds": [{"key": k, "label": v} for k, v in short_svc.KINDS.items()],
+            "reasons": short_svc.REASONS}
 
 
 @router.post("/from-document/{doc_id}")
@@ -191,6 +241,67 @@ def edit_line(line_id: int, body: LineEdit, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(line)
     return _line_out(line, db)
+
+
+@router.put("/lines/{line_id}/shortages")
+def set_shortages(line_id: int, body: ShortageRows, db: Session = Depends(get_db)):
+    """Record what the supplier billed on this line and the boxes did not hold
+    (or clear it with []).
+
+    This is the step that has to happen before the GRN posts, and it belongs to
+    whoever is opening the cartons — nobody else can know it. Once recorded, the
+    breakdown balances against what ARRIVED rather than what was billed, so a
+    short delivery posts honestly instead of forcing someone to type in pieces
+    that were never in the box. The missing quantity becomes a claim the debit
+    note is later built from.
+
+    Each row: {kind: short|damaged|excess, qty, variant?, reason?, note?}."""
+    line = _draft_line(line_id, db)
+    try:
+        short_svc.set_line_shortages(db, line, body.rows, by=body.recorded_by)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(400, str(e))
+    db.commit()
+    db.refresh(line)
+    return _line_out(line, db)
+
+
+@router.get("/{pid}/shortages")
+def list_shortages(pid: int, db: Session = Depends(get_db)):
+    """Every shortage on this GRN, what it is worth at the GRN rate, and how much
+    of it a posted debit note has already claimed."""
+    p = db.get(models.Purchase, pid)
+    if not p:
+        raise HTTPException(404, "purchase not found")
+    return short_svc.purchase_summary(db, p)
+
+
+@router.post("/shortages/{sid}/waive")
+def waive_shortage(sid: int, body: WaiveShortage, db: Session = Depends(get_db)):
+    """Accept a shortage instead of claiming it. It stays on the record — this
+    only stops it being offered on the next debit note."""
+    sh = db.get(models.GrnShortage, sid)
+    if not sh:
+        raise HTTPException(404, "shortage not found")
+    try:
+        short_svc.waive(db, sh, reason=body.reason, by=body.by)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(400, str(e))
+    db.commit()
+    return short_svc.shortage_out(db, sh)
+
+
+@router.post("/shortages/{sid}/unwaive")
+def unwaive_shortage(sid: int, db: Session = Depends(get_db)):
+    """Put a waived shortage back in play — the supplier never did send it."""
+    sh = db.get(models.GrnShortage, sid)
+    if not sh:
+        raise HTTPException(404, "shortage not found")
+    short_svc.unwaive(db, sh)
+    db.commit()
+    return short_svc.shortage_out(db, sh)
 
 
 @router.post("/lines/{line_id}/scan")

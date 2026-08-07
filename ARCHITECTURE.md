@@ -135,7 +135,8 @@ arithmetic, the reconciliation layer and the payables side keep matching the
 document, while the rows describe what physically arrived. `post_grn` walks the
 rows when present (one product, one inward movement, one weighted-average update
 each) and the plain line when not — and refuses to post while any breakdown fails
-to add up to the billed quantity, since that would silently gain or lose units.
+to add up to **what was received**, since that would silently gain or lose units.
+(Received, not billed — see §7b.)
 
 Identity is the **whole attribute tuple** (`SPLIT_ATTRS` — size, colour, material,
 pattern, fit, type, design no), compared exactly including blanks, so an exact
@@ -354,6 +355,225 @@ Two decisions came out of that sweep and are worth knowing:
   KIDS-BABY ITEMS, and a preserved BABY drags every unrecognised "BABY something"
   into it. Fixing one name is not worth a bucket that swallows the unknown.
 
+## 7b. Shortage entry: billed is not received (`services/shortages.py`)
+
+Every quantity in §7 assumed the supplier sent what they invoiced. They often
+don't. The bundle says 50 and 40 come out of the cartons, and before this existed
+the receiving screen offered two answers, both false:
+
+* **invent the ten** so the breakdown balances — inventory then carries phantom
+  stock permanently, with a SKU, a QR, a valuation and piece codes, and it can
+  never be dispatched because it does not exist; or
+* **leave it unpostable** — the forty real garments stay unbooked, so the receipt
+  is stuck behind a lie either way.
+
+`GrnShortage` is the third answer. Recording it changes exactly one number:
+
+```
+PurchaseLine.received_qty = billed − short − damaged + excess
+```
+
+and `received_qty` then replaces `qty` everywhere the *physical* count is meant:
+the target `split_status` balances against, what `post_grn` receives into stock
+and serialises into `ProductUnit`s, and what goes on the carton label. `qty` is
+untouched, for exactly the reason the breakdown never rewrites its line either —
+it is the supplier's own figure, and invoice arithmetic, the reconciliation layer
+and the payables side all reconcile against their document, not against our count.
+The two are allowed to disagree; the set of shortage rows *is* the disagreement,
+stated rather than absorbed.
+
+**Why it lives in the Receive flow.** Not in Inventory, and this is the whole
+design argument. The only person who can know what was in the box is the one
+opening it, and the knowledge has a deadline: the instant the GRN posts, the
+difference is gone. Stock reads 40, the invoice reads 50, and nothing in the
+system records that they ever disagreed — a stock adjustment afterwards can
+restore the *number* but not the *fact*, and a supplier claim needs the fact.
+So shortages are keyed on the phone at the dock, they are frozen at post along
+with everything else on a GRN, and correcting one goes through unpost.
+
+**Three kinds, one axis.** `short` (never arrived) and `damaged` (arrived, rejected
+at the dock) both stay out of stock and are claimable; `excess` is the mirror and
+*does* become stock, because the goods are on the floor whatever the invoice says.
+Damage discovered *later*, in stock already accepted, is deliberately not this — it
+is a purchase return, and it reverses stock because there is stock to reverse.
+Taking rejected goods into inventory only to write them off again would put units
+we refused into the valuation for as long as the paperwork took.
+
+**No money on the row.** A shortage is a fact about a count; what it is worth is a
+fact about the GRN, derived from the line rate on demand (`unit_cost`) — the same
+basis `services/returns.py` values a debit note at, because a claim can only carry
+what the supplier charged. A frozen rate would be the same number in two places
+free to drift, and a posted GRN's rates cannot change anyway.
+
+**The payoff is that the claim writes itself.** `returns.build_from_purchase` lists
+received goods at qty 0 — how many go back is still a decision — and shortages at
+the counted quantity, because that one is already settled. Those lines carry
+`shortage_id`, and `post()` reads it to value the claim **without a StockMovement**:
+the units it debits never entered the ledger, so reversing them would remove the
+same goods twice. `sync_shortage_lines` re-runs whenever a draft is opened, so a
+shortage recorded or waived after the note was raised is picked up without anyone
+rebuilding it, and `returnable()` caps each claim at its own shortage so two debit
+notes cannot bill the same ten pieces.
+
+Status is derived, not stored: `claimed` is computed from the posted debit notes
+that reference the row, so the two can never disagree. `waived` is the one thing a
+human asserts — the supplier is re-sending, or it is too small to chase — and the
+row stays on the record either way. The **GRN Shortage Register** reports the lot
+with unclaimed value separated out, draft GRNs included, since a shortage is worth
+chasing before the receipt posts.
+
+## 7c. Labels: a symbol that decodes (`services/barcode_svc.py`)
+
+A label is the one part of this system that leaves the database and gets stuck on
+a garment. It either scans or it does not, and when it does not, nothing upstream
+matters. Three properties decide it, and all three were wrong.
+
+**The symbol has to be all there.** segno emits SVG with `width`/`height` in pixels
+and **no `viewBox`**. Without one there is no mapping from user units to the
+viewport, so a stylesheet asking for `width: 26mm` resized the box and left the
+drawing at its intrinsic size — and because the outer `<svg>` clips by default,
+the overflow was cut off rather than scaled. A 41-module symbol drawn at scale 3
+is 135px inside a 98px box: **the outer 27% of the code, one finder pattern
+included, simply was not printed.** It looked like a QR and could not be decoded,
+which is the worst way for this to fail. `_scalable()` injects the viewBox.
+
+**The quiet zone is part of the symbol.** ISO/IEC 18004 requires four clear
+modules on every side; a decoder uses that margin to locate the symbol's edge at
+all, so printing less is not a slightly worse code but one a scanner may never
+find. It was 2. `QUIET_ZONE = 4` now lives beside the renderer rather than in each
+stylesheet, so it travels with the symbol into the sheet, the screen and the phone
+PNG alike.
+
+**The modules have to be big enough.** Around 0.33mm is the floor for a phone
+camera in warehouse light. A garment tag's QR is 32mm, which holds a typical
+payload at 0.65mm per module and the worst realistic one — a long supplier
+description with every attribute filled, 53 modules — at 0.52mm, leaving room for
+thermal bleed and a scuffed sticker instead of sitting on the limit. Carton labels
+get 40mm because they are read across a rack. `qr_module_size_mm()` exposes the
+figure so a test asserts it rather than a comment claiming it.
+
+Layout follows from those. The QR is a column of its own that the details never
+share; **every** text row is ellipsis-clipped, because one un-clipped row (the old
+`.meta` had no overflow rule) is enough to push a long "S · Orange · Cotton" into
+the code; rows carry fixed minimum heights so a product with no category and one
+with a category produce the same card and a sheet stays a cuttable grid. The
+payload is unchanged, so codes already printed still scan.
+
+## 7d. Dates: one stored form (`services/dates.py`)
+
+Every date field is a calendar picker, and every date is stored as ISO
+`YYYY-MM-DD`. The picker is the visible half. The half that mattered is that
+dates were previously stored exactly as they arrived — 31/07/2026 off a printed
+invoice, 31-7-26 off a register page, 2026-07-31 off an e-invoice — and three
+things were quietly wrong as a result:
+
+* **Range search.** `GET /api/lr/search?date_from=` compares in SQL, which on text
+  is alphabetical. With `31/07/2026` in the column, `01/08/2026` sorts *before*
+  it, so a July-to-August filter returned the wrong rows. No error — just a
+  shorter list than the truth, which is the hardest kind of wrong to notice.
+* **Conflict detection.** `lr_link` flags a register row whose invoice date
+  disagrees with the linked invoice. Two spellings of the same day compared as
+  text disagree, so correct pairings were reported as mismatches.
+* **Ageing.** `payments._parse_date` knew three formats; anything else became
+  None and the bill silently lost its days outstanding.
+
+So dates are normalised where they are written — one funnel per entry point:
+`_coerce` in the LR router covers save, create and patch together;
+`normalise_dates` covers the canonical invoice on confirm; payments, returns and
+outward normalise on create. Anything readable becomes ISO. **Anything unreadable
+is kept exactly as it arrived** — a date the parser cannot read is still what the
+page said, and blanking a supplier's own figure is worse than storing it oddly.
+
+`03/04/2026` is the 3rd of April. Day-first is assumed because every supplier and
+register in this business writes it that way; month-first is tried only when
+day-first cannot hold (`04/13/2026`). That assumption is stated in one place
+rather than implied by the order of a format list.
+
+The rule is duplicated in the UI, because `<input type="date">` renders a non-ISO
+value as **blank** — pointing one at legacy data would look exactly like the date
+had been lost, and the first save would make it true. `DateField` normalises on
+the way in, and when a value cannot be read it shows the field empty *and prints
+the original text beneath it*, leaving the stored value untouched until someone
+picks a replacement. The two parsers are held to agreeing: 36 cases are run
+through both and compared, because a screen and a server that disagree about
+whether something is a date is worse than either rule alone.
+
+## 7e. Three controls, one behaviour (`SearchBox` · `FilterChips` · `Section`)
+
+Every list screen carries the same three controls, with the same icons, in the
+same place. That is the whole design: this is a warehouse tool, and people are
+trained on it by the person at the next desk rather than from a manual. Someone
+who learns the controls on GRN already knows them on Inventory, Purchase Return,
+Stock Outward, Stock Inward, Documents, Suppliers, LR Entry and Reports.
+
+| | Icon | Scope | Rules |
+|---|---|---|---|
+| **Search** | `⌕` | filters what is *already on screen* | Esc clears it; a clear button appears once there is something to clear |
+| **Filter** | `⛭` | decides what is on screen *at all* | always shows how many filters are active, and clears them all in one click |
+| **Minimize** | `−` / `+` | collapses a panel | remembered per screen across navigation and reloads; a collapsed panel still says what it holds |
+
+Two of those rules exist because of specific ways this screen can mislead:
+
+* **A filtered list must never look unfiltered.** The chip row shows a count
+  beside every scope and Inventory prints "Showing 9 of 9" under the table, with
+  a one-click reset when those differ. Without it, someone lands on a filtered
+  screen, sees four rows where there should be forty, and concludes stock has
+  gone missing. That is the one misreading a stock screen cannot afford.
+* **A minimized panel must still describe itself**, via `summary`. Collapse "Lines
+  → inventory match" and the header still reads *5 line(s) · 4 new product(s)* —
+  otherwise a minimized panel is indistinguishable from a missing one, and the
+  next person reopens every panel to find what they wanted.
+
+Icons never travel alone: each control carries a `title` naming what it does,
+because an icon on its own teaches nobody the first time. The two structural
+filters differ on purpose — mutually exclusive scopes (draft / posted / short /
+all) stay **open** as chips, since they are the filter people reach for
+constantly; anything richer (category, supplier, date range) lives behind the
+`⛭` disclosure so the toolbar stays one line.
+
+Collapsed panels and the open tab are kept in `localStorage`. A warehouse screen
+is set up once for how someone works and then left alone; losing that on every
+refresh is a small daily tax on the people who use it most.
+
+## 7f. Theme: #5A3428 on a light surface (`frontend/src/styles.css`)
+
+The brand colour is **#5A3428**, a deep warm brown. That choice decided the rest
+of the theme, because a colour this dark only functions as a *primary* on a light
+surface. Measured against the old dark navy chrome it was **1.4–1.7:1** — not a
+poor accent, an invisible one. On white it is **10.7:1**, and white text on it is
+the same. So the application is light, which is also how the reference ERP this
+mirrors looks, and how an all-day back-office screen is usually built.
+
+Neutrals are warmed — a little red in the greys — so they sit with the brown
+rather than beside it; pure-grey chrome next to a brown accent reads as two
+palettes that happen to share a screen. Semantic colours are deliberately kept
+off the brand hue: nothing meaning "warning" may be mistakable for something that
+merely means "Essa".
+
+Every pair was measured rather than eyeballed. All text meets WCAG AA on its own
+background (body 4.85:1 at the lightest, brand 10.73:1, each semantic colour ≥4.5
+on both white and its own tint). Interactive borders are the one thing that
+needed a deliberate darkening: dividers may be soft, but an input's edge is a UI
+boundary under WCAG 1.4.11 and must reach 3:1, so `--line-strong` is #96867C
+(3.50:1) rather than the softer grey that looked tidier.
+
+Sizes and spaces come from the scales in `:root` — a one-off pixel value in a
+component is how a layout drifts. Layout rules that came out of the rework:
+
+* **Navigation gets its own row.** Eleven modules plus five account controls never
+  fitted on one line; at 1600px the last button was clipped. Squeezing them was
+  the wrong trade — navigation is the most-used thing on the screen.
+* **Actions never shrink; prose does.** In every header the explanatory sentence
+  is the flexible item and the buttons are fixed. A truncated sentence is a
+  shorter sentence; a truncated button is a control nobody can reach.
+* **Figures right, tabular, text left** — one rule for every table in the app.
+* **Negative stock is styled as wrong**, not merely printed with a minus. A `-10`
+  sitting in a column of ordinary figures is read straight past.
+
+The phone app carries the same tokens for the same reason the desktop does: the
+brand colour fails on its old dark background too, and one product should not
+have two palettes.
+
 ## 8. LR Entry: two routes into one record
 
 The reference system's **Transport Entry** screen is a single-consignment data
@@ -450,11 +670,41 @@ recordings:
   a client, so a debit note cannot be raised at a selling price: it settles a
   supplier account and has to reconcile against that supplier's own invoice.
 - **Analytical reports** — built on structured, reconciled data instead of
-  re-keyed spreadsheets.
+  re-keyed spreadsheets. 33 of them (`services/reports.py`), in the seven groups
+  the reference app uses, every one a projection of the ledger or the documents
+  rather than a second copy of the figures. Each declares the filters it accepts
+  and `run()` passes only those, so a new report honours a date range without a
+  route change and one that takes none is never handed an argument it would choke
+  on. The CSV export runs the same call with the same filters, because an export
+  that quietly returns a different set of rows than the screen is worse than no
+  export.
 
-Recommended remaining order: (1) stock outward + payments ledger → (2) returns →
-(3) reporting → (4) barcode printing. Each consumes the canonical shape and the
-ledger these two modules now guarantee.
+### What the reference catalogue has and this does not
+
+Six reports are **absent rather than empty**, and the distinction matters: an
+empty report reads as "nothing happened" when the truth is "nothing is recorded".
+Each needs a data model before it can carry a number.
+
+| Report | What is missing |
+|---|---|
+| Stock - Depreciation | No depreciation at all — no rate, method or asset register. Stock is held at weighted-average cost. |
+| Job Work Outward / Inward | No job-work concept: goods sent to a processor and returned are not modelled. |
+| Invoice Vs Purchase Order | No purchase orders. Intake begins at the supplier's invoice. |
+| Retail Stock Analysis | One warehouse. A dispatch reduces our stock; what the receiving store then holds is its own book. |
+| Purchase Return (Cancelled) | A return is draft or posted. Nothing is cancelled. |
+| Transport Payment Report | Freight owed is on the consignment; transport *payments* have no ledger. |
+
+Two of the reports that ARE present carry a `note` for the same reason — they
+answer a narrower question than their name implies. **Transport Pending Bills**
+shows freight incurred on TOPAY consignments, not an outstanding balance, because
+nothing can be marked settled. **Stock Movement - Locationwise** reports what each
+destination was *sent*, not what it holds. Saying so on the report is better than
+letting someone infer it from a total that will not tie out.
+
+Recommended remaining order: (1) purchase orders (unlocks Invoice vs PO and turns
+receiving into three-way matching) → (2) destination stock (unlocks Retail Stock
+Analysis and closes the transfer loop) → (3) a transport payables ledger. Each
+consumes the canonical shape and the ledger these modules already guarantee.
 
 ## 10. Production hardening checklist
 

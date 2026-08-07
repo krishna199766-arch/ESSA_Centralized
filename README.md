@@ -43,11 +43,33 @@ Invoice Entry, Inventory Entry and Stock Inward in the reference application.
   were actually *received* — a bundle broken down at GRN comes back as its
   variants — and each is priced at its **purchase / GRN cost, never the sale
   price or MRP**, so the debit reconciles against the supplier's own invoice.
+  A second kind of line settles the same way and means the opposite: goods the
+  supplier **billed and never delivered**, claimed straight from the shortages
+  counted at the dock. Those come pre-filled and move no stock — the units never
+  entered it. **Claim shortage →** on the invoice picker raises that note on its
+  own.
 - **Payments** — supplier accounts-payable: search pending bills, settle with
   cash + **discount + TDS + debit-note**, generates receipts and a ledger.
-- **Reports** — Stock Report, Stock Movement, Purchase Register, Purchase Return
-  Register, Supplier Pending Bills, Payments Register, and Product / Supplier /
-  Tax masters — each with CSV export.
+- **Reports** — 33 reports in the seven groups the reference app uses, each with a
+  row filter, a date range where it makes sense, and CSV export that honours both:
+  - *Transport* — Transport Report, Transport Pending Bills
+  - *Invoice* — Invoice Report, Invoice Detail Report, WH Entry Report
+  - *Stock* — Stock Report, **Stock as on Date** (replayed from the ledger),
+    Stock Transactions, Stock Movement, Movement Locationwise, **Warehouse Stock
+    Analysis**, **Stock Audit** (every physical-count correction)
+  - *Purchase* — Purchase Report, Purchase Items, HSN, Tax, Tax Summary, Barcode
+    wise, Section wise, Supplier Pending Bills, Supplier Payment, **GRN Shortage
+    Register**
+  - *Purchase Return* — Purchase Return Report, Section wise, **Return Audit**
+    (which lines moved stock and which were shortage claims that never did)
+  - *Outward* — Outward Report, Outward Details, Pending Inward, Pending Outward
+  - *Other* — Product / Supplier / Agent / Tax masters
+
+  Six reports in the reference catalogue are **deliberately absent** rather than
+  present-and-empty, because this system records nothing to put in them: Stock
+  Depreciation, Job Work Outward/Inward, Invoice vs Purchase Order, Retail Stock
+  Analysis, and Purchase Return (Cancelled). Each needs a data model first — see
+  [ARCHITECTURE.md](ARCHITECTURE.md) §9.
 - **Suppliers** — suppliers and their learned formats.
 - **Masters** — product categories, agents, transporters, and the dropdown lists
   the LR Entry form uses (purchase managers; plus the fixed LR mode, transfer
@@ -69,9 +91,12 @@ belong on the floor rather than at a desk, in the order the goods move:
   **Post to inventory** then creates **one product per size, each with its own SKU
   and QR code**, its own inward stock movement and its own weighted-average cost.
   The bundle line is marked **split** and never becomes stock itself. A breakdown
-  that doesn't add up to the billed quantity saves but refuses to post, so units
-  can't be quietly lost or invented. Correcting a posted GRN is still a desk job
-  (unpost checks payments, debit notes and dispatches first).
+  that doesn't add up saves but refuses to post, so units can't be quietly lost or
+  invented. Correcting a posted GRN is still a desk job (unpost checks payments,
+  debit notes and dispatches first).
+
+  And when the box is short, **say so** — see **Shortage entry** below. The
+  breakdown then has to reach what *arrived*, not what was billed.
 
   Posting also gives every line a **carton label** (`ESSA-B-00001`) — printed there
   and then, because the goods are on the floor and have to go on a rack. See
@@ -118,6 +143,33 @@ Two ways to use it:
 - **Native app (optional):** a React Native / Expo project in `mobile-app/` for a
   true installable APK/IPA. See `mobile-app/README.md`. (The web app above is the
   easiest path if Expo Go gives you network trouble.)
+
+The interface is built on the brand colour **#5A3428** over a warm light surface,
+with one type scale, one spacing scale and one alignment rule (text left, figures
+right and tabular) across every screen — desktop and phone. Every text/background
+pair meets WCAG AA; see [ARCHITECTURE.md](ARCHITECTURE.md) §7f for the palette and
+the reasoning.
+
+**Every screen carries the same three controls**, so the module you learn first
+teaches you all the others:
+
+- **⌕ Search** filters what is already on screen (Esc clears it).
+- **⛭ Filter** decides what is on screen at all — status chips with live counts
+  for the common cases, a panel for category / supplier / date range. It always
+  shows how many filters are active and clears them in one click, so a shortened
+  list is never mistaken for missing stock.
+- **− Minimize** collapses a panel, remembers it across reloads, and keeps saying
+  what it holds while closed.
+
+Every icon carries a tooltip, and the open tab is remembered too.
+
+**Dates** are picked from a calendar everywhere — invoice review, LR Entry and its
+register import, payments, returns, stock outward/inward, and the search filters —
+and stored as ISO `YYYY-MM-DD`. A date read off a page in the page's own form
+(`31/07/2026`, `31-7-26`, `31 Jul 2026`) is converted as it is saved; one the
+parser can't read is **kept exactly as it arrived** and flagged on screen rather
+than silently blanked. That consistency is what makes the LR date-range search and
+the supplier-ageing figures correct — see [ARCHITECTURE.md](ARCHITECTURE.md) §7d.
 
 The module behaviours were matched to the reference recordings — see
 `docs/APP_ANALYSIS.md` for the per-screen field/flow notes that drove the build.
@@ -292,6 +344,39 @@ What Inventory does own is what belongs to stock rather than to the product: the
 **stock adjustment** (a physical-count correction, written as a movement — never a
 silent overwrite), identifier generation, label printing and the movement ledger.
 
+### Labels that scan
+
+A garment tag carries a **32mm** QR (cartons get 40mm) with the four-module quiet
+zone the QR standard requires, a text column it never shares, and every row
+clipped so a long colour or material can't run into the code. Print at **100% /
+"Actual size"** — scaling shrinks the modules and the margin with them.
+
+Sizes were chosen against the worst realistic payload rather than the average one:
+a long supplier description with every attribute filled still gets 0.52mm per
+module, against the ~0.33mm a phone camera needs in warehouse light. The QR
+payload is unchanged, so tags already printed keep working.
+
+Printing is guarded — see **Inventory integrity** below.
+
+### Inventory integrity — what counts as stock
+
+Stock is only ever created by posting a GRN, so a record that traces back to no
+posted GRN is not stock. Those are hidden from Inventory, left out of the unit
+count and the valuation, refused piece codes, and blocked from printing labels;
+the excluded count is reported on the summary so nothing goes missing quietly.
+
+Labels are refused when the piece codes and the stock figure disagree, or when
+stock is zero — you cannot tag garments you do not have, and a stale code prints a
+real-looking QR that scans like any other. Reprinting a single torn tag still
+works, because that is exactly the job someone does while a count is being sorted
+out.
+
+**Inventory Repair** (a panel that appears on the Inventory tab only when
+something is wrong) finds orphan products, orphan piece codes and orphan cartons,
+shows them, and deletes them on confirmation. It never removes a product kept at
+zero stock after an unpost — that one holds detailing the warehouse recorded by
+hand.
+
 ### Correcting a posted GRN — Unpost
 
 Posting is where a GRN becomes financial record, so a posted GRN can't be edited
@@ -319,6 +404,61 @@ returns the same list, so the UI can warn before you commit.
 A GRN built from the wrong invoice, or a duplicate, is better deleted than
 corrected: unpost it, then **Delete GRN**. The invoice document is left alone, so
 you can build a fresh GRN from it — or delete the document too.
+
+### Shortage entry — when the box is short
+
+A supplier bills 50 pieces and 40 come out of the cartons. Until this existed the
+receiving screen had two answers and both were lies: **invent** ten pieces so the
+breakdown balances — inventory then carries phantom stock for ever, priced,
+scannable and undispatchable — or leave the receipt **unpostable** and the goods
+unbooked. Shortage entry is the third answer, and it is the true one.
+
+It belongs to the **Receive flow**, before *Post to inventory*, and nowhere else.
+The person opening the cartons is the only one who can know what was in them, and
+the moment the GRN posts the difference becomes invisible: stock says 40, the
+invoice says 50, and nothing on the system remembers that the two ever disagreed.
+So it is recorded on the phone, at the dock — **⚠ Something missing or damaged?**
+on the line, or one tap on *“10 not in the box? record as shortage →”* the moment
+the sizes fail to add up, with the quantity already filled in. The same editor is
+on the desktop GRN under **Shortage**, for whoever is at a desk instead.
+
+Three kinds, and the only thing separating them is which side of the count they
+land on:
+
+| | what happened | stock | supplier |
+|---|---|---|---|
+| **Short** | billed, never arrived | never received | claimable |
+| **Damaged** | arrived unusable, rejected at the dock | never received | claimable |
+| **Excess** | more arrived than was billed | received | ours, no claim |
+
+So one number changes, everywhere:
+
+```
+received = billed − short − damaged + excess
+```
+
+`received` is what the **attribute breakdown has to add up to**, what posting turns
+into stock, what goes in the carton and what gets a piece code. `billed` is left
+exactly as the supplier wrote it — the same reason a breakdown never rewrites its
+line — so invoice arithmetic and the payables side keep reconciling against their
+own document. A line billed and *not delivered at all* creates no product, no
+stock and no carton label: there is no box to put a label on.
+
+Nothing about the money is stored on the shortage. It is a fact about a **count**;
+what it is worth is a fact about the GRN, derived from the line rate — the same
+basis a debit note is valued at, because a claim against a supplier can only carry
+what that supplier charged. Posting freezes the shortages along with everything
+else: correcting one means **↺ Unpost**, fix, post again.
+
+Then the claim writes itself. **Returns → Claim shortage** builds a debit note
+whose lines are already filled in at the counted quantity, because that part was
+settled when the boxes were opened — nobody counts twice. Those lines reduce the
+payable at the GRN rate and **move no stock**, since the units they debit never
+entered it. A shortage nobody intends to chase is **waived** instead (the supplier
+is re-sending, or it isn't worth the paperwork) and stays on the record either way;
+one already answered by a posted debit note reads `claimed` and cannot be claimed
+again. The **GRN Shortage Register** report lists the lot, with the unclaimed
+value separated out.
 
 ### Breaking a bundle line down by attributes
 
@@ -403,7 +543,8 @@ essa-intake/
 │  │  ├─ main.py            FastAPI app; serves the built UI too
 │  │  ├─ models.py          Supplier · SupplierProfile · Document · Extraction
 │  │  │                     · LineItem · Product · Purchase · PurchaseLine
-│  │  │                     · PurchaseLineSplit (variant breakdown) · StockMovement
+│  │  │                     · PurchaseLineSplit (variant breakdown)
+│  │  │                     · GrnShortage (billed but not received) · StockMovement
 │  │  ├─ schemas.py         canonical invoice schema + API shapes
 │  │  ├─ extraction/
 │  │  │  ├─ base.py         provider interface + canonical shape
@@ -414,6 +555,7 @@ essa-intake/
 │  │  │  └─ engine.py       orchestrator: detect → extract → validate → learn
 │  │  ├─ services/
 │  │  │  ├─ inventory.py    GRN build + matching + stock posting/adjust (avg cost)
+│  │  │  ├─ shortages.py    billed vs received — the gap, and the claim it becomes
 │  │  │  ├─ outward.py      stock outward / inward (dispatch, then acceptance)
 │  │  │  ├─ stock_view.py   one product record for every stock screen (QR + batch)
 │  │  │  ├─ payments.py     accounts payable: pending bills, payments, ledger
@@ -454,6 +596,10 @@ for production), `ESSA_COMPANY_GSTIN`, `ESSA_COMPANY_NAME`.
 | GET | `/api/purchases/{id}/unpost-check` | what would block an unpost ([] = nothing) |
 | DELETE | `/api/purchases/{id}` | delete a DRAFT GRN (document is kept) |
 | PUT | `/api/purchases/lines/{id}/splits` | set (or clear) a line's attribute breakdown |
+| PUT | `/api/purchases/lines/{id}/shortages` | what was billed and wasn't in the box (short / damaged / excess) |
+| GET | `/api/purchases/{id}/shortages` | a GRN's shortages, what they're worth, what's been claimed |
+| POST | `/api/purchases/shortages/{id}/waive` · `/unwaive` | accept a shortage rather than claim it, or put it back |
+| GET | `/api/purchases/shortage-options` | the shortage kinds + suggested reasons (one vocabulary, both UIs) |
 | PATCH | `/api/purchases/lines/{id}` | set the line's category master mapping |
 | POST | `/api/purchases/lines/{id}/scan` | pin a line / variant to a product by QR, barcode or SKU |
 | POST | `/api/lr/extract` · `/api/lr/save` | read an LR register page → rows → save |
@@ -469,13 +615,17 @@ for production), `ESSA_COMPANY_GSTIN`, `ESSA_COMPANY_NAME`.
 | POST | `/api/inventory/products/{id}/detail` | phone app: physical attributes + prices |
 | POST | `/api/inventory/products/{id}/adjust-stock` | correct stock to an exact figure |
 | GET | `/api/inventory/product-card?code=` | full product record for a scanned code (QR, attributes, batch) |
+| GET | `/api/inventory/integrity` | every record that isn't stock, and why (read-only) |
+| POST | `/api/inventory/repair?dry_run=` | remove orphan products / piece codes / cartons |
+| GET | `/api/inventory/labels` · `/unit-labels` | print-ready label sheets (refused on a stock/QR mismatch) |
 | GET/POST | `/api/outward?status=` · `/api/outward/{id}` · `/{id}/post` | stock outward / dispatch |
 | POST | `/api/outward/{id}/receive` | stock inward: accept a transfer (per-line accepted qty) |
 | GET | `/api/outward/{id}/verify?code=` | is this scanned garment on that transfer? |
 | GET | `/api/payments/pending?supplier_id=` | unpaid invoices (Search Pendings) |
 | POST | `/api/payments` | record a payment (cash + discount + TDS + debit) |
 | GET | `/api/payments` · `/api/payments/supplier/{id}/ledger` | payment register + ledger |
-| POST | `/api/returns/from-purchase/{id}` · `/{id}/post` | build + post a debit note |
+| POST | `/api/returns/from-purchase/{id}?shortages_only=` | build a debit note (shortage lines pre-filled from the dock count) |
+| POST | `/api/returns/{id}/post` | post it — shortage lines settle the payable and move no stock |
 | GET | `/api/returns` · `/api/returns/{id}` | purchase-return list / detail |
 | GET | `/api/reports` · `/api/reports/{key}` · `/{key}/csv` | report catalogue + data + CSV |
 | GET/POST | `/api/settings` · `/api/settings/vision` · `/vision/off` | vision key + status (validated) |

@@ -136,10 +136,13 @@ def _migrate():
                     conn.execute(text(
                         f"ALTER TABLE stock_outwards ADD COLUMN {name} {typ}"))
     # purchase_return_lines: which received row each returned line came from, so
-    # the debit note can be re-valued from the GRN rather than from a stale rate
+    # the debit note can be re-valued from the GRN rather than from a stale rate —
+    # plus `shortage_id`, which marks the lines that claim goods never delivered
+    # and must therefore settle without moving stock
     if "purchase_return_lines" in insp.get_table_names():
         rcols = {c["name"] for c in insp.get_columns("purchase_return_lines")}
-        radds = {"purchase_line_id": "INTEGER", "split_id": "INTEGER", "uom": "VARCHAR"}
+        radds = {"purchase_line_id": "INTEGER", "split_id": "INTEGER", "uom": "VARCHAR",
+                 "shortage_id": "INTEGER"}
         rmissing = {k: v for k, v in radds.items() if k not in rcols}
         if rmissing:
             with engine.begin() as conn:

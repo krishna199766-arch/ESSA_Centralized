@@ -19,6 +19,7 @@ Weighted-average cost keeps valuation stable across purchases at different rates
 import datetime as dt
 from rapidfuzz import fuzz
 from .. import models
+from . import shortages as shortage_svc
 
 
 def _norm(s):
@@ -129,15 +130,26 @@ def _opt_float(v, default=None):
 def split_status(line):
     """How far a line's attribute breakdown has got: totals plus whether it balances.
 
+    The target is what ARRIVED, not what was billed. A supplier invoices 50 and
+    40 come out of the boxes; the ten short are recorded as a GrnShortage and the
+    breakdown then has to add up to 40. Balancing against the billed 50 would
+    leave the receiver to either invent ten pieces or never post the GRN — see
+    services/shortages.py.
+
     A line with no breakdown counts as balanced — there is nothing to add up.
     Reporting False there reads as "this line is broken" to anything consuming
     the API, when it simply isn't broken down."""
     line_qty = float(line.qty or 0)
+    short = shortage_svc.line_totals(line)
+    target = short["received_qty"]
+    base = {"line_qty": line_qty, "received_qty": target,
+            "short_qty": short["missing_qty"], "excess_qty": short["excess_qty"],
+            "has_shortage": short["rows"] > 0}
     if not line.is_split:
-        return {"line_qty": line_qty, "split_qty": 0.0, "remainder": 0.0, "balanced": True}
-    return {"line_qty": line_qty, "split_qty": line.split_qty,
-            "remainder": round(line_qty - line.split_qty, 3),
-            "balanced": abs(line_qty - line.split_qty) <= SPLIT_TOLERANCE}
+        return {**base, "split_qty": 0.0, "remainder": 0.0, "balanced": True}
+    return {**base, "split_qty": line.split_qty,
+            "remainder": round(target - line.split_qty, 3),
+            "balanced": abs(target - line.split_qty) <= SPLIT_TOLERANCE}
 
 
 def set_line_splits(db, line, rows):
@@ -272,16 +284,29 @@ def post_grn(db, purchase):
         return {"ok": False, "error": "already posted", "purchase_id": purchase.id}
 
     # A half-finished breakdown must never reach stock: if the rows don't add up
-    # to what the supplier billed, posting would quietly lose or invent units.
-    off = [f"“{(l.description or ('line ' + str(l.id)))[:32]}”: rows total "
-           f"{l.split_qty:g} of {float(l.qty or 0):g}"
-           for l in purchase.lines if l.is_split and not split_status(l)["balanced"]]
+    # to what actually arrived, posting would quietly lose or invent units. The
+    # target is the RECEIVED quantity — billed less any shortage recorded at the
+    # dock — so a short delivery balances honestly instead of forcing the receiver
+    # to type pieces that were never in the box.
+    off = []
+    for l in purchase.lines:
+        st = split_status(l)
+        if st["received_qty"] < -SPLIT_TOLERANCE:
+            return {"ok": False, "purchase_id": purchase.id,
+                    "error": f"“{(l.description or '')[:32]}”: more recorded short "
+                             f"than was billed ({float(l.qty or 0):g})"}
+        if l.is_split and not st["balanced"]:
+            off.append(f"“{(l.description or ('line ' + str(l.id)))[:32]}”: rows total "
+                       f"{l.split_qty:g} of {st['received_qty']:g} received"
+                       + (f" ({float(l.qty or 0):g} billed, {st['short_qty']:g} short)"
+                          if st["has_shortage"] else ""))
     if off:
         return {"ok": False, "purchase_id": purchase.id,
                 "error": "breakdown doesn't add up — " + "; ".join(off)}
 
     from . import units as unit_svc
     created, updated, split_rows, pieces = 0, 0, 0, 0
+    short_qty, short_value, nothing_arrived = 0.0, 0.0, 0
     # one identity per physical piece, under the SKU that receives it — the stock
     # figure stays at SKU level, this is the layer a garment tag hangs off
     def _serialise(product, qty):
@@ -291,6 +316,17 @@ def post_grn(db, purchase):
         return made
 
     for line in purchase.lines:
+        st = split_status(line)
+        for sh in line.shortages:
+            if sh.claimable:
+                short_qty += float(sh.qty or 0)
+                short_value += shortage_svc.value(sh)
+        # billed, and not one piece of it turned up. There is no product to create,
+        # no stock to move and no carton to label — the whole of this line is the
+        # claim recorded against it.
+        if st["received_qty"] <= SPLIT_TOLERANCE and st["has_shortage"]:
+            nothing_arrived += 1
+            continue
         if line.is_split:
             for sp in line.splits:
                 product = db.get(models.Product, sp.product_id) if sp.product_id else None
@@ -340,8 +376,12 @@ def post_grn(db, purchase):
                 apply_category(db, product, line.category)
         if line.hsn and not product.hsn:
             product.hsn = line.hsn
-        _receive_into_stock(db, product, line.qty, line.rate, purchase)
-        _serialise(product, line.qty)
+        # what arrived, not what was billed — the difference is the shortage
+        recv = st["received_qty"]
+        note = (f"received {recv:g} of {float(line.qty or 0):g} billed"
+                if st["has_shortage"] else None)
+        _receive_into_stock(db, product, recv, line.rate, purchase, note=note)
+        _serialise(product, recv)
 
     purchase.status = "posted"
     purchase.posted_at = dt.datetime.utcnow()
@@ -355,7 +395,13 @@ def post_grn(db, purchase):
     return {"ok": True, "purchase_id": purchase.id,
             "products_created": created, "products_updated": updated,
             "lines": len(purchase.lines), "size_rows": split_rows,
-            "bundles": [b.code for b in made], "pieces": pieces}
+            "bundles": [b.code for b in made], "pieces": pieces,
+            # what the supplier billed and never delivered. Reported at post
+            # because this is the moment it stops being a note on a screen and
+            # becomes a claim: the stock figure is now final and does not include it.
+            "short_qty": round(short_qty, 3),
+            "short_value": round(short_value, 2),
+            "lines_not_received": nothing_arrived}
 
 
 # ---------------------------------------------------------------------------
@@ -580,11 +626,23 @@ def adjust_stock(db, product, new_qty, note="manual adjustment"):
 
 
 def inventory_summary(db):
-    products = db.query(models.Product).all()
+    """Headline stock figures — over records that ARE stock.
+
+    Only products traceable to a posted GRN are counted. Anything else is either
+    debris or a record deliberately kept at zero after an unpost, and neither is
+    stock; including them would put a valuation on goods no receipt ever brought
+    in. The excluded count is reported rather than swallowed, so a number that
+    quietly dropped can always be explained."""
+    from . import integrity
+    ctx = integrity.Context(db)
+    everything = db.query(models.Product).all()
+    products = [p for p in everything if ctx.product_state(p) == integrity.POSTED]
+    excluded = len(everything) - len(products)
     total_value = round(sum(p.stock_value for p in products), 2)
     total_units = sum(p.stock_qty or 0 for p in products)
     return {
         "product_count": len(products),
         "total_units": total_units,
         "total_stock_value": total_value,
+        "excluded_products": excluded,
     }

@@ -46,7 +46,23 @@ BASE_OPTIONS = {
 }
 
 
-def _product_out(p: models.Product):
+def _product_out(p: models.Product, ctx=None):
+    """One product. `ctx` adds its provenance and whether its labels may print —
+    passed in by the callers that already built one, so a list of 500 products
+    doesn't re-derive the same lookup 500 times."""
+    d = _product_fields(p)
+    if ctx is not None:
+        from ..services import integrity
+        rep = integrity.product_report(ctx.db, p, ctx)
+        d.update({"state": rep["state"], "live_units": rep["live_units"],
+                  "expected_units": rep["expected_units"],
+                  "units_match": rep["units_match"],
+                  "can_print": rep["can_print"], "print_block": rep["print_block"],
+                  "issues": rep["issues"]})
+    return d
+
+
+def _product_fields(p: models.Product):
     return {
         "id": p.id, "sku": p.sku, "barcode": p.barcode, "description": p.description,
         "hsn": p.hsn, "uom": p.uom, "mrp": p.mrp, "stock_qty": p.stock_qty,
@@ -89,19 +105,32 @@ def product_options(db: Session = Depends(get_db)):
 
 @router.get("/products")
 def list_products(status: str = "all", q: str = "", db: Session = Depends(get_db)):
-    """status: all | pending (not yet detailed) | detailed. q: text search."""
+    """status: all | pending (not yet detailed) | detailed | excluded. q: text search.
+
+    Stock is only ever created by posting a GRN, so a product that traces back to
+    no posted GRN is not stock and is kept out of every normal listing — it would
+    otherwise sit there looking exactly like the real thing, scannable and
+    printable. `status=excluded` shows precisely those, which is what the
+    Inventory Repair screen lists; the count is on `/summary` either way, so the
+    exclusion is never silent."""
+    from ..services import integrity
+    ctx = integrity.Context(db)
     query = db.query(models.Product)
     if status == "pending":
         query = query.filter((models.Product.detailed == False) | (models.Product.detailed.is_(None)))  # noqa: E712
     elif status == "detailed":
         query = query.filter(models.Product.detailed == True)  # noqa: E712
     ps = query.order_by(models.Product.description).all()
+    if status == "excluded":
+        ps = [p for p in ps if ctx.product_state(p) != integrity.POSTED]
+    else:
+        ps = [p for p in ps if ctx.product_state(p) == integrity.POSTED]
     if q:
         ql = q.lower()
         ps = [p for p in ps if ql in (p.description or "").lower()
               or ql in (p.sku or "").lower() or ql in (p.barcode or "").lower()
               or ql in (p.hsn or "").lower()]
-    return [_product_out(p) for p in ps]
+    return [_product_out(p, ctx) for p in ps]
 
 
 @router.get("/products/{prod_id}")
@@ -195,30 +224,52 @@ def _unit_out(u: models.ProductUnit):
 def product_units(prod_id: int, db: Session = Depends(get_db)):
     """The individual pieces under one SKU — what the Inventory screen shows when
     the quantity is clicked. `serialisable` explains an empty list rather than
-    leaving the screen to guess (fabric sold by the metre has no pieces)."""
+    leaving the screen to guess (fabric sold by the metre has no pieces).
+
+    Each piece carries its own `state`, and the payload says outright whether the
+    labels may print and why not. A dead code looks exactly like a live one on
+    screen — same format, same QR, same product — so the difference has to be
+    stated, not left for the eye."""
     from ..services import units as unit_svc
+    from ..services import integrity
     p = db.get(models.Product, prod_id)
     if not p:
         raise HTTPException(404, "product not found")
+    ctx = integrity.Context(db)
+    rep = integrity.product_report(db, p, ctx)
     rows = db.query(models.ProductUnit).filter(
         models.ProductUnit.product_id == prod_id).order_by(models.ProductUnit.seq).all()
-    ok, reason = unit_svc.can_serialise(p.uom, p.stock_qty)
+    ok, reason = unit_svc.can_serialise(p.uom, rep["expected_units"] or p.stock_qty)
     return {
         "product": {"id": p.id, "sku": p.sku, "description": p.description,
                     "uom": p.uom, "stock_qty": p.stock_qty, "mrp": p.mrp,
                     "size": p.size, "color": p.color, "category": p.category},
         "count": len(rows), "serialisable": ok, "reason": reason,
-        "units": [_unit_out(u) for u in rows],
+        # --- integrity: what may be printed, and what is merely left over ---
+        "state": rep["state"], "live_units": rep["live_units"],
+        "orphan_units": rep["orphan_units"], "expected_units": rep["expected_units"],
+        "units_match": rep["units_match"],
+        "can_print": rep["can_print"], "print_block": rep["print_block"],
+        "issues": rep["issues"],
+        "units": [{**_unit_out(u), "state": ctx.unit_state(u)} for u in rows],
     }
 
 
 @router.post("/products/{prod_id}/units/generate")
 def generate_units(prod_id: int, db: Session = Depends(get_db)):
-    """Give stock received before per-piece codes existed its missing codes."""
+    """Give stock received before per-piece codes existed its missing codes.
+
+    Refused for a product that isn't stock: minting identities for garments no
+    posted GRN ever brought in is how a phantom becomes scannable."""
     from ..services import units as unit_svc
+    from ..services import integrity
     p = db.get(models.Product, prod_id)
     if not p:
         raise HTTPException(404, "product not found")
+    rep = integrity.product_report(db, p)
+    if rep["state"] != integrity.POSTED:
+        raise HTTPException(400, "this product doesn't belong to a posted GRN, so it "
+                                 "isn't stock — no piece codes can be issued for it")
     made, reason = unit_svc.backfill(db, p)
     if not made and reason:
         raise HTTPException(400, reason)
@@ -250,11 +301,20 @@ def unit_qr_png(uid: int, scale: int = 6, db: Session = Depends(get_db)):
 
 @router.get("/units/{uid}/label", response_class=HTMLResponse)
 def unit_label(uid: int, db: Session = Depends(get_db)):
-    """One piece's label — Print for a single garment, or Reprint a torn one."""
+    """One piece's label — Print for a single garment, or Reprint a torn one.
+
+    A single label is allowed where "print all" would be refused: reprinting one
+    torn tag is exactly the job someone does while a count is being sorted out.
+    What is refused is a code with no posted GRN behind it — that garment does not
+    exist, so neither should its label."""
     from ..services import units as unit_svc
+    from ..services import integrity
     u = db.get(models.ProductUnit, uid)
     if not u:
         raise HTTPException(404, "piece not found")
+    if integrity.Context(db).unit_state(u) != integrity.POSTED:
+        raise HTTPException(400, f"{u.code} belongs to no posted GRN — it is a left-over "
+                                 f"code, not a garment. Run Inventory Repair.")
     unit_svc.mark_printed(db, [u])
     db.commit()
     return HTMLResponse(barcode_svc.unit_labels_sheet([u]))
@@ -264,16 +324,44 @@ def unit_label(uid: int, db: Session = Depends(get_db)):
 def unit_labels(ids: str = "", product_id: int = 0, db: Session = Depends(get_db)):
     """A sheet of per-piece labels: a selection (ids=1,2,3) or every piece of one
     SKU. Opening it counts as printing them, which is what makes the screen able
-    to offer Reprint afterwards."""
+    to offer Reprint afterwards.
+
+    **Print all is refused on a mismatch.** A label is a physical thing stuck on a
+    garment, so the number printed can never exceed the number of garments — and
+    when the piece codes and the stock figure disagree, neither number can be
+    trusted until someone says which is right. The check lives here rather than
+    only in the UI because this URL is openable directly, and a guard a client can
+    skip is not a guard."""
     from ..services import units as unit_svc
+    from ..services import integrity
     q = db.query(models.ProductUnit)
     if ids.strip():
         want = [int(x) for x in ids.split(",") if x.strip().isdigit()]
         rows = q.filter(models.ProductUnit.id.in_(want)).all()
         rows.sort(key=lambda u: want.index(u.id))
+        # a hand-picked selection still may not include a dead code
+        ctx = integrity.Context(db)
+        dead = [u.code for u in rows if ctx.unit_state(u) != integrity.POSTED]
+        if dead:
+            raise HTTPException(400, f"{len(dead)} of these piece codes belong to no "
+                                     f"posted GRN ({', '.join(dead[:4])}"
+                                     f"{'…' if len(dead) > 4 else ''}) — run Inventory "
+                                     f"Repair before printing")
     elif product_id:
-        rows = q.filter(models.ProductUnit.product_id == product_id).order_by(
+        p = db.get(models.Product, product_id)
+        if not p:
+            raise HTTPException(404, "product not found")
+        ctx = integrity.Context(db)
+        ok, why = integrity.can_print(db, p, ctx)
+        if not ok:
+            raise HTTPException(400, why)
+        # LIVE codes only. Passing the check is not the same as every row being
+        # printable: a SKU can hold the right number of live codes and still carry
+        # left-over ones beside them, and "print all" must mean all the garments,
+        # never all the rows.
+        rows = [u for u in q.filter(models.ProductUnit.product_id == product_id).order_by(
             models.ProductUnit.seq).all()
+            if ctx.unit_state(u) == integrity.POSTED]
     else:
         raise HTTPException(400, "pass ids= or product_id=")
     if not rows:
@@ -437,9 +525,13 @@ def categorize_all(force: bool = False, db: Session = Depends(get_db)):
 @router.get("/products/{prod_id}/label", response_class=HTMLResponse)
 def product_label(prod_id: int, db: Session = Depends(get_db)):
     """Print-ready single QR label for one product."""
+    from ..services import integrity
     p = db.get(models.Product, prod_id)
     if not p:
         raise HTTPException(404, "product not found")
+    ok, why = integrity.can_print(db, p)
+    if not ok:
+        raise HTTPException(400, why)
     if not p.sku:
         barcode_svc.assign_identifiers(db, p)
         db.commit(); db.refresh(p)
@@ -449,16 +541,31 @@ def product_label(prod_id: int, db: Session = Depends(get_db)):
 @router.get("/labels", response_class=HTMLResponse)
 def labels(ids: str = "", status: str = "detailed", db: Session = Depends(get_db)):
     """Print-ready QR-label sheet. Pass ids=1,2,3 for a selection, else all
-    products matching status (default: detailed)."""
+    products matching status (default: detailed).
+
+    Products that aren't stock are dropped from the sheet rather than failing the
+    whole print — a bulk run should give you the labels it legitimately can, and
+    say what it left out. An explicit id list is stricter: naming a record that is
+    not stock is a mistake worth surfacing, not silently honouring."""
+    from ..services import integrity
+    ctx = integrity.Context(db)
     if ids.strip():
         want = [int(x) for x in ids.split(",") if x.strip().isdigit()]
         ps = db.query(models.Product).filter(models.Product.id.in_(want)).all()
         ps.sort(key=lambda p: want.index(p.id))
+        bad = [p for p in ps if ctx.product_state(p) != integrity.POSTED]
+        if bad:
+            raise HTTPException(400, f"{len(bad)} of these products belong to no posted "
+                                     f"GRN ({', '.join((p.sku or '?') for p in bad[:4])}"
+                                     f"{'…' if len(bad) > 4 else ''}) — run Inventory Repair")
     else:
         q = db.query(models.Product)
         if status == "detailed":
             q = q.filter(models.Product.detailed == True)  # noqa: E712
-        ps = q.order_by(models.Product.description).all()
+        ps = [p for p in q.order_by(models.Product.description).all()
+              if ctx.product_state(p) == integrity.POSTED]
+    if not ps:
+        raise HTTPException(404, "nothing to print — no product here belongs to a posted GRN")
     # make sure every product on the sheet is scannable
     changed = False
     for p in ps:
@@ -467,6 +574,37 @@ def labels(ids: str = "", status: str = "detailed", db: Session = Depends(get_db
     if changed:
         db.commit()
     return HTMLResponse(barcode_svc.labels_sheet(ps))
+
+
+# ---------------------------------------------------------------------------
+#  Inventory repair — find and remove what isn't stock
+# ---------------------------------------------------------------------------
+@router.get("/integrity")
+def integrity_scan(db: Session = Depends(get_db)):
+    """Read-only: every inventory record that fails a check, and why.
+
+    This is what the Repair screen shows *before* anyone agrees to delete
+    anything — orphan products, orphan piece codes, orphan cartons, and any SKU
+    whose piece codes don't match what it received. `unposted_products` is listed
+    separately and is never offered for deletion: those are kept on purpose."""
+    from ..services import integrity
+    return integrity.scan(db)
+
+
+@router.post("/repair")
+def integrity_repair(dry_run: bool = False, db: Session = Depends(get_db)):
+    """Delete the debris — records traceable to no GRN at all and carrying no
+    ledger history of their own.
+
+    `dry_run=true` returns exactly what would go without touching anything.
+    Products kept at zero stock after an unpost are never removed: they hold
+    detailing recorded by hand in the warehouse, and no cleanup is worth
+    destroying that silently."""
+    from ..services import integrity
+    result = integrity.repair(db, dry_run=dry_run)
+    if not dry_run:
+        db.commit()
+    return result
 
 
 @router.post("/products/{prod_id}/adjust-stock")

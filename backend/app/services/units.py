@@ -94,9 +94,31 @@ def remove_for_purchase(db, purchase):
     return len(rows)
 
 
+def latest_receipt(db, product):
+    """The most recent POSTED GRN that brought this product in.
+
+    Every piece code has to name the receipt behind it. A code minted with none is
+    untraceable — nothing can later say whether the garment it claims to identify
+    was ever received — so a backfill borrows the product's own last receipt
+    rather than leaving the field empty."""
+    mv = db.query(models.StockMovement).filter(
+        models.StockMovement.product_id == product.id,
+        models.StockMovement.ref_type == "purchase",
+        models.StockMovement.qty_delta > 0).order_by(
+        models.StockMovement.id.desc()).first()
+    if not mv:
+        return None
+    p = db.get(models.Purchase, mv.ref_id)
+    return p if p and p.status == "posted" else None
+
+
 def backfill(db, product, purchase=None):
     """Give an existing product the piece codes it never got — for stock received
-    before per-piece codes existed. Tops up to the product's stock on hand."""
+    before per-piece codes existed. Tops up to the product's stock on hand.
+
+    Only ever tops *up*: `missing` is the shortfall against stock, so calling this
+    twice cannot double the codes. It also refuses to mint anything for a product
+    with no posted receipt behind it — there is no garment to identify."""
     have = db.query(models.ProductUnit).filter(
         models.ProductUnit.product_id == product.id).count()
     want = float(product.stock_qty or 0)
@@ -106,6 +128,10 @@ def backfill(db, product, purchase=None):
     missing = int(round(want)) - have
     if missing <= 0:
         return [], f"already has {have} piece code(s) for a stock of {want:g}"
+    purchase = purchase or latest_receipt(db, product)
+    if purchase is None:
+        return [], ("no posted GRN received this product, so there is nothing to "
+                    "issue piece codes against")
     return create_for_receipt(db, product, missing, purchase), ""
 
 

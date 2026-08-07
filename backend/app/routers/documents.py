@@ -59,11 +59,22 @@ def clear_all(wipe_masters: bool = False, db: Session = Depends(get_db)):
     before parents. By default KEEPS suppliers + trained profiles and the
     category master. Pass wipe_masters=true for a fully empty test database
     (also clears suppliers, profiles, agents, transporters — categories stay)."""
+    # Every table is emptied with a BULK delete, which is fast but does not load
+    # rows — so SQLAlchemy's `cascade="all, delete-orphan"` never fires and each
+    # child has to be listed here explicitly. Anything hanging off Product or
+    # PurchaseLine that is missing from this list survives the wipe as orphan rows,
+    # and because ids restart afterwards it is then silently adopted by whatever
+    # new row lands on the same id: piece codes reappearing under an unrelated
+    # product, cartons pointing at lines that no longer exist. Add new child
+    # tables here at the same time as you add them to models.py.
     order = [
         models.PaymentAllocation, models.Payment,
         models.PurchaseReturnLine, models.PurchaseReturn,
         models.StockOutwardLine, models.StockOutward,
         models.StockMovement,
+        models.ProductUnit,                       # per-piece codes (Product child)
+        models.Bundle,                            # carton labels (PurchaseLine child)
+        models.GrnShortage,                       # billed-but-not-received
         models.PurchaseLineSplit, models.PurchaseLine, models.Purchase,
         models.LREntry,
         models.LineItem, models.Extraction, models.Document,
@@ -330,6 +341,32 @@ def _persist_lr_fill(db, doc, prev, data, report, notes, detail, matched, always
             "data": data, "detail": detail}
 
 
+#: Date fields inside the canonical invoice. Normalised when a human confirms the
+#: extraction — this is the moment the read stops being a guess and starts being a
+#: record, and `invoice.date` in particular becomes `Purchase.invoice_date`, which
+#: everything downstream ages and sorts a payable by.
+_DATE_PATHS = ("invoice.date", "invoice.due_date", "invoice.order_date",
+               "invoice.irn_date", "invoice.lr_date", "invoice.eway_date",
+               "meta.grn_date")
+
+
+def normalise_dates(data):
+    """Rewrite the known date fields of a canonical invoice to ISO.
+
+    Only the paths above, and only when they parse: a date the parser cannot read
+    is left as the supplier wrote it, because the printed page is the record and a
+    blank is a worse answer than an odd string."""
+    from ..services import dates
+    if not isinstance(data, dict):
+        return data
+    for path in _DATE_PATHS:
+        section, _, key = path.partition(".")
+        block = data.get(section)
+        if isinstance(block, dict) and block.get(key):
+            block[key] = dates.normalise(block[key])
+    return data
+
+
 @router.post("/{doc_id}/confirm")
 def confirm(doc_id: int, req: ConfirmRequest, db: Session = Depends(get_db)):
     """Save the human-corrected extraction and (optionally) learn the supplier
@@ -337,7 +374,7 @@ def confirm(doc_id: int, req: ConfirmRequest, db: Session = Depends(get_db)):
     doc = db.get(models.Document, doc_id)
     if not doc:
         raise HTTPException(404, "document not found")
-    corrected = req.data
+    corrected = normalise_dates(req.data)
 
     # persist the correction as a new extraction row (audit trail preserved)
     ex = models.Extraction(document_id=doc.id, provider="human", data=corrected,

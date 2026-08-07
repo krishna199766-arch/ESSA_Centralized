@@ -27,9 +27,27 @@ bite in money:
 re-derives every line from the GRN before valuing — so a draft raised before a
 correction, or a rate that got stale in some other way, cannot reach a posted
 debit note. Nothing in this module ever reads Product.sale_price or Product.mrp.
+
+TWO KINDS OF LINE
+-----------------
+A debit note reduces the payable for two quite different reasons, and this module
+carries both because the supplier's account does not care which it was:
+
+  * **goods going back** — we received them, we are returning them, and posting
+    reverses the stock they added;
+  * **goods that never came** — the supplier billed fifty and sent forty. The ten
+    were counted at the dock and recorded as a GrnShortage (services/shortages.py),
+    and posting must NOT touch stock, because those units never entered it.
+    `PurchaseReturnLine.shortage_id` is what tells the two apart.
+
+The second kind is why shortages are recorded at receiving rather than worked out
+later: the quantity is already a fact by the time a debit note is raised, so
+`build_from_purchase` fills it in and nobody re-counts anything.
 """
 import datetime as dt
 from .. import models
+from . import shortages as shortage_svc
+from . import dates
 
 
 def _next_code(db):
@@ -102,8 +120,15 @@ def _receivers(purchase):
 def source_of(db, l):
     """The GRN row a return line came back from: (purchase_line, split|None).
 
+    A shortage claim resolves to its billed line and no variant: the supplier
+    itemised a bundle, so the missing pieces are counted — and valued — against
+    that bundle's rate.
+
     Falls back to matching on the product for rows created before the link
     columns existed, so an old draft still re-values from the right receipt."""
+    if l.shortage_id:
+        sh = db.get(models.GrnShortage, l.shortage_id)
+        return (sh.line if sh else None), None
     line = db.get(models.PurchaseLine, l.purchase_line_id) if l.purchase_line_id else None
     split = db.get(models.PurchaseLineSplit, l.split_id) if l.split_id else None
     if line or split:
@@ -121,6 +146,8 @@ def source_of(db, l):
 def _source_key(l):
     """Identifies the received row a return line consumes, for tallying how much
     of it has already gone back across several debit notes."""
+    if l.shortage_id:
+        return ("shortage", l.shortage_id)
     if l.split_id:
         return ("split", l.split_id)
     if l.purchase_line_id:
@@ -133,7 +160,17 @@ def returnable(db, ret, l):
 
     'Already returned' counts POSTED debit notes other than this one against the
     same invoice, so two partial returns of the same item can't quietly add up to
-    more than was bought."""
+    more than was bought.
+
+    For a shortage claim the ceiling is the shortage, not the purchase: the
+    supplier can only be debited for the ten pieces the dock counted missing, and
+    only once."""
+    if l.shortage_id:
+        sh = db.get(models.GrnShortage, l.shortage_id)
+        qty = float(sh.qty or 0) if sh else 0.0
+        prior = shortage_svc.claimed_qty(db, sh, exclude_return_id=ret.id) if sh else 0.0
+        return {"purchased": round(qty, 3), "already_returned": round(prior, 3),
+                "available": round(qty - prior, 3)}
     line, split = source_of(db, l)
     holder = split if split is not None else line
     purchased = float(getattr(holder, "qty", 0) or 0) if holder is not None else 0.0
@@ -154,11 +191,26 @@ def returnable(db, ret, l):
 # ---------------------------------------------------------------------------
 #  Build / edit / post
 # ---------------------------------------------------------------------------
-def build_from_purchase(db, purchase):
+def build_from_purchase(db, purchase, shortages_only=False):
+    """A draft debit note against one invoice.
+
+    Two sets of lines, and they behave differently on purpose. Goods we received
+    are listed at qty 0 — how many go back is a decision someone still has to
+    make. Shortages are listed at the quantity the dock counted, because that is
+    not a decision: the pieces are missing, and by how many was settled when the
+    boxes were opened. That is the payoff for recording shortages at receiving —
+    this half of the debit note fills itself in.
+
+    `shortages_only` raises a note for the missing goods alone, which is the
+    common case: a short delivery is claimed on its own, well before anyone knows
+    whether the goods that did arrive are any good."""
     existing = db.query(models.PurchaseReturn).filter(
         models.PurchaseReturn.purchase_id == purchase.id,
         models.PurchaseReturn.status == "draft").first()
     if existing:
+        # a shortage recorded (or re-opened) since the draft was raised still
+        # belongs on it — otherwise the claim silently misses it
+        sync_shortage_lines(db, existing)
         return apply_grn_rates(db, existing)
 
     ret = models.PurchaseReturn(
@@ -168,20 +220,85 @@ def build_from_purchase(db, purchase):
     )
     db.add(ret)
     db.flush()
-    for pl, sp in _receivers(purchase):
-        holder = sp if sp is not None else pl
-        product = db.get(models.Product, holder.product_id) if holder.product_id else None
-        label = sp.variant_label if sp is not None else None
-        db.add(models.PurchaseReturnLine(
-            return_id=ret.id, product_id=holder.product_id,
-            purchase_line_id=pl.id, split_id=sp.id if sp is not None else None,
-            # our SKU when the item has one — that is the code on the goods; the
-            # supplier's printed code only when they gave us one
-            barcode=(product.sku or product.barcode) if product else pl.barcode,
-            description=f"{pl.description} · {label}" if label else pl.description,
-            hsn=pl.hsn, uom=pl.uom,
-            qty=0.0, rate=grn_cost(pl, sp, product), amount=0.0,
-        ))
+    if not shortages_only:
+        for pl, sp in _receivers(purchase):
+            holder = sp if sp is not None else pl
+            product = db.get(models.Product, holder.product_id) if holder.product_id else None
+            label = sp.variant_label if sp is not None else None
+            db.add(models.PurchaseReturnLine(
+                return_id=ret.id, product_id=holder.product_id,
+                purchase_line_id=pl.id, split_id=sp.id if sp is not None else None,
+                # our SKU when the item has one — that is the code on the goods; the
+                # supplier's printed code only when they gave us one
+                barcode=(product.sku or product.barcode) if product else pl.barcode,
+                description=f"{pl.description} · {label}" if label else pl.description,
+                hsn=pl.hsn, uom=pl.uom,
+                qty=0.0, rate=grn_cost(pl, sp, product), amount=0.0,
+            ))
+    sync_shortage_lines(db, ret)
+    db.flush()
+    return ret
+
+
+def shortage_description(sh):
+    """How a missing-goods line reads on the debit note. It has to say *why* the
+    supplier is being debited for something we never sent back, because the
+    obvious reading of a return line — "here are your goods" — is wrong here."""
+    line = sh.line
+    what = (line.description if line else None) or "(unnamed)"
+    bits = [shortage_svc.KINDS.get(sh.kind, sh.kind).split(" — ")[0].lower()]
+    if sh.variant:
+        bits.insert(0, sh.variant)
+    if sh.reason:
+        bits.append(sh.reason.lower())
+    return f"{what} · not received ({', '.join(bits)})"
+
+
+def sync_shortage_lines(db, ret):
+    """Put every unclaimed shortage on this draft, and take off the ones that no
+    longer belong.
+
+    Run whenever a draft is opened, so a shortage recorded — or waived — after the
+    note was raised is reflected without anyone rebuilding it. Only untouched
+    lines are removed: a quantity someone typed is theirs to change, not ours."""
+    if ret.status == "posted" or not ret.purchase:
+        return ret
+    open_now = {sh.id: qty for sh, qty in
+                shortage_svc.claimable(db, ret.purchase, exclude_return_id=ret.id)}
+    have = {}
+    for l in list(ret.lines):
+        if not l.shortage_id:
+            continue
+        if l.shortage_id not in open_now:
+            # waived, or already answered by another posted note
+            if not (l.qty or 0):
+                ret.lines.remove(l)
+                db.delete(l)
+            continue
+        have[l.shortage_id] = l
+
+    for sid, qty in open_now.items():
+        sh = db.get(models.GrnShortage, sid)
+        if not sh:
+            continue
+        rate = shortage_svc.unit_cost(sh.line)
+        l = have.get(sid)
+        if l is None:
+            db.add(models.PurchaseReturnLine(
+                return_id=ret.id, shortage_id=sh.id,
+                # no product_id: these units never became one. A missing garment
+                # has no SKU, no QR and no stock row, and pointing this line at
+                # some other product's record would invite posting to move it.
+                product_id=None,
+                purchase_line_id=sh.line_id,
+                barcode=(sh.line.barcode if sh.line else None),
+                description=shortage_description(sh),
+                hsn=(sh.line.hsn if sh.line else None),
+                uom=(sh.line.uom if sh.line else None),
+                qty=qty, rate=rate, amount=round(qty * rate, 2)))
+        elif not (l.qty or 0):
+            l.qty = qty                      # untouched line follows the shortage
+            l.amount = round(qty * rate, 2)
     db.flush()
     return ret
 
@@ -236,26 +353,36 @@ def post(db, ret, reason=None, date=None):
     for l in active:
         r = returnable(db, ret, l)
         if r["purchased"] and float(l.qty) > r["available"] + 1e-6:
-            over.append(f"“{(l.description or '')[:40]}”: returning {float(l.qty):g} "
+            noun = "claiming" if l.is_shortage_claim else "returning"
+            over.append(f"“{(l.description or '')[:40]}”: {noun} {float(l.qty):g} "
                         f"of {r['available']:g} available"
-                        + (f" ({r['purchased']:g} received, {r['already_returned']:g} "
-                           f"already returned)" if r["already_returned"] else ""))
+                        + (f" ({r['purchased']:g} {'short' if l.is_shortage_claim else 'received'}, "
+                           f"{r['already_returned']:g} already claimed)"
+                           if r["already_returned"] else ""))
     if over:
         return {"ok": False, "error": "more than was received — " + "; ".join(over)}
 
-    taxable = 0.0
+    taxable, short_lines, short_value = 0.0, 0, 0.0
     for l in active:
-        prod = db.get(models.Product, l.product_id) if l.product_id else None
         qty = float(l.qty or 0)
         l.amount = round(qty * (l.rate or 0), 2)
-        if prod:
-            prod.stock_qty = round((prod.stock_qty or 0) - qty, 3)
-            db.add(models.StockMovement(
-                product_id=prod.id, qty_delta=-qty, kind="return",
-                ref_type="purchase_return", ref_id=ret.id,
-                rate=l.rate or prod.avg_cost or 0, balance_after=prod.stock_qty,
-                note=f"Purchase return {ret.code} → {ret.supplier.name if ret.supplier else ''}".strip(),
-            ))
+        if l.is_shortage_claim:
+            # goods that never arrived. The payable comes down at the GRN rate,
+            # and the stock ledger is not touched — there is nothing to reverse,
+            # and reversing "it" would take the shortage out of stock twice: once
+            # by never receiving it, once again here.
+            short_lines += 1
+            short_value += l.amount or 0
+        else:
+            prod = db.get(models.Product, l.product_id) if l.product_id else None
+            if prod:
+                prod.stock_qty = round((prod.stock_qty or 0) - qty, 3)
+                db.add(models.StockMovement(
+                    product_id=prod.id, qty_delta=-qty, kind="return",
+                    ref_type="purchase_return", ref_id=ret.id,
+                    rate=l.rate or prod.avg_cost or 0, balance_after=prod.stock_qty,
+                    note=f"Purchase return {ret.code} → {ret.supplier.name if ret.supplier else ''}".strip(),
+                ))
         taxable += l.amount or 0
 
     rate = _effective_tax_rate(ret.purchase)
@@ -263,13 +390,17 @@ def post(db, ret, reason=None, date=None):
     ret.tax_total = round(taxable * rate, 2)
     ret.total = round(ret.taxable_total + ret.tax_total, 2)
     ret.reason = reason or ret.reason
-    ret.date = date or ret.date
+    ret.date = dates.normalise(date) if date else ret.date
     ret.status = "posted"
     ret.posted_at = dt.datetime.utcnow()
     db.flush()
     return {"ok": True, "return_id": ret.id, "debit_total": ret.total,
             "taxable_total": ret.taxable_total, "tax_total": ret.tax_total,
-            "cost_basis": "grn", "lines": len(active)}
+            "cost_basis": "grn", "lines": len(active),
+            # said separately because they settle the same way but mean opposite
+            # things on the floor: one is stock leaving, one is stock that never came
+            "shortage_lines": short_lines, "shortage_value": round(short_value, 2),
+            "returned_lines": len(active) - short_lines}
 
 
 def returns_against_purchase(db, purchase_id):

@@ -8,6 +8,7 @@ invoice = grand_total − Σ(settled across all allocations).
 """
 import datetime as dt
 from .. import models
+from . import dates
 
 
 def _today():
@@ -17,14 +18,13 @@ def _today():
 
 
 def _parse_date(s):
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
-        try:
-            return dt.datetime.strptime(s, fmt).date()
-        except (ValueError, TypeError):
-            continue
-    return None
+    """One parser for the whole system — see services/dates.py.
+
+    It used to know three formats; anything else (a two-digit year, "31 Jul 2026"
+    off an e-invoice) fell through to None and the bill silently lost its days
+    outstanding, which is the kind of gap that shows up as an ageing report that
+    almost adds up."""
+    return dates.parse(s)
 
 
 def invoice_settled(db, purchase_id):
@@ -80,10 +80,11 @@ def create_payment(db, payload):
     allocs = payload.get("allocations", [])
     pay = models.Payment(
         receipt_no=_next_receipt(db), supplier_id=payload.get("supplier_id"),
-        date=payload.get("date"), mode=payload.get("mode", "NEFT"),
+        # ISO on the way in, so the register sorts and the ledger dates compare
+        date=dates.normalise(payload.get("date")), mode=payload.get("mode", "NEFT"),
         bank=payload.get("bank"), cheque_no=payload.get("cheque_no"),
-        cheque_date=payload.get("cheque_date"), ref_no=payload.get("ref_no"),
-        remarks=payload.get("remarks"),
+        cheque_date=dates.normalise(payload.get("cheque_date")),
+        ref_no=payload.get("ref_no"), remarks=payload.get("remarks"),
     )
     db.add(pay)
     db.flush()

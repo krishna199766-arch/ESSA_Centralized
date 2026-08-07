@@ -1,5 +1,13 @@
 const J = (r) => { if (!r.ok) throw new Error(r.status); return r.json() }
 
+// ?a=1&b=2 from an object, skipping blanks — so an untouched filter is absent
+// rather than sent as an empty string the server has to special-case
+const qs = (params) => {
+  const p = new URLSearchParams()
+  Object.entries(params || {}).forEach(([k, v]) => { if (v !== '' && v != null) p.append(k, v) })
+  return p.toString() ? '?' + p : ''
+}
+
 export const api = {
   // auth
   login: (username, password) => fetch('/api/auth/login', {
@@ -52,6 +60,23 @@ export const api = {
   setLineSplits: (lineId, rows) => fetch(`/api/purchases/lines/${lineId}/splits`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows }) })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('splits'), { detail: j.detail }); return j }),
+  // shortage entry: what the supplier billed and the boxes didn't hold. Recorded
+  // before posting — after it, the gap is invisible (stock says 40, the invoice
+  // says 50, and nothing remembers why). [] clears the line's shortages.
+  setLineShortages: (lineId, rows, recorded_by) => fetch(`/api/purchases/lines/${lineId}/shortages`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rows, recorded_by }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('short'), { detail: j.detail }); return j }),
+  grnShortages: (pid) => fetch(`/api/purchases/${pid}/shortages`).then(J),
+  shortageOptions: () => fetch('/api/purchases/shortage-options').then(J),
+  // accept a shortage rather than claim it (supplier is re-sending, or it's too small)
+  waiveShortage: (sid, reason, by) => fetch(`/api/purchases/shortages/${sid}/waive`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason, by }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('waive'), { detail: j.detail }); return j }),
+  unwaiveShortage: (sid) => fetch(`/api/purchases/shortages/${sid}/unwaive`, { method: 'POST' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('waive'), { detail: j.detail }); return j }),
+
   // set a line's category master mapping ('' clears it, back to auto)
   editLine: (lineId, fields) => fetch(`/api/purchases/lines/${lineId}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) })
@@ -94,6 +119,14 @@ export const api = {
     ? `/api/inventory/unit-labels?ids=${ids.join(',')}`
     : `/api/inventory/unit-labels?product_id=${productId}`,
 
+  // inventory integrity: a record is stock only if a posted GRN put it there.
+  // Scan is read-only and is what the Repair screen shows before anything is
+  // deleted; repair removes only debris (never a product kept after an unpost).
+  integrityScan: () => fetch('/api/inventory/integrity').then(J),
+  integrityRepair: (dryRun) => fetch('/api/inventory/repair' + (dryRun ? '?dry_run=true' : ''),
+    { method: 'POST' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('repair'), { detail: j.detail }); return j }),
+
   // dropdown option sets (same lists the phone app uses, incl. sizes)
   productOptions: () => fetch('/api/inventory/product-options').then(J),
   barcodeSvgUrl: (id) => `/api/inventory/products/${id}/barcode.svg`,
@@ -133,7 +166,13 @@ export const api = {
   // purchase returns
   listReturns: () => fetch('/api/returns').then(J),
   getReturn: (id) => fetch(`/api/returns/${id}`).then(J),
-  buildReturn: (purchaseId) => fetch(`/api/returns/from-purchase/${purchaseId}`, { method: 'POST' }).then(J),
+  // `shortagesOnly` claims the goods that never arrived on their own — the usual
+  // case, since a short delivery is chased long before anyone knows whether what
+  // did arrive is any good. Shortage lines come back pre-filled: the count was
+  // done at the dock, so nobody counts again.
+  buildReturn: (purchaseId, shortagesOnly) => fetch(
+    `/api/returns/from-purchase/${purchaseId}` + (shortagesOnly ? '?shortages_only=true' : ''),
+    { method: 'POST' }).then(J),
   postReturn: (id, body) => fetch(`/api/returns/${id}/post`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('post'), { detail: j.detail }); return j }),
@@ -186,10 +225,13 @@ export const api = {
   },
   lrDeleteAttachment: (attId) => fetch(`/api/lr/attachments/${attId}`, { method: 'DELETE' }).then(J),
 
-  // reports
+  // reports. Each catalogue entry declares the filters it accepts (`params`);
+  // the server drops anything a given report doesn't take, so both calls can
+  // pass the same bag without a per-report branch.
   reportCatalogue: () => fetch('/api/reports').then(J),
-  runReport: (key) => fetch(`/api/reports/${key}`).then(J),
-  reportCsvUrl: (key) => `/api/reports/${key}/csv`,
+  reportGroups: () => fetch('/api/reports/groups').then(J),
+  runReport: (key, params) => fetch(`/api/reports/${key}${qs(params)}`).then(J),
+  reportCsvUrl: (key, params) => `/api/reports/${key}/csv${qs(params)}`,
 
   // settings / vision
   getSettings: () => fetch('/api/settings').then(J),

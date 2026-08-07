@@ -12,12 +12,128 @@ const matches = (obj, q, fields) => {
   const s = q.toLowerCase()
   return fields.some((f) => String(obj?.[f] ?? '').toLowerCase().includes(s))
 }
-function SearchBox({ value, onChange, placeholder, style }) {
+// ==========================================================================
+//  Search · Filter · Minimize
+//  ------------------------------------------------------------------------
+//  Three controls, one behaviour, on every list screen — GRN, Inventory,
+//  Purchase Return, Stock Outward, Stock Inward, Documents, Suppliers, LR and
+//  Reports. Someone who learns them on one screen already knows them on the
+//  rest, which is the whole point: this is a warehouse tool used by people who
+//  were trained on the screen next to them, not on a manual.
+//
+//  The rules they all keep:
+//    * ⌕ SEARCH filters what is already on screen. Esc clears it.
+//    * ⛭ FILTER decides what is on screen at all, and always says how many
+//      filters are active — a filtered list that looks unfiltered is how someone
+//      concludes stock has gone missing.
+//    * − MINIMIZE collapses a panel and remembers it, per screen, across
+//      navigation and reloads. A collapsed panel still shows what it holds.
+//  Every icon carries a title= too. An icon on its own teaches nobody.
+// ==========================================================================
+
+function SearchBox({ value, onChange, placeholder, style, title }) {
   return (
-    <div className="searchbox" style={style}>
+    <div className="searchbox" style={style}
+      title={title || 'Search within what is shown. Esc clears it.'}>
       <span className="searchicon">⌕</span>
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder || 'Search…'} />
-      {value && <button className="searchclear" title="Clear" onClick={() => onChange('')}>×</button>}
+      <input value={value} onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder || 'Search…'}
+        onKeyDown={(e) => { if (e.key === 'Escape' && value) { e.preventDefault(); onChange('') } }} />
+      {value && <button className="searchclear" title="Clear the search (Esc)"
+        onClick={() => onChange('')}>×</button>}
+    </div>
+  )
+}
+
+// Mutually exclusive scopes — the common filter, and the one worth showing
+// open rather than behind a button. `options`: [value, label, count?, tooltip?]
+function FilterChips({ value, onChange, options, title }) {
+  return (
+    <div className="chiprow" title={title || 'Filter which records are listed'}>
+      {options.map(([v, label, count, tip]) => (
+        <button key={v} className={'fchip' + (value === v ? ' on' : '')}
+          title={tip || `Show ${String(label).toLowerCase()}`}
+          onClick={() => onChange(v)}>
+          {label}{count != null && <span className="n">{count}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// Anything richer than a chip row lives behind this: a labelled disclosure that
+// states how many filters are on, and can always be cleared in one click.
+function FilterButton({ open, onToggle, active, title }) {
+  return (
+    <button className={'filterbtn' + (open || active ? ' on' : '')} onClick={onToggle}
+      title={title || (active
+        ? `${active} filter${active === 1 ? '' : 's'} active — click to change or clear`
+        : 'Filter which records are listed')}>
+      <span aria-hidden="true">⛭</span> Filters
+      {active > 0 && <span className="count">{active}</span>}
+      <span style={{ color: 'var(--muted)' }}>{open ? '▾' : '▸'}</span>
+    </button>
+  )
+}
+
+function FilterPanel({ open, active, onClear, onApply, children, hint }) {
+  if (!open) return null
+  return (
+    <div className="filterpanel">
+      <div className="row">{children}</div>
+      <div className="filterfoot">
+        <span className="small" style={{ color: 'var(--muted)' }}>
+          {hint || (active ? `${active} filter${active === 1 ? '' : 's'} active` : 'No filters set — everything is listed')}
+        </span>
+        <div style={{ flex: 1 }} />
+        {onApply && <button className="btn primary" onClick={onApply} title="Run with these filters">Apply</button>}
+        <button className="btn" onClick={onClear} disabled={!active}
+          title={active ? 'Remove every filter' : 'Nothing to clear'}>Clear all</button>
+      </div>
+    </div>
+  )
+}
+
+// Collapsed panels are remembered per screen and survive a reload, because a
+// warehouse screen is set up once for how someone works and then left alone.
+const MINI_KEY = 'essa_minimized'
+const readMinimized = () => {
+  try { return JSON.parse(localStorage.getItem(MINI_KEY) || '{}') } catch { return {} }
+}
+function useMinimized(id, defaultOpen = true) {
+  const [open, setOpen] = useState(() => {
+    const saved = readMinimized()[id]
+    return saved === undefined ? defaultOpen : !saved
+  })
+  const toggle = () => setOpen((o) => {
+    const next = !o
+    try {
+      const all = readMinimized()
+      if (next === defaultOpen) delete all[id]; else all[id] = !next
+      localStorage.setItem(MINI_KEY, JSON.stringify(all))
+    } catch { /* private mode — the panel still toggles, it just won't persist */ }
+    return next
+  })
+  return [open, toggle]
+}
+
+// A section with a minimize control. `summary` is what it says while collapsed —
+// a minimized panel that doesn't say what it holds is just a missing panel.
+function Section({ id, title, summary, actions, children, defaultOpen = true, style }) {
+  const [open, toggle] = useMinimized(id, defaultOpen)
+  return (
+    <div className="section" style={style}>
+      <div className="panelhead" onClick={toggle}
+        title={open ? 'Minimize this panel' : 'Expand this panel'}>
+        <button className="mini" aria-expanded={open}
+          title={open ? 'Minimize' : 'Expand'} onClick={(e) => { e.stopPropagation(); toggle() }}>
+          {open ? '−' : '+'}
+        </button>
+        <h4>{title}</h4>
+        {!open && summary ? <span className="panelsum">{summary}</span> : null}
+        {actions && open ? <span onClick={(e) => e.stopPropagation()}>{actions}</span> : null}
+      </div>
+      {open && children}
     </div>
   )
 }
@@ -28,7 +144,7 @@ function AiLogo({ size = 120 }) {
     <svg width={size} height={size} viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <linearGradient id="lg" x1="0" y1="0" x2="120" y2="120">
-          <stop offset="0" stopColor="#4f8cff" /><stop offset="1" stopColor="#2fb6a3" />
+          <stop offset="0" stopColor="#7A4C3D" /><stop offset="1" stopColor="#5A3428" />
         </linearGradient>
       </defs>
       {/* gradient ring + a rotating orbit dot for flair */}
@@ -82,12 +198,110 @@ function LoginScreen({ onLogin }) {
   )
 }
 
-function Field({ label, value, onChange, flagged, note, wide, source }) {
+// ---------- dates ----------
+// Every date in this app is a calendar picker, and every date it stores is ISO
+// `YYYY-MM-DD`. The picker is the easy half; the hard half is that dates already
+// in the database came off supplier invoices and register pages in whatever form
+// those used — 31/07/2026, 31-7-26, "31 Jul 2026". A native <input type="date">
+// shows a non-ISO value as BLANK, so pointing one at that data would look exactly
+// like the date had been lost, and the first save would make it true.
+//
+// So a value is normalised on the way in, and one that cannot be read is not
+// silently swallowed: the field stays empty (it has nothing valid to show) but the
+// original text is displayed beneath it, and it is left in the record untouched
+// until someone actually picks a replacement.
+const ISO_RE = /^\d{4}-\d{2}-\d{2}$/
+const D_FIRST = [/^(\d{1,2})[/\-. ](\d{1,2})[/\-. ](\d{4})$/, /^(\d{1,2})[/\-. ](\d{1,2})[/\-. ](\d{2})$/]
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const pad2 = (n) => String(n).padStart(2, '0')
+
+// A year no purchase ledger will carry. A two-digit year and a mis-OCR'd digit
+// both produce dates that parse perfectly and are nonsense; the same guard is in
+// services/dates.py, and the two must agree or the screen and the server disagree
+// about whether a value is a date at all.
+// Round-tripped through Date, not merely range-checked: 2026-02-30 passes every
+// bounds test and is not a day. JS rolls it forward to March 2, so a value that
+// does not come back as itself was never a date — the same answer strptime gives
+// on the server, which is what keeps the two in step.
+const saneDate = (y, m, d) => {
+  if (+y < 1990 || +y > 2099) return ''
+  const iso = `${y}-${pad2(m)}-${pad2(d)}`
+  const t = new Date(iso + 'T00:00:00Z')
+  return !isNaN(t) && t.toISOString().slice(0, 10) === iso ? iso : ''
+}
+
+// Mirrors services/dates.py — day-first, because every supplier and register in
+// this business writes 03/04/2026 for the 3rd of April.
+function toISODate(value) {
+  if (!value) return ''
+  const s = String(value).trim()
+  const ymd = s.match(/^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/)
+  if (ISO_RE.test(s) || ymd) {
+    const [, y, m, d] = ymd || s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    return saneDate(y, m, d)
+  }
+  for (const re of D_FIRST) {
+    const m = s.match(re)
+    if (!m) continue
+    let [, d, mo, y] = m
+    if (y.length === 2) y = String(2000 + +y)
+    const iso = saneDate(y, mo, d)
+    if (iso) return iso
+    // day-first didn't hold, so this can only be month-first — 04/13/2026 off a
+    // supplier running US-defaulted software. Same fallback as services/dates.py.
+    const swapped = saneDate(y, d, mo)
+    if (swapped) return swapped
+  }
+  // "31 Jul 2026" / "31-Jul-2026", off e-invoices
+  const named = s.match(/^(\d{1,2})[\s\-/]([A-Za-z]{3,})[\s\-/](\d{2,4})$/)
+  if (named) {
+    const mi = MONTHS.indexOf(named[2].slice(0, 3).toLowerCase())
+    const y = named[3].length === 2 ? String(2000 + +named[3]) : named[3]
+    if (mi >= 0) return saneDate(y, mi + 1, named[1])
+  }
+  return ''
+}
+
+// dd/mm/yyyy for reading back — the form this business writes, shown next to the
+// picker so there is never any doubt which of 03/04 is the month
+const readableDate = (iso) => {
+  const s = toISODate(iso)
+  if (!s) return ''
+  const [y, m, d] = s.split('-')
+  return `${d}/${m}/${y}`
+}
+
+function DateField({ label, value, onChange, style, width, required, title, inline }) {
+  const iso = toISODate(value)
+  const unreadable = value && !iso
+  const input = (
+    <>
+      <input type="date" value={iso} title={title || (iso ? readableDate(iso) : '')}
+        onChange={(e) => onChange(e.target.value)} />
+      {unreadable && (
+        <div className="flagnote" title="Kept exactly as it was read — pick a date to replace it">
+          ⚠ can’t read “{String(value)}” — kept as-is
+        </div>
+      )}
+    </>
+  )
+  if (inline) return input
+  return (
+    <div className="field" style={{ ...(width ? { width } : null), ...style }}>
+      <label>{label}{required ? ' *' : ''}</label>
+      {input}
+    </div>
+  )
+}
+
+function Field({ label, value, onChange, flagged, note, wide, source, date }) {
   return (
     <div className={'field' + (flagged ? ' flag' : '') + (source && !flagged ? ' fromlr' : '')}
       style={wide ? { gridColumn: '1 / -1' } : null}>
       <label>{label}</label>
-      <input value={value ?? ''} onChange={(e) => onChange(e.target.value)} />
+      {date
+        ? <DateField inline value={value} onChange={onChange} />
+        : <input value={value ?? ''} onChange={(e) => onChange(e.target.value)} />}
       {flagged && <div className="flagnote">⚠ needs review{note ? ' · ' + note : ''}</div>}
       {source && !flagged && <div className="srcnote">🔗 from {source}</div>}
     </div>
@@ -240,9 +454,12 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
   }
   const f = (path, label, opts = {}) => (
     <Field label={label} value={get(path)} flagged={!!flags[path]} wide={opts.wide}
-      source={fromLr(path)}
+      source={fromLr(path)} date={opts.date}
       onChange={(v) => setData(setPath(data, path, opts.raw ? v : num(v)))} />
   )
+  // a date read off the page: same review flags and LR-source badge as any other
+  // field, but picked from a calendar instead of retyped
+  const fd = (path, label) => f(path, label, { raw: true, date: true })
 
   // The register is often photographed after the invoices it covers, so the
   // automatic pass on upload can find nothing. This re-runs it on demand, and
@@ -320,8 +537,7 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
             {warnings.length ? <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul> : null}
           </div>
 
-          <div className="section">
-            <h4>Supplier</h4>
+          <Section id="rev.supplier" title="Supplier">
             <div className="grid">
               {f('supplier.name', 'Name', { raw: true })}
               {f('supplier.legal_name', 'Legal / Trading Name', { raw: true })}
@@ -335,43 +551,40 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
               {f('supplier.manufacturer', 'Manufacturer / MFG by', { raw: true })}
               {f('supplier.address', 'Address', { raw: true, wide: true })}
             </div>
-          </div>
+          </Section>
 
-          <div className="section">
-            <h4>Supplier Bank</h4>
+          <Section id="rev.supplier-bank" title="Supplier Bank">
             <div className="grid">
               {f('supplier.bank.name', 'Bank Name', { raw: true })}
               {f('supplier.bank.account_no', 'Account No', { raw: true })}
               {f('supplier.bank.ifsc', 'IFSC', { raw: true })}
               {f('supplier.bank.branch', 'Branch', { raw: true })}
             </div>
-          </div>
+          </Section>
 
-          <div className="section">
-            <h4>Buyer (bill to)</h4>
+          <Section id="rev.buyer-bill-to" title="Buyer (bill to)">
             <div className="grid">
               {f('buyer.name', 'Name', { raw: true })}
               {f('buyer.gstin', 'GSTIN', { raw: true })}
               {f('buyer.state', 'State', { raw: true })}
               {f('buyer.address', 'Address', { raw: true, wide: true })}
             </div>
-          </div>
+          </Section>
 
-          <div className="section">
-            <h4>Invoice</h4>
+          <Section id="rev.invoice" title="Invoice">
             <div className="grid">
               {f('invoice.number', 'Invoice No', { raw: true })}
-              {f('invoice.date', 'Date', { raw: true })}
-              {f('invoice.due_date', 'Due Date', { raw: true })}
+              {fd('invoice.date', 'Date')}
+              {fd('invoice.due_date', 'Due Date')}
               {f('invoice.challan_no', 'Challan / DC No', { raw: true })}
               {f('invoice.order_no', 'Order No', { raw: true })}
-              {f('invoice.order_date', 'Order Date', { raw: true })}
+              {fd('invoice.order_date', 'Order Date')}
               {f('invoice.reference_no', 'Reference No', { raw: true })}
               {f('invoice.terms', 'Payment Terms', { raw: true })}
               {f('invoice.agent', 'Agent', { raw: true })}
               {f('invoice.broker', 'Broker', { raw: true })}
             </div>
-          </div>
+          </Section>
 
           <div className="section">
             <h4>E-invoice &amp; Transport
@@ -382,11 +595,11 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
             <div className="grid">
               {f('invoice.irn', 'IRN', { raw: true, wide: true })}
               {f('invoice.ack_no', 'ACK No', { raw: true })}
-              {f('invoice.irn_date', 'IRN Date', { raw: true })}
+              {fd('invoice.irn_date', 'IRN Date')}
               {f('invoice.eway_bill', 'E-way Bill', { raw: true })}
               {f('invoice.tran_id', 'Transport / EWB Tran ID', { raw: true })}
               {f('invoice.lr_no', 'LR No', { raw: true })}
-              {f('invoice.lr_date', 'LR Date', { raw: true })}
+              {fd('invoice.lr_date', 'LR Date')}
               {f('invoice.transporter', 'Transporter', { raw: true })}
               {f('invoice.destination', 'Destination', { raw: true })}
               {f('invoice.book_city', 'Book City', { raw: true })}
@@ -396,13 +609,11 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
               onLink={linkLrRow} onClose={() => setLrCands(null)} />}
           </div>
 
-          <div className="section">
-            <h4>Line Items</h4>
+          <Section id="rev.line-items" title="Line Items">
             <LineItems items={data.line_items || []} setItems={(it) => setData({ ...data, line_items: it })} />
-          </div>
+          </Section>
 
-          <div className="section">
-            <h4>Taxes</h4>
+          <Section id="rev.taxes" title="Taxes">
             <div className="grid">
               {f('taxes.cgst_rate', 'CGST %')}
               {f('taxes.cgst_amount', 'CGST Amount')}
@@ -416,10 +627,9 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
               {f('taxes.freight', 'Freight')}
               {f('taxes.round_off', 'Round Off')}
             </div>
-          </div>
+          </Section>
 
-          <div className="section">
-            <h4>Totals</h4>
+          <Section id="rev.totals" title="Totals">
             <div className="grid">
               {f('totals.total_qty', 'Total Qty')}
               {f('totals.sub_total', 'Sub Total')}
@@ -428,17 +638,16 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
               {f('totals.grand_total', 'Grand Total')}
               {f('totals.amount_in_words', 'Amount in Words', { raw: true, wide: true })}
             </div>
-          </div>
+          </Section>
 
-          <div className="section">
-            <h4>GRN &amp; Notes</h4>
+          <Section id="rev.grn-notes" title="GRN &amp; Notes">
             <div className="grid">
               {f('meta.grn_no', 'GRN No', { raw: true })}
-              {f('meta.grn_date', 'GRN Date', { raw: true })}
+              {fd('meta.grn_date', 'GRN Date')}
               {f('meta.received_by', 'Received By', { raw: true })}
               {f('meta.notes', 'Notes', { raw: true, wide: true })}
             </div>
-          </div>
+          </Section>
         </div>
 
         <div className="actionbar">
@@ -525,6 +734,22 @@ const blankVariant = (rate, category) => ({ ...Object.fromEntries(SPLIT_ATTRS.ma
 const sameQty = (a, b) => Math.abs((+a || 0) - (+b || 0)) < 0.001
 const variantLabel = (r) => SPLIT_ATTRS.map(([k]) => r[k]).filter(Boolean).join(' · ')
 
+// --- shortage entry: what was billed and wasn't in the box ---
+// Recorded on the GRN before it posts, because that is the last moment anyone can
+// know it. Afterwards stock says 40, the invoice says 50, and nothing on the
+// system remembers that the two ever disagreed. The phone app is where this is
+// normally keyed — the person opening the cartons is the only one who can — and
+// this is the desk-side mirror of the same endpoints.
+const SHORT_KINDS = [
+  ['short', 'Short', 'billed but not in the box'],
+  ['damaged', 'Damaged', 'arrived unusable, rejected at the dock'],
+  ['excess', 'Excess', 'more arrived than was billed'],
+]
+const blankShortage = (qty) => ({ kind: 'short', qty: qty != null ? String(qty) : '', variant: '', reason: '', note: '' })
+// what the breakdown still has to reach: what ARRIVED, not what was billed
+const receivedQty = (l) => +(l.received_qty != null ? l.received_qty : l.qty) || 0
+const round3 = (n) => Math.round((+n || 0) * 1000) / 1000
+
 function Purchases({ selId, setSelId, toast }) {
   const [list, setList] = useState([])
   const [grn, setGrn] = useState(null)
@@ -533,22 +758,70 @@ function Purchases({ selId, setSelId, toast }) {
   const [cats, setCats] = useState([])             // category master names
   const [splitFor, setSplitFor] = useState(null)   // line id whose breakdown is open
   const [srows, setSrows] = useState([])           // editable variant rows
+  const [shortFor, setShortFor] = useState(null)   // line id whose shortage is open
+  const [shrows, setShrows] = useState([])         // editable shortage rows
+  const [shortOpts, setShortOpts] = useState({ reasons: [] })
   const refresh = useCallback(() => api.listPurchases().then(setList), [])
   useEffect(() => { refresh() }, [refresh])
   useEffect(() => { if (selId) api.getPurchase(selId).then(setGrn); else setGrn(null) }, [selId])
   useEffect(() => { api.productOptions().then(setOpts).catch(() => {}) }, [])
   useEffect(() => { api.categories().then((c) => setCats((c.items || []).map((i) => i.name))).catch(() => {}) }, [])
-  useEffect(() => { setSplitFor(null); setSrows([]) }, [selId])
+  useEffect(() => { api.shortageOptions().then(setShortOpts).catch(() => {}) }, [])
+  useEffect(() => { setSplitFor(null); setSrows([]); setShortFor(null); setShrows([]) }, [selId])
 
   const reload = async () => { const g = await api.getPurchase(selId); setGrn(g); refresh(); return g }
 
   const post = async () => {
+    const sh = grn?.shortages || {}
+    // stated at the moment it stops being editable: posting is what turns "40
+    // arrived" into the stock figure and "10 short" into a claim
+    if (sh.claimable_qty && !window.confirm(
+      `Post this GRN?\n\n`
+      + `⚠ ${sh.claimable_qty} unit(s) recorded short or damaged (₹ ${money(sh.claimable_value)}).\n\n`
+      + `They stay OUT of stock and become a claim against the supplier — raise it as a debit note in Returns.\n`
+      + `The invoice keeps its own quantity, so the payables side still reconciles against the supplier's document.`)) return
     try {
       const r = await api.postGrn(selId)
       const sizes = r.size_rows ? ` · ${r.size_rows} size row(s)` : ''
-      toast(`✓ Posted to inventory · ${r.products_created} new, ${r.products_updated} updated${sizes}`, 'ok')
+      const short = r.short_qty ? ` · ${r.short_qty} short (₹ ${money(r.short_value)} to claim)` : ''
+      toast(`✓ Posted to inventory · ${r.products_created} new, ${r.products_updated} updated${sizes}${short}`, 'ok')
       reload()
     } catch (e) { toast('Post failed: ' + (e.detail || e.message), 'err') }
+  }
+
+  // --- shortage entry ---
+  const openShortage = (l, preset) => {
+    setSplitFor(null)
+    setShortFor(l.id)
+    setShrows(l.shortages?.length
+      ? l.shortages.map((s) => ({ kind: s.kind, qty: String(s.qty), variant: s.variant || '',
+        reason: s.reason || '', note: s.note || '' }))
+      : [blankShortage(preset)])
+  }
+  const updShrow = (i, k, v) => setShrows(shrows.map((r, j) => (j === i ? { ...r, [k]: v } : r)))
+  const saveShortage = async (l, rows) => {
+    try {
+      await api.setLineShortages(l.id, rows)
+      setShortFor(null); setShrows([])
+      await reload()
+      const missing = round3(rows.filter((r) => r.kind !== 'excess').reduce((n, r) => n + (+r.qty || 0), 0))
+      const extra = round3(rows.filter((r) => r.kind === 'excess').reduce((n, r) => n + (+r.qty || 0), 0))
+      toast(rows.length
+        ? `✓ Recorded — ${[missing && `${missing} short of ${l.qty} billed`, extra && `${extra} extra`]
+            .filter(Boolean).join(', ')}`
+        : '✓ Shortage cleared — the whole billed quantity is expected again', 'ok')
+    } catch (e) { toast(e.detail || 'Could not record the shortage', 'err') }
+  }
+  const waive = async (s) => {
+    const why = window.prompt('Accept this shortage instead of claiming it?\n\n'
+      + 'It stays on the record — this only stops it being offered on the next debit note.\n\nWhy?', 'supplier sending balance')
+    if (why === null) return
+    try { await api.waiveShortage(s.id, why); await reload(); toast('✓ Shortage waived', 'ok') }
+    catch (e) { toast(e.detail || 'Could not waive it', 'err') }
+  }
+  const unwaive = async (s) => {
+    try { await api.unwaiveShortage(s.id); await reload(); toast('✓ Back in play — claimable again', 'ok') }
+    catch (e) { toast(e.detail || 'Could not reopen it', 'err') }
   }
 
   // --- unpost: reverse a posted GRN so it can be corrected and posted again ---
@@ -620,16 +893,39 @@ function Purchases({ selId, setSelId, toast }) {
     } catch (e) { toast(e.detail || 'Code not recognised', 'err') }
   }
   const unbalanced = (grn?.unbalanced_splits || []).length
+  const shortage = grn?.shortages || { claimable_qty: 0, claimable_value: 0, open_qty: 0, open_value: 0 }
   const editable = !!grn && grn.status !== 'posted'
+  // the sidebar's scope filter, with its counts — a chip that doesn't say how
+  // many it holds makes someone click every one of them to find out
+  const [scope, setScope] = useState('all')
+  const inScope = (p) => scope === 'all' ? true
+    : scope === 'short' ? p.short_qty > 0 : p.status === scope
+  const counts = {
+    draft: list.filter((p) => p.status === 'draft').length,
+    posted: list.filter((p) => p.status === 'posted').length,
+    short: list.filter((p) => p.short_qty > 0).length,
+  }
+  const shown = list.filter(inScope)
+    .filter((p) => matches(p, q, ['supplier_name', 'invoice_number', 'status']))
   const [pcat, setPcat] = useState({})             // in-progress category per line id
   return (
     <div className="body">
       <div className="sidebar">
-        <div className="head"><h3>GRNs · {list.length}</h3></div>
-        {list.length > 0 && <SearchBox value={q} onChange={setQ} placeholder="Search supplier, invoice, status…" />}
+        <div className="head"><h3>GRNs · {shown.length}</h3></div>
+        {list.length > 0 && <>
+          <SearchBox value={q} onChange={setQ} placeholder="Search supplier, invoice, status…" />
+          <div className="toolbar"><FilterChips value={scope} onChange={setScope} options={[
+            ['draft', 'Draft', counts.draft, 'Receipts still being worked on'],
+            ['posted', 'Posted', counts.posted, 'Receipts already in stock'],
+            ['short', 'Short', counts.short, 'Receipts with goods billed but not delivered'],
+            ['all', 'All', list.length, 'Every receipt'],
+          ]} /></div>
+        </>}
         <div className="list">
           {list.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>No GRNs yet. Open a confirmed document and click “Create GRN”.</div>}
-          {list.filter((p) => matches(p, q, ['supplier_name', 'invoice_number', 'status'])).map((p) => (
+          {list.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
+            Nothing matches. {q ? 'Clear the search' : 'Try “All”'} to see the other {list.length} receipt(s).</div>}
+          {shown.map((p) => (
             <div key={p.id} className={'doc-row' + (selId === p.id ? ' sel' : '')} onClick={() => setSelId(p.id)}>
               <div className="t">{p.supplier_name || 'GRN #' + p.id}</div>
               <div className="m">
@@ -638,6 +934,10 @@ function Purchases({ selId, setSelId, toast }) {
                 <span style={{ marginLeft: 'auto' }}>₹ {money(p.grand_total)}</span>
               </div>
               <div className="m"><span>{p.line_count} lines · {p.new_products} new product(s)</span></div>
+              {p.short_qty > 0 && (
+                <div className="m"><span style={{ color: 'var(--warn)' }}>
+                  ⚠ {p.short_qty} short · ₹ {money(p.short_value)} to claim</span></div>
+              )}
             </div>
           ))}
         </div>
@@ -655,21 +955,26 @@ function Purchases({ selId, setSelId, toast }) {
               <div className="k">Taxable</div><div>₹ {money(grn.taxable_total)}</div>
               <div className="k">Grand total</div><div>₹ {money(grn.grand_total)}</div>
             </div>
-            <div className="section">
-              <h4>Lines → inventory match</h4>
+            <Section id="grn.lines" title="Lines → inventory match"
+              summary={`${grn.lines.length} line(s) · ${grn.new_products} new product(s)`}>
               <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
                 A bundle line (e.g. 250 pcs billed as one row) can be <b>broken down by
                 attributes</b> — size, colour, material, pattern, fit, type, design no. Each
                 distinct combination becomes its own product with its own QR, priced and
                 dispatched on its own. Set <b>Category</b> here and the products are created
                 already mapped, instead of arriving “unmapped” in Inventory.
+                {' '}Anything billed that <b>wasn’t in the box</b> goes under <b>Shortage</b> —
+                it stays out of stock, the invoice keeps its own quantity, and the gap becomes
+                a claim the debit note is built from.
               </div>
               {/* the category master, shared by the line cells and the breakdown editor */}
               <datalist id="essa-cats">{cats.map((c) => <option key={c} value={c} />)}</datalist>
               <table className="items">
                 <thead><tr><th>Product</th><th>QR code</th><th>Description</th>
                   <th style={{ minWidth: 150 }}>Category</th><th>HSN</th>
-                  <th style={{ textAlign: 'right' }}>Qty</th><th style={{ textAlign: 'right' }}>Rate</th>
+                  <th style={{ textAlign: 'right' }} title="What the supplier invoiced">Billed</th>
+                  <th style={{ textAlign: 'right' }} title="What actually came out of the boxes — this is what becomes stock">Received</th>
+                  <th style={{ textAlign: 'right' }}>Rate</th>
                   <th style={{ textAlign: 'right' }}>Amount</th><th>Match</th>
                   {editable && <th></th>}</tr></thead>
                 <tbody>
@@ -704,12 +1009,22 @@ function Purchases({ selId, setSelId, toast }) {
                           || <span className="badge review">unmapped</span>)}</td>
                         <td>{l.hsn}</td>
                         <td style={{ textAlign: 'right' }}>{l.qty}</td>
+                        {/* the number that becomes stock. Equal to billed unless a
+                            shortage was recorded at the dock — then the gap is the claim */}
+                        <td style={{ textAlign: 'right',
+                          color: l.has_shortage ? 'var(--warn)' : undefined,
+                          fontWeight: l.has_shortage ? 700 : undefined }}
+                          title={l.has_shortage
+                            ? `${l.qty} billed, ${l.missing_qty || 0} short/damaged`
+                              + (l.excess_qty ? `, ${l.excess_qty} extra` : '') + ` → ${l.received_qty} into stock`
+                            : 'All of it arrived'}>
+                          {l.received_qty != null ? l.received_qty : l.qty}</td>
                         <td style={{ textAlign: 'right' }}>{money(l.rate)}</td>
                         <td style={{ textAlign: 'right' }}>{money(l.amount)}</td>
                         <td>{l.splits.length
                           ? <span className={'badge ' + (l.split_balanced ? 'confirmed' : 'review')}
-                              title={(l.split_balanced ? 'Breakdown adds up to the billed qty'
-                                : `${l.split_remainder} of ${l.qty} not yet broken down`)
+                              title={(l.split_balanced ? 'Breakdown adds up to what was received'
+                                : `${l.split_remainder} of ${receivedQty(l)} received not yet broken down`)
                                 + ' — this bundle line does not receive stock itself; the rows below do'}>
                               split · {l.splits.length}{l.split_balanced ? '' : ' ⚠'}</span>
                           : <span className={'badge ' + (l.is_new_product ? 'review' : 'confirmed')}>
@@ -719,6 +1034,10 @@ function Purchases({ selId, setSelId, toast }) {
                             <button className="btn" style={{ padding: '2px 8px' }} onClick={() => (splitFor === l.id ? setSplitFor(null) : openSplit(l))}
                               title="Break the bundle into what actually arrived — size, colour, material…">
                               {splitFor === l.id ? 'Close' : l.splits.length ? 'Edit breakdown' : 'Break down'}</button>
+                            <button className="btn" style={{ padding: '2px 8px', marginLeft: 4 }}
+                              onClick={() => (shortFor === l.id ? setShortFor(null) : openShortage(l))}
+                              title="Record what the supplier billed and the boxes didn't hold — it stays out of stock and becomes a claim">
+                              {shortFor === l.id ? 'Close' : l.has_shortage ? '⚠ Shortage' : 'Shortage'}</button>
                             {!l.splits.length && (
                               <button className="btn" style={{ padding: '2px 8px', marginLeft: 4 }} onClick={() => scanInto(l, null)}
                                 title="Scan a QR code to pin this line to an existing product">⌗ QR</button>
@@ -727,9 +1046,46 @@ function Purchases({ selId, setSelId, toast }) {
                         )}
                       </tr>
 
+                      {/* what was billed and didn't arrive — never stock, always a claim */}
+                      {shortFor !== l.id && (l.shortages || []).map((s) => (
+                        <tr key={'sh' + s.id} style={{ background: 'var(--warn-bg)' }}>
+                          <td className="mono" style={{ color: 'var(--muted)' }}>—</td>
+                          <td className="mono" style={{ color: 'var(--muted)' }}>—</td>
+                          <td style={{ paddingLeft: 22 }}>
+                            <span style={{ color: s.kind === 'excess' ? 'var(--ok)' : 'var(--warn)' }}>⚠</span>
+                            {' '}<b>{s.kind}</b>{s.variant ? <span> · {s.variant}</span> : null}
+                            <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>
+                              {s.reason || 'no reason given'}{s.recorded_by ? ` · by ${s.recorded_by}` : ''}</span>
+                          </td>
+                          <td colSpan={2} className="small" style={{ color: 'var(--muted)' }}>
+                            {s.claimable ? 'never entered stock — claimable' : 'extra goods, taken into stock'}</td>
+                          <td style={{ textAlign: 'right' }}>—</td>
+                          <td style={{ textAlign: 'right', color: 'var(--warn)' }}>
+                            {s.kind === 'excess' ? '+' : '−'}{s.qty}</td>
+                          <td style={{ textAlign: 'right' }}>{money(s.rate)}</td>
+                          <td style={{ textAlign: 'right' }}>{s.claimable ? money(s.amount) : '—'}</td>
+                          {/* claiming or waiving is a decision for AFTER the goods are
+                              booked in, so it lives on the posted GRN — while the GRN is
+                              still a draft the shortage itself is what is being edited */}
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <span className={'badge ' + (s.status === 'claimed' ? 'confirmed' : 'review')}
+                              title={s.status === 'claimed' ? 'A posted debit note has claimed this'
+                                : s.status === 'waived' ? 'Accepted rather than claimed'
+                                  : 'Not yet claimed from the supplier'}>{s.status}</span>
+                            {!editable && s.claimable && s.status === 'waived' && (
+                              <button className="btn" style={{ padding: '2px 8px', marginLeft: 5 }}
+                                onClick={() => unwaive(s)} title="The supplier never did send it">Reopen</button>)}
+                            {!editable && s.claimable && (s.status === 'open' || s.status === 'part-claimed') && (
+                              <button className="btn" style={{ padding: '2px 8px', marginLeft: 5 }}
+                                onClick={() => waive(s)} title="Accept it rather than raise a debit note">Waive</button>)}
+                          </td>
+                          {editable && <td />}
+                        </tr>
+                      ))}
+
                       {/* saved variant rows — one product each once posted */}
                       {splitFor !== l.id && l.splits.map((s) => (
-                        <tr key={s.id} style={{ background: 'rgba(127,127,127,0.06)' }}>
+                        <tr key={s.id} style={{ background: 'var(--panel-2)' }}>
                           <td className="mono" style={{ color: 'var(--muted)' }}>{s.product_sku || '—'}</td>
                           <td className="mono">{s.product_barcode || s.code || <span style={{ color: 'var(--muted)' }}>on post</span>}</td>
                           <td style={{ paddingLeft: 22 }}>↳ <b>{s.label}</b>
@@ -739,6 +1095,9 @@ function Purchases({ selId, setSelId, toast }) {
                           <td className="mono" style={{ fontSize: 11 }}>{s.category || l.category
                             || <span style={{ color: 'var(--muted)' }}>auto</span>}</td>
                           <td>{l.hsn}</td>
+                          {/* a variant row IS a received quantity — the supplier never
+                              billed it separately, so there is nothing under "Billed" */}
+                          <td style={{ textAlign: 'right', color: 'var(--muted)' }}>—</td>
                           <td style={{ textAlign: 'right' }}>{s.qty}</td>
                           <td style={{ textAlign: 'right' }}>{money(s.rate)}</td>
                           <td style={{ textAlign: 'right' }}>{money(s.amount)}</td>
@@ -751,18 +1110,110 @@ function Purchases({ selId, setSelId, toast }) {
                         </tr>
                       ))}
 
+                      {/* shortage editor — what was billed and wasn't in the box */}
+                      {shortFor === l.id && (() => {
+                        const missing = round3(shrows.filter((r) => r.kind !== 'excess')
+                          .reduce((n, r) => n + (+r.qty || 0), 0))
+                        const extra = round3(shrows.filter((r) => r.kind === 'excess')
+                          .reduce((n, r) => n + (+r.qty || 0), 0))
+                        const recv = round3((+l.qty || 0) - missing + extra)
+                        const over = missing > (+l.qty || 0) + 0.001
+                        return (
+                          <tr>
+                            <td colSpan={editable ? 11 : 10} style={{ background: 'var(--warn-bg)', padding: '12px 14px' }}>
+                              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+                                <b>Shortage on “{l.description}”</b>
+                                <span className="small" style={{ color: over ? 'var(--danger)' : missing ? 'var(--warn)' : 'var(--muted)' }}>
+                                  {over ? `${missing} short of only ${l.qty} billed — more than the invoice`
+                                    : <>Into stock <b>{recv}</b> of {l.qty} billed
+                                      {missing ? ` · ${missing} short — ₹ ${money(missing * (+l.rate || 0))} to claim` : ''}
+                                      {extra ? ` · ${extra} extra` : ''}</>}
+                                </span>
+                              </div>
+                              <div className="small" style={{ color: 'var(--muted)', marginBottom: 10 }}>
+                                Normally keyed on the phone by whoever opens the cartons — they are the
+                                only ones who can know it. Recorded here, the missing units stay <b>out of
+                                stock</b>, the invoice keeps its own quantity so payables still reconcile,
+                                and the gap becomes a claim the debit note is built from.
+                              </div>
+                              <table className="items" style={{ margin: 0 }}>
+                                <thead><tr>
+                                  <th style={{ minWidth: 230 }}>What happened</th>
+                                  <th style={{ minWidth: 90, textAlign: 'right' }}>Qty</th>
+                                  <th style={{ minWidth: 170 }}>Reason</th>
+                                  <th style={{ minWidth: 150 }}>Which ones</th>
+                                  <th style={{ minWidth: 180 }}>Note</th>
+                                  <th style={{ minWidth: 90, textAlign: 'right' }}>Value</th>
+                                  <th></th></tr></thead>
+                                <tbody>{shrows.map((r, i) => (
+                                  <tr key={i}>
+                                    <td>
+                                      <select value={r.kind} onChange={(e) => updShrow(i, 'kind', e.target.value)}>
+                                        {SHORT_KINDS.map(([k, label, hint]) =>
+                                          <option key={k} value={k}>{label} — {hint}</option>)}
+                                      </select>
+                                    </td>
+                                    <td className="num"><input value={r.qty} placeholder="0"
+                                      onChange={(e) => updShrow(i, 'qty', e.target.value)} /></td>
+                                    <td><input list="essa-short-reasons" value={r.reason} placeholder="why?"
+                                      onChange={(e) => updShrow(i, 'reason', e.target.value)} /></td>
+                                    <td><input value={r.variant} placeholder="e.g. S / White — if known"
+                                      onChange={(e) => updShrow(i, 'variant', e.target.value)} /></td>
+                                    <td><input value={r.note} placeholder="anything the office should see"
+                                      onChange={(e) => updShrow(i, 'note', e.target.value)} /></td>
+                                    <td className="num" style={{ color: 'var(--muted)' }}>
+                                      {r.kind === 'excess' ? '—' : money((+r.qty || 0) * (+l.rate || 0))}</td>
+                                    <td><button className="btn" style={{ padding: '2px 7px' }} title="Remove this row"
+                                      onClick={() => setShrows(shrows.filter((_, j) => j !== i))}>×</button></td>
+                                  </tr>
+                                ))}</tbody>
+                              </table>
+                              <datalist id="essa-short-reasons">
+                                {(shortOpts.reasons || []).map((v) => <option key={v} value={v} />)}
+                              </datalist>
+                              <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
+                                <button className="btn" onClick={() => setShrows([...shrows, blankShortage()])}>+ add row</button>
+                                <div style={{ flex: 1 }} />
+                                {l.has_shortage && (
+                                  <button className="btn" onClick={() => saveShortage(l, [])}
+                                    title="No shortage after all — the whole billed quantity is expected in stock again">
+                                    Clear shortage</button>
+                                )}
+                                <button className="btn" onClick={() => { setShortFor(null); setShrows([]) }}>Cancel</button>
+                                <button className="btn primary" disabled={over}
+                                  onClick={() => saveShortage(l, shrows.filter((r) => +r.qty > 0))}>Save shortage</button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })()}
+
                       {/* attribute-breakdown editor */}
                       {splitFor === l.id && (
                         <tr>
-                          <td colSpan={editable ? 10 : 9} style={{ background: 'rgba(127,127,127,0.08)', padding: '12px 14px' }}>
+                          <td colSpan={editable ? 11 : 10} style={{ background: 'var(--panel-2)', padding: '12px 14px' }}>
                             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
                               <b>Breakdown of “{l.description}”</b>
-                              <span className="small" style={{ color: sameQty(splitSum, l.qty) ? 'var(--ok, #2a8)' : 'var(--muted)' }}>
-                                {splitSum} of {l.qty} assigned{sameQty(splitSum, l.qty) ? ' ✓' : ` · ${Math.round((l.qty - splitSum) * 1000) / 1000} left`}
+                              {/* the target is what ARRIVED — once a shortage is recorded the
+                                  rows only have to reach that, which is the point of recording it */}
+                              <span className="small" style={{ color: sameQty(splitSum, receivedQty(l)) ? 'var(--ok)' : 'var(--muted)' }}>
+                                {splitSum} of {receivedQty(l)} assigned
+                                {l.has_shortage ? ` (${l.qty} billed, ${l.missing_qty} short)` : ''}
+                                {sameQty(splitSum, receivedQty(l)) ? ' ✓' : ` · ${round3(receivedQty(l) - splitSum)} left`}
                               </span>
                               <span className="small" style={{ color: 'var(--muted)' }}>
                                 — fill only the attributes that differ; each row becomes one product
                               </span>
+                              {/* the moment someone notices the sizes don't add up: "the rest
+                                  never came" is an answer, and it must be easier than inventing
+                                  the difference to make the total work */}
+                              {!l.has_shortage && splitSum > 0 && splitSum < receivedQty(l) && (
+                                <button className="catchip" style={{ color: 'var(--warn)' }}
+                                  title="Record the difference as short — it stays out of stock and becomes a claim"
+                                  onClick={() => openShortage(l, round3(receivedQty(l) - splitSum))}>
+                                  {round3(receivedQty(l) - splitSum)} not in the box?
+                                </button>
+                              )}
                             </div>
                             <div style={{ overflowX: 'auto' }}>
                               <table className="items" style={{ margin: 0, minWidth: 1340 }}>
@@ -819,15 +1270,26 @@ function Purchases({ selId, setSelId, toast }) {
                 </tbody>
               </table>
               <div className="items-foot"><span>{grn.lines.length} lines</span>
+                {shortage.claimable_qty > 0 && (
+                  <span style={{ color: 'var(--warn)' }}>
+                    ⚠ {shortage.claimable_qty} short or damaged · ₹ {money(shortage.claimable_value)} to claim
+                    {shortage.open_qty > 0 && shortage.open_qty !== shortage.claimable_qty
+                      ? ` (₹ ${money(shortage.open_value)} unclaimed)` : ''}
+                  </span>
+                )}
                 <span>{grn.new_products} will be created as new products</span></div>
-            </div>
+            </Section>
           </div>
           <div className="actionbar">
             <span className="small">{grn.status === 'posted'
-              ? 'Posted — stock has been updated in Inventory. Unpost to correct it, then post again.'
+              ? shortage.open_qty > 0
+                ? `Posted. ⚠ ${shortage.open_qty} unit(s) short — ₹ ${money(shortage.open_value)} still to claim. Raise it in Returns, or waive it on the row.`
+                : 'Posted — stock has been updated in Inventory. Unpost to correct it, then post again.'
               : unbalanced
-                ? `⚠ ${unbalanced} line(s) have a breakdown that doesn’t add up to the billed quantity — fix them before posting.`
-                : 'Posting creates new products, adds inward stock, and updates weighted-average cost.'}</span>
+                ? `⚠ ${unbalanced} line(s) have a breakdown that doesn’t add up to what was received — fix them, or record what didn’t arrive as a shortage.`
+                : shortage.claimable_qty > 0
+                  ? `Posting takes in ${grn.lines.reduce((n, l) => n + receivedQty(l), 0)} unit(s). The ${shortage.claimable_qty} short stay out of stock and become a claim against the supplier.`
+                  : 'Posting creates new products, adds inward stock, and updates weighted-average cost.'}</span>
             <div className="spacer" />
             {grn.status === 'posted'
               ? <button className="btn" onClick={unpost}
@@ -894,6 +1356,7 @@ function Inventory({ toast }) {
   const reloadUnits = async () => { if (units) setUnits(await api.productUnits(units.product.id)) }
   // printing is recorded, so the sheet has to be reloaded to show the new counts
   const printUnits = (ids) => {
+    if (units?.can_print === false) { toast(units.print_block, 'err'); return }
     window.open(api.unitLabelsUrl(units.product.id, ids), '_blank')
     setTimeout(reloadUnits, 1200)
   }
@@ -912,9 +1375,49 @@ function Inventory({ toast }) {
     try { const p = await api.lookupByCode(c); await open(p.id); setScan(''); toast(`✓ ${p.sku} · ${p.description}`, 'ok') }
     catch (err) { toast(err.detail || `No product for “${c}”`, 'err') }
   }
+  // --- inventory integrity: what is stock, and what only looks like it ---
+  const [scanRep, setScanRep] = useState(null)
+  const rescan = useCallback(() => api.integrityScan().then(setScanRep).catch(() => {}), [])
+  useEffect(() => { rescan() }, [rescan])
+  const repairInventory = async () => {
+    let plan
+    try { plan = await api.integrityRepair(true) }
+    catch (e) { toast(e.detail || 'Could not check what needs repairing', 'err'); return }
+    const w = plan.would_remove
+    const lines = [
+      w.products.length && `• ${w.products.length} product(s): ${w.products.slice(0, 6).join(', ')}${w.products.length > 6 ? '…' : ''}`,
+      w.units.length && `• ${w.units.length} QR / piece code(s)`,
+      w.bundles.length && `• ${w.bundles.length} carton label(s): ${w.bundles.slice(0, 6).join(', ')}${w.bundles.length > 6 ? '…' : ''}`,
+    ].filter(Boolean).join('\n')
+    if (!window.confirm(
+      'Remove these records permanently?\n\n' + lines
+      + '\n\nEvery one of them traces back to no GRN and carries no stock movement, so'
+      + ' nothing that a receipt created is affected. Products kept at zero stock after an'
+      + ' unpost are NOT touched — they hold warehouse detailing.\n\nThis cannot be undone.')) return
+    try {
+      const r = await api.integrityRepair(false)
+      toast(`✓ Removed ${r.counts.units} piece code(s), ${r.counts.bundles} carton(s), ${r.counts.products} product(s)`, 'ok')
+      await rescan(); load()
+    } catch (e) { toast(e.detail || 'Repair failed', 'err') }
+  }
+
   const [labelScope, setLabelScope] = useState('detailed')
   const detailedCount = products.filter((p) => p.detailed).length
   const labelCount = labelScope === 'detailed' ? detailedCount : products.length
+  // --- the three controls: search (q), scope chips, and the filter panel ---
+  const [stockScope, setStockScope] = useState('all')
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [catFilter, setCatFilter] = useState('')
+  const [supFilter, setSupFilter] = useState('')
+  const activeFilters = [catFilter, supFilter].filter(Boolean).length
+  const inStockScope = (p) => stockScope === 'all' ? true
+    : stockScope === 'detailed' ? !!p.detailed
+      : stockScope === 'pending' ? !p.detailed
+        : stockScope === 'instock' ? p.stock_qty > 0 : !(p.stock_qty > 0)
+  const visible = products.filter(inStockScope)
+    .filter((p) => !catFilter || (p.category || '').toLowerCase().includes(catFilter.toLowerCase()))
+    .filter((p) => !supFilter || (p.supplier_name || '').toLowerCase().includes(supFilter.toLowerCase()))
+    .filter((p) => matches(p, q, ['sku', 'barcode', 'description', 'hsn', 'supplier_name', 'category', 'size']))
   const printLabels = () => {
     if (!products.length) { toast('No products yet — post a GRN to create products first.', 'err'); return }
     if (labelCount === 0) { toast('No detailed products yet. Detail products first, or switch to “All products”.', 'err'); return }
@@ -929,30 +1432,107 @@ function Inventory({ toast }) {
           <Stat label="Stock value (avg cost)" value={summary ? '₹ ' + money(summary.total_stock_value) : '—'} />
           <Stat label="Detailed (mobile)" value={summary ? `${summary.detailed ?? 0} / ${summary.product_count}` : '—'} />
         </div>
-        <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="toolbar">
           <SearchBox value={q} onChange={setQ} placeholder="Search SKU, barcode, description, HSN, supplier…"
-            style={{ maxWidth: 420 }} />
+            style={{ width: 340 }} />
+          <FilterChips value={stockScope} onChange={setStockScope} options={[
+            ['all', 'All', products.length, 'Every product in stock'],
+            ['detailed', 'Detailed', detailedCount, 'Inspected and recorded on the phone'],
+            ['pending', 'To detail', products.length - detailedCount, 'Still waiting to be looked at'],
+            ['instock', 'In stock', products.filter((p) => p.stock_qty > 0).length, 'Quantity above zero'],
+            ['zero', 'Zero', products.filter((p) => !(p.stock_qty > 0)).length, 'Nothing on hand'],
+          ]} />
+          <FilterButton open={filtersOpen} onToggle={() => setFiltersOpen((o) => !o)} active={activeFilters} />
+          <div className="spacer" />
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <input value={scan} onChange={(e) => setScan(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') lookup() }}
-              placeholder="🔍 Scan / enter barcode or SKU…" style={{ width: 240 }} />
-            <button className="btn" onClick={() => lookup()}>Fetch</button>
+              title="Scan a QR, piece label or barcode to jump straight to that product"
+              placeholder="⌗ Scan a code…" style={{ width: 190 }} />
+            <button className="btn" onClick={() => lookup()} title="Open the scanned product">Fetch</button>
+            <button className="btn" onClick={printLabels}
+              title={`Print a label sheet for ${labelCount} product(s) — set which in Filters`}>
+              🖨 Labels ({labelCount})</button>
           </div>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto' }}>
-            <select value={labelScope} onChange={(e) => setLabelScope(e.target.value)} title="Which products to print labels for">
+        </div>
+        <FilterPanel open={filtersOpen} active={activeFilters}
+          onClear={() => { setCatFilter(''); setSupFilter(''); setLabelScope('detailed') }}>
+          <div className="field" style={{ width: 190 }}><label>Category</label>
+            <input list="inv-cats" value={catFilter} placeholder="any category"
+              onChange={(e) => setCatFilter(e.target.value)} />
+            <datalist id="inv-cats">{[...new Set(products.map((p) => p.category).filter(Boolean))].map((c) => <option key={c} value={c} />)}</datalist>
+          </div>
+          <div className="field" style={{ width: 190 }}><label>Supplier</label>
+            <input list="inv-sups" value={supFilter} placeholder="any supplier"
+              onChange={(e) => setSupFilter(e.target.value)} />
+            <datalist id="inv-sups">{[...new Set(products.map((p) => p.supplier_name).filter(Boolean))].map((s) => <option key={s} value={s} />)}</datalist>
+          </div>
+          <div className="field" style={{ width: 190 }}><label>Label sheet covers</label>
+            <select value={labelScope} onChange={(e) => setLabelScope(e.target.value)}
+              title="Which products the Labels button prints">
               <option value="detailed">Detailed only ({detailedCount})</option>
               <option value="all">All products ({products.length})</option>
             </select>
-            <button className="btn" onClick={printLabels}
-              title="Open a print-ready barcode-label sheet">🖨 Print labels ({labelCount})</button>
           </div>
-        </div>
+        </FilterPanel>
+
+        {/* Inventory Repair. Only shown when there is something to say — a clean
+            database should not carry a permanent maintenance banner. */}
+        {scanRep && !scanRep.clean && (
+          <div className="section" style={{ borderColor: 'var(--danger)', marginBottom: 14 }}>
+            <h4 style={{ color: 'var(--danger)' }}>⚠ Inventory mismatch detected</h4>
+            <div className="small" style={{ color: 'var(--muted)', margin: '-4px 0 10px' }}>
+              Stock is only ever created by posting a GRN, so a record that traces back to
+              no posted GRN is not stock. These are hidden from Inventory, excluded from the
+              valuation and blocked from printing labels — a stale code carries a real-looking
+              QR and scans like any other, so it can’t be left in circulation.
+            </div>
+            <table className="items" style={{ margin: 0 }}>
+              <thead><tr><th>What</th><th style={{ textAlign: 'right' }}>Count</th><th>Meaning</th></tr></thead>
+              <tbody>
+                {[
+                  ['Orphan products', scanRep.counts.orphan_products,
+                    'no GRN line, no breakdown row, no stock movement — nothing that could have created them survives'],
+                  ['Orphan QR / piece codes', scanRep.counts.orphan_units,
+                    'piece codes with no posted receipt behind them'],
+                  ['Orphan cartons', scanRep.counts.orphan_bundles,
+                    'bundle labels for a receipt that no longer exists'],
+                  ['SKUs with a QR count mismatch', scanRep.counts.unit_mismatches,
+                    'live piece codes don’t equal what the GRNs received'],
+                ].filter(([, n]) => n > 0).map(([what, n, why]) => (
+                  <tr key={what}><td><b>{what}</b></td>
+                    <td style={{ textAlign: 'right' }}>{n}</td>
+                    <td className="small" style={{ color: 'var(--muted)' }}>{why}</td></tr>
+                ))}
+                {scanRep.counts.unposted_products > 0 && (
+                  <tr><td>Kept after unpost</td>
+                    <td style={{ textAlign: 'right' }}>{scanRep.counts.unposted_products}</td>
+                    <td className="small" style={{ color: 'var(--muted)' }}>
+                      excluded from stock but <b>never deleted</b> — these hold detailing recorded
+                      by hand in the warehouse</td></tr>
+                )}
+              </tbody>
+            </table>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
+              <span className="small" style={{ color: 'var(--muted)' }}>
+                {scanRep.counts.removable > 0
+                  ? `${scanRep.counts.removable} record(s) can be removed. Nothing traceable to a GRN is touched.`
+                  : 'Nothing is safe to delete automatically — the counts above need a human decision.'}
+              </span>
+              <div style={{ flex: 1 }} />
+              <button className="btn" onClick={() => api.integrityScan().then(setScanRep)}>Re-scan</button>
+              <button className="btn" disabled={!scanRep.counts.removable} onClick={repairInventory}
+                title="Delete only records that trace back to no GRN at all">
+                Repair ({scanRep.counts.removable})</button>
+            </div>
+          </div>
+        )}
         <table className="items">
           <thead><tr><th style={{ width: 46 }}>QR</th><th>SKU</th><th>Description</th><th>Size</th><th>Category</th><th>HSN</th><th>Supplier</th>
             <th style={{ textAlign: 'right' }}>Stock</th><th style={{ textAlign: 'right' }}>Avg cost</th>
             <th style={{ textAlign: 'right' }}>Value</th></tr></thead>
           <tbody>
-            {products.filter((p) => matches(p, q, ['sku', 'barcode', 'description', 'hsn', 'supplier_name', 'category', 'size'])).map((p) => (
+            {visible.map((p) => (
               <tr key={p.id} style={{ cursor: 'pointer', background: detail?.id === p.id ? 'var(--panel-2)' : '' }} onClick={() => open(p.id)}>
                 {/* The real QR, small enough for a list and still scannable off the
                     screen. `lazy` keeps a long list from firing a request per row. */}
@@ -971,17 +1551,37 @@ function Inventory({ toast }) {
                 {/* the quantity is a way in, not just a number: 8 pcs means eight
                     individually coded garments, and this is where you see them */}
                 <td style={{ textAlign: 'right' }}>
-                  <button className="qtylink" title={`Show the ${p.stock_qty} individual piece codes`}
-                    onClick={(e) => { e.stopPropagation(); openUnits(p) }}>
-                    {p.stock_qty} {p.uom}
+                  {/* Negative stock is a real condition (more dispatched than held)
+                      and it must look wrong, not sit in the column as an ordinary
+                      figure — a minus sign alone is easy to read straight past. */}
+                  <button className="qtylink" onClick={(e) => { e.stopPropagation(); openUnits(p) }}
+                    style={p.stock_qty < 0 ? { color: 'var(--danger)', fontWeight: 700 } : undefined}
+                    title={p.stock_qty < 0
+                      ? `Negative stock — more has been dispatched than was received. Click to see the piece codes.`
+                      : `Show the ${p.stock_qty} individual piece codes`}>
+                    {p.stock_qty < 0 ? '⚠ ' : ''}{p.stock_qty} {p.uom}
                   </button>
                 </td>
                 <td style={{ textAlign: 'right' }}>{money(p.avg_cost)}</td>
-                <td style={{ textAlign: 'right' }}>₹ {money(p.stock_value)}</td>
+                <td style={{ textAlign: 'right', color: p.stock_value < 0 ? 'var(--danger)' : undefined }}>
+                  ₹ {money(p.stock_value)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        {/* A list shortened by a filter must say so, or it reads as stock that
+            has gone missing — the one misreading this screen cannot afford. */}
+        {products.length > 0 && (
+          <div className="small" style={{ padding: '10px 0', color: 'var(--muted)' }}>
+            Showing {visible.length} of {products.length} product(s)
+            {visible.length < products.length && <>
+              {' — '}
+              <button className="link" style={{ padding: 0 }}
+                onClick={() => { setQ(''); setStockScope('all'); setCatFilter(''); setSupFilter('') }}>
+                clear search and filters</button>
+            </>}
+          </div>
+        )}
       </div>
 
       {/* Clicking a quantity opens the pieces behind it: one inventory record of 8
@@ -1021,41 +1621,65 @@ function Inventory({ toast }) {
                 </p>
               ) : (
                 <div className="piece-grid">
-                  {units.units.map((u) => (
-                    <div key={u.id} className="piece">
-                      <img src={api.unitQrSvgUrl(u.id, 3)} alt={u.code} loading="lazy" />
-                      <div className="code">{u.code}</div>
-                      <div className="small" style={{ fontSize: 10 }}>
-                        {u.print_count ? `printed ${u.print_count}×` : 'not printed'}
+                  {units.units.map((u) => {
+                    // a dead code is indistinguishable from a live one — same format,
+                    // same QR, same product — so it has to be marked, not left to the eye
+                    const dead = u.state && u.state !== 'posted'
+                    return (
+                      <div key={u.id} className="piece"
+                        style={dead ? { opacity: 0.55, borderColor: 'var(--danger)' } : undefined}>
+                        <img src={api.unitQrSvgUrl(u.id, 3)} alt={u.code} loading="lazy" />
+                        <div className="code">{u.code}</div>
+                        <div className="small" style={{ fontSize: 10 }}>
+                          {dead
+                            ? <span style={{ color: 'var(--danger)' }}>no posted GRN</span>
+                            : (u.print_count ? `printed ${u.print_count}×` : 'not printed')}
+                        </div>
+                        <div className="acts">
+                          <button className="btn" onClick={() => setZoom(u)} title="Show this code large">View</button>
+                          <button className="btn" disabled={dead} onClick={() => printOne(u)}
+                            title={dead ? 'This code belongs to no posted GRN — it is left over, not a garment'
+                              : u.print_count ? 'Print this label again' : 'Print this label'}>
+                            {u.print_count ? 'Reprint' : 'Print'}
+                          </button>
+                        </div>
                       </div>
-                      <div className="acts">
-                        <button className="btn" onClick={() => setZoom(u)} title="Show this code large">View</button>
-                        <button className="btn" onClick={() => printOne(u)}
-                          title={u.print_count ? 'Print this label again' : 'Print this label'}>
-                          {u.print_count ? 'Reprint' : 'Print'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>
 
             <div className="piece-foot">
               <span className="small">
-                Every piece carries the same SKU and its own code, so a scan says which
-                garment it is — not just which product.
+                {units.can_print === false
+                  /* Say the number, say the mismatch, say what to do. A label goes on a
+                     garment, so printing more of them than there are garments is not a
+                     tidiness problem — it is tags on the floor with nothing to attach
+                     them to, every one of which scans as real. */
+                  ? <span style={{ color: 'var(--danger)' }}>
+                      ⚠ {units.print_block}
+                      {units.orphan_units > 0 && <> {' '}<b>{units.orphan_units}</b> of the codes
+                        shown belong to no posted GRN — Inventory → <b>Repair</b> removes them.</>}
+                    </span>
+                  : <>Every piece carries the same SKU and its own code, so a scan says which
+                      garment it is — not just which product.</>}
               </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-                {units.serialisable && units.count < Math.round(units.product.stock_qty || 0) && (
+                {units.serialisable && units.can_print !== false
+                  && units.count < Math.round(units.product.stock_qty || 0) && (
                   <button className="btn" onClick={makeUnits}
                     title="Create the missing codes for stock received before per-piece codes existed">
                     Generate missing ({Math.round(units.product.stock_qty) - units.count})
                   </button>
                 )}
                 {units.units.length > 0 && (
-                  <button className="btn primary" onClick={() => printUnits(null)}>
-                    🖨 Print all {units.count}
+                  <button className="btn primary" disabled={units.can_print === false}
+                    onClick={() => printUnits(null)}
+                    title={units.can_print === false
+                      ? 'Inventory mismatch detected — ' + units.print_block
+                      : `Print a label for each of the ${units.live_units ?? units.count} pieces`}>
+                    🖨 Print all {units.live_units ?? units.count}
                   </button>
                 )}
               </div>
@@ -1360,6 +1984,8 @@ function StockOutward({ toast }) {
   const [products, setProducts] = useState([])
   const [sel, setSel] = useState(null)
   const [creating, setCreating] = useState(false)
+  // the sidebar's scope filter — the same chips Stock Inward and Returns use
+  const [scope, setScope] = useState('all')
   // Where the goods are being picked from. WAREHOUSE is the normal case; MULTI is
   // for a dispatch drawn from more than one place, so the paperwork says so
   // instead of naming a single location that isn't the whole truth.
@@ -1367,6 +1993,11 @@ function StockOutward({ toast }) {
   const [form, setForm] = useState({ date: '', to_destination: '', packed_by: '',
     from_location: 'WAREHOUSE', lines: [] })
   const [q, setQ] = useState('')
+  // derived AFTER the state it reads — a const referenced above its own
+  // declaration is a temporal-dead-zone throw, and in a render that is the whole
+  // tab going blank rather than one broken value
+  const shown = list.filter((o) => scope === 'all' || o.status === scope)
+    .filter((o) => matches(o, q, ['to_destination', 'code', 'status']))
   const [zoom, setZoom] = useState(null)          // a product card, opened large
   const [cards, setCards] = useState({})          // product_id -> full record, for the draft rows
   const refresh = useCallback(() => api.listOutwards().then(setList), [])
@@ -1437,9 +2068,19 @@ function StockOutward({ toast }) {
       <div className="sidebar">
         <div className="head"><h3>Outwards · {list.length}</h3>
           <button className="btn primary" style={{ padding: '4px 10px' }} onClick={() => { setCreating(true); setSel(null) }}>+ New</button></div>
-        {list.length > 0 && <SearchBox value={q} onChange={setQ} placeholder="Search destination, code, status…" />}
+        {list.length > 0 && <>
+          <SearchBox value={q} onChange={setQ} placeholder="Search destination, code, status…" />
+          <div className="toolbar"><FilterChips value={scope} onChange={setScope} options={[
+            ['draft', 'Draft', list.filter((o) => o.status === 'draft').length, 'Prepared, nothing dispatched yet'],
+            ['posted', 'Sent', list.filter((o) => o.status === 'posted').length, 'Dispatched, not yet accepted'],
+            ['received', 'Received', list.filter((o) => o.status === 'received').length, 'Accepted at the destination'],
+            ['all', 'All', list.length, 'Every dispatch'],
+          ]} /></div>
+        </>}
         <div className="list">
-          {list.filter((o) => matches(o, q, ['to_destination', 'code', 'status'])).map((o) => (
+          {list.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
+            Nothing matches. Try “All” or clear the search.</div>}
+          {shown.map((o) => (
             <div key={o.id} className={'doc-row' + (sel === o.id && !creating ? ' sel' : '')} onClick={() => { setSel(o.id); setCreating(false) }}>
               <div className="t">{o.to_destination || o.code}</div>
               <div className="m"><span className={'badge ' + (o.status === 'posted' ? 'confirmed' : 'uploaded')}>{o.status}</span>
@@ -1453,7 +2094,7 @@ function StockOutward({ toast }) {
           <div className="editor">
             <h2 style={{ marginTop: 0 }}>New Stock Outward</h2>
             <div className="grid" style={{ maxWidth: 640 }}>
-              <div className="field"><label>Date</label><input value={form.date} placeholder="2026-07-15" onChange={(e) => setForm({ ...form, date: e.target.value })} /></div>
+              <DateField label="Date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} />
               <div className="field"><label>To (destination)</label><input value={form.to_destination} placeholder="e.g. Tasjue Silks, Tirupur" onChange={(e) => setForm({ ...form, to_destination: e.target.value })} /></div>
               <div className="field"><label>Packed by</label><input value={form.packed_by} onChange={(e) => setForm({ ...form, packed_by: e.target.value })} /></div>
               <div className="field"><label>From location</label>
@@ -1462,8 +2103,7 @@ function StockOutward({ toast }) {
                   {FROM_LOCATIONS.map((l) => <option key={l} value={l}>{l}</option>)}
                 </select></div>
             </div>
-            <div className="section" style={{ marginTop: 18 }}>
-              <h4>Items to dispatch</h4>
+            <Section id="outward.new-items" title="Items to dispatch" style={{ marginTop: 18 }}>
               <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
                 Scan the garment’s QR (or a piece label) to add it — the full record
                 appears below, so the size and colour going into the box are the ones
@@ -1501,7 +2141,7 @@ function StockOutward({ toast }) {
                 })}</tbody>
               </table>
               <button className="btn" style={{ marginTop: 8 }} onClick={addLine}>+ add item</button>
-            </div>
+            </Section>
           </div>
           <div className="actionbar"><div className="spacer" />
             <button className="btn" onClick={() => setCreating(false)}>Cancel</button>
@@ -1527,7 +2167,7 @@ function StockOutward({ toast }) {
                   placeholder="Scan a garment to check it belongs to this dispatch…" />
               </div>
             )}
-            <div className="section"><h4>Items</h4>
+            <Section id="outward.items" title="Items">
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ textAlign: 'right' }}>Qty</th>
@@ -1552,7 +2192,7 @@ function StockOutward({ toast }) {
                 {detail.status === 'received' && <span>accepted <b>{detail.accepted_qty}</b></span>}
                 {detail.shortfall > 0 && <span style={{ color: 'var(--danger)' }}>short <b>{detail.shortfall}</b></span>}
               </div>
-            </div>
+            </Section>
           </div>
           <div className="actionbar">
             <span className="small">{detail.status === 'received'
@@ -1630,11 +2270,13 @@ function StockInward({ toast }) {
       <div className="sidebar">
         <div className="head"><h3>Stock Inward · {list.length}</h3></div>
         <div style={{ display: 'flex', gap: 6, padding: '0 12px 8px' }}>
-          {[['posted', 'Awaiting'], ['received', 'Received'], ['all', 'All']].map(([k, label]) => (
-            <button key={k} className={'btn' + (scope === k ? ' primary' : '')} style={{ padding: '3px 9px', fontSize: 11 }}
-              onClick={() => { setScope(k); setSel(null); setDetail(null) }}>{label}</button>
-          ))}
         </div>
+        <div className="toolbar"><FilterChips value={scope}
+          onChange={(k) => { setScope(k); setSel(null); setDetail(null) }} options={[
+            ['posted', 'Awaiting', null, 'Dispatched and waiting to be counted in'],
+            ['received', 'Received', null, 'Already accepted'],
+            ['all', 'All', null, 'Every transfer'],
+          ]} /></div>
         {list.length > 0 && <SearchBox value={q} onChange={setQ} placeholder="Search destination, code…" />}
         <div className="list">
           {list.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
@@ -1679,7 +2321,7 @@ function StockInward({ toast }) {
                 </div>
               </div>
             )}
-            <div className="section"><h4>{editable ? 'Check the goods in' : 'Goods received'}</h4>
+            <Section id="inward.lines" title={editable ? 'Check the goods in' : 'Goods received'}>
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ textAlign: 'right' }}>Sent</th>
@@ -1691,7 +2333,7 @@ function StockInward({ toast }) {
                   const short = Math.round((l.qty - a) * 1000) / 1000
                   return (
                     <ProductRow key={l.id} line={l} onZoom={setZoom}
-                      style={hit === l.id ? { background: 'rgba(47,182,163,0.12)' } : undefined}>
+                      style={hit === l.id ? { background: 'var(--info-bg)' } : undefined}>
                       <td style={{ textAlign: 'right' }}>{l.qty}</td>
                       <td className="num">{editable
                         ? <input value={acc[l.id] ?? ''} placeholder={l.qty}
@@ -1710,14 +2352,13 @@ function StockInward({ toast }) {
                 {detail.total_qty - counted > 0 && (
                   <span style={{ color: 'var(--danger)' }}>short <b>{Math.round((detail.total_qty - counted) * 1000) / 1000}</b></span>)}
               </div>
-            </div>
+            </Section>
           </div>
           {editable ? (
             <div className="actionbar">
               <div className="field" style={{ width: 170 }}><label>Received by</label>
                 <input value={who} onChange={(e) => setWho(e.target.value)} placeholder="who took it in" /></div>
-              <div className="field" style={{ width: 130 }}><label>Date</label>
-                <input value={date} placeholder="2026-07-22" onChange={(e) => setDate(e.target.value)} /></div>
+              <DateField label="Date" width={150} value={date} onChange={setDate} />
               <div className="spacer" />
               <span className="small">A shortfall is recorded as a transfer discrepancy — the stock already
                 left the warehouse, so settle it with a stock adjustment once it is traced.</span>
@@ -1741,10 +2382,9 @@ function StockInward({ toast }) {
 }
 function Stat({ label, value }) {
   return (
-    <div style={{ flex: 1, background: 'var(--panel)', border: '1px solid var(--line)',
-      borderRadius: 10, padding: '14px 18px' }}>
-      <div style={{ color: 'var(--muted)', fontSize: 12 }}>{label}</div>
-      <div style={{ fontSize: 24, fontWeight: 700, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+    <div className="stat">
+      <div className="lbl">{label}</div>
+      <div className="val">{value}</div>
     </div>
   )
 }
@@ -1811,8 +2451,7 @@ function Payments({ toast }) {
               <Stat label="Outstanding" value={'₹ ' + money(ledger.outstanding)} />
               <Stat label="Pending bills" value={bills.length} />
             </div>}
-            <div className="section">
-              <h4>Pending bills — select, then set cash / discount / TDS / debit</h4>
+            <Section id="pay.pending-bills" title="Pending bills — select, then set cash / discount / TDS / debit">
               {bills.length === 0 ? <p className="small">No outstanding invoices for this supplier.</p> : (
                 <table className="items">
                   <thead><tr><th></th><th>Invoice</th><th>Date</th><th style={{ textAlign: 'right' }}>Days</th>
@@ -1840,10 +2479,9 @@ function Payments({ toast }) {
                 <span>{totals.n} selected</span><span>cash <b>₹{money(totals.cash)}</b></span>
                 <span>disc <b>₹{money(totals.disc)}</b></span><span>TDS <b>₹{money(totals.tds)}</b></span>
                 <span>debit <b>₹{money(totals.debit)}</b></span><span>settling <b>₹{money(totals.settle)}</b></span></div>}
-            </div>
+            </Section>
 
-            {ledger && ledger.rows.length > 0 && <div className="section">
-              <h4>Supplier ledger</h4>
+            {ledger && ledger.rows.length > 0 && <Section id="pay.ledger" title="Supplier ledger" summary={`${ledger.rows.length} row(s)`}>
               <table className="items"><thead><tr><th>Date</th><th>Type</th><th>Ref</th>
                 <th style={{ textAlign: 'right' }}>Debit</th><th style={{ textAlign: 'right' }}>Credit</th>
                 <th style={{ textAlign: 'right' }}>Balance</th></tr></thead>
@@ -1855,7 +2493,7 @@ function Payments({ toast }) {
                     <td style={{ textAlign: 'right' }}><b>{money(r.balance)}</b></td></tr>
                 ))}</tbody>
               </table>
-            </div>}
+            </Section>}
           </div>
           <div className="actionbar">
             <div className="field" style={{ width: 120 }}><label>Mode</label>
@@ -1863,7 +2501,7 @@ function Payments({ toast }) {
                 style={{ width: '100%', background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 7, padding: '7px' }}>
                 <option>NEFT</option><option>RTGS</option><option>Cash</option><option>Cheque</option></select></div>
             <div className="field" style={{ width: 140 }}><label>Ref / UTR</label><input value={head.ref_no} onChange={(e) => setHead({ ...head, ref_no: e.target.value })} /></div>
-            <div className="field" style={{ width: 120 }}><label>Date</label><input value={head.date} placeholder="2026-07-15" onChange={(e) => setHead({ ...head, date: e.target.value })} /></div>
+            <DateField label="Date" width={150} value={head.date} onChange={(v) => setHead({ ...head, date: v })} />
             <div className="spacer" />
             <div style={{ textAlign: 'right', marginRight: 8 }}><div className="small">paying</div><b style={{ fontSize: 18 }}>₹ {money(totals.cash)}</b></div>
             <button className="btn primary" disabled={totals.n === 0} onClick={record}>Record Payment</button>
@@ -1879,6 +2517,7 @@ function Returns({ toast }) {
   const [list, setList] = useState([])
   const [purchases, setPurchases] = useState([])
   const [picking, setPicking] = useState(false)
+  const [scope, setScope] = useState('all')
   const [detail, setDetail] = useState(null)
   const [qtys, setQtys] = useState({})
   const [reason, setReason] = useState('')
@@ -1889,21 +2528,34 @@ function Returns({ toast }) {
   useEffect(() => { refresh() }, [refresh])
 
   const openPicker = () => { api.listPurchases().then(p => setPurchases(p.filter(x => x.status === 'posted'))); setPicking(true); setDetail(null) }
-  const startReturn = async (purchaseId) => {
-    const r = await api.buildReturn(purchaseId)
-    setDetail(r); setPicking(false); setQtys({}); setReason(''); setDate('')
+  // Received lines come back at 0 — how many go back is still a decision. Shortage
+  // lines come back at the quantity counted at the dock, because that one isn't:
+  // the pieces are missing and by how many was settled when the boxes were opened.
+  // Seeding the editor from the server keeps that pre-fill visible and postable.
+  const seedQtys = (r) => Object.fromEntries((r.lines || [])
+    .filter((l) => +l.qty > 0).map((l) => [l.id, String(l.qty)]))
+  const startReturn = async (purchaseId, shortagesOnly) => {
+    try {
+      const r = await api.buildReturn(purchaseId, shortagesOnly)
+      setDetail(r); setPicking(false); setQtys(seedQtys(r)); setReason(shortagesOnly ? 'Short delivery' : ''); setDate('')
+      if (shortagesOnly && !(r.shortage_lines || 0)) toast('No unclaimed shortage on that invoice', 'err')
+    } catch (e) { toast(e.detail || 'Could not raise the debit note', 'err') }
   }
-  const openReturn = (id) => api.getReturn(id).then(r => { setDetail(r); setPicking(false); setQtys({}) })
+  const openReturn = (id) => api.getReturn(id).then(r => { setDetail(r); setPicking(false); setQtys(seedQtys(r)) })
   const post = async () => {
     try {
       const line_qtys = {}; Object.entries(qtys).forEach(([k, v]) => { if (+v > 0) line_qtys[k] = +v })
       if (!Object.keys(line_qtys).length) { toast('Set a return qty on at least one line', 'err'); return }
       const res = await api.postReturn(detail.id, { reason, date, line_qtys })
-      toast(`✓ Debit note ${detail.code} posted · ₹${money(res.debit_total)}`, 'ok')
+      const short = res.shortage_lines
+        ? ` · ${res.shortage_lines} shortage claim(s), ₹${money(res.shortage_value)} (no stock moved)` : ''
+      toast(`✓ Debit note ${detail.code} posted · ₹${money(res.debit_total)}${short}`, 'ok')
       api.getReturn(detail.id).then(setDetail); refresh()
     } catch (e) { toast('Post failed: ' + (e.detail || e.message), 'err') }
   }
   const editable = detail && detail.status !== 'posted'
+  const shown = list.filter((r) => scope === 'all' || r.status === scope)
+    .filter((r) => matches(r, q, ['supplier_name', 'invoice_number', 'code', 'status']))
   const draftTotal = detail ? detail.lines.reduce((s, l) => s + (+qtys[l.id] || 0) * (l.rate || 0), 0) : 0
 
   return (
@@ -1911,9 +2563,18 @@ function Returns({ toast }) {
       <div className="sidebar">
         <div className="head"><h3>Returns · {list.length}</h3>
           <button className="btn primary" style={{ padding: '4px 10px' }} onClick={openPicker}>+ New</button></div>
-        {list.length > 0 && <SearchBox value={q} onChange={setQ} placeholder="Search supplier, invoice, code…" />}
+        {list.length > 0 && <>
+          <SearchBox value={q} onChange={setQ} placeholder="Search supplier, invoice, code…" />
+          <div className="toolbar"><FilterChips value={scope} onChange={setScope} options={[
+            ['draft', 'Draft', list.filter((r) => r.status === 'draft').length, 'Debit notes not yet posted'],
+            ['posted', 'Posted', list.filter((r) => r.status === 'posted').length, 'Raised against the supplier'],
+            ['all', 'All', list.length, 'Every debit note'],
+          ]} /></div>
+        </>}
         <div className="list">
-          {list.filter((r) => matches(r, q, ['supplier_name', 'invoice_number', 'code', 'status'])).map((r) => (
+          {list.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
+            Nothing matches. Try “All” or clear the search.</div>}
+          {shown.map((r) => (
             <div key={r.id} className={'doc-row' + (detail?.id === r.id && !picking ? ' sel' : '')} onClick={() => openReturn(r.id)}>
               <div className="t">{r.supplier_name}</div>
               <div className="m"><span className={'badge ' + (r.status === 'posted' ? 'confirmed' : 'uploaded')}>{r.status}</span>
@@ -1926,12 +2587,27 @@ function Returns({ toast }) {
       {picking ? (
         <div className="editor">
           <h2 style={{ marginTop: 0 }}>New Purchase Return — pick a reference invoice</h2>
+          <div className="small" style={{ margin: '-6px 0 12px', color: 'var(--muted)' }}>
+            An invoice with goods <b>short at receiving</b> can be claimed on its own — the
+            quantities were counted when the boxes were opened, so that debit note writes
+            itself and nobody counts again.
+          </div>
           <table className="items"><thead><tr><th>Supplier</th><th>Invoice</th><th>Date</th>
-            <th style={{ textAlign: 'right' }}>Grand total</th><th></th></tr></thead>
+            <th style={{ textAlign: 'right' }}>Grand total</th>
+            <th style={{ textAlign: 'right' }}>Short</th><th></th></tr></thead>
             <tbody>{purchases.map(p => (
               <tr key={p.id}><td>{p.supplier_name}</td><td className="mono">{p.invoice_number}</td>
                 <td>{p.invoice_date}</td><td style={{ textAlign: 'right' }}>₹ {money(p.grand_total)}</td>
-                <td><button className="btn" style={{ padding: '3px 10px' }} onClick={() => startReturn(p.id)}>Return →</button></td></tr>
+                <td style={{ textAlign: 'right', color: p.short_qty ? 'var(--warn)' : 'var(--muted)' }}
+                  title={p.short_qty ? `${p.short_qty} unit(s) counted short or damaged at receiving` : ''}>
+                  {p.short_qty ? `${p.short_qty} · ₹ ${money(p.short_value)}` : '—'}</td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  {p.short_qty > 0 && (
+                    <button className="btn" style={{ padding: '3px 10px', marginRight: 5 }}
+                      title="Debit note for the goods that never arrived — quantities already counted at the dock"
+                      onClick={() => startReturn(p.id, true)}>Claim shortage →</button>
+                  )}
+                  <button className="btn" style={{ padding: '3px 10px' }} onClick={() => startReturn(p.id)}>Return →</button></td></tr>
             ))}</tbody>
           </table>
         </div>
@@ -1954,7 +2630,7 @@ function Returns({ toast }) {
                 </span>
               </div>
             </div>
-            <div className="section"><h4>{editable ? 'Set return quantity per line' : 'Returned lines'}</h4>
+            <Section id="return.lines" title={editable ? 'Set return quantity per line' : 'Returned lines'}>
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ textAlign: 'right' }}>Received</th>
@@ -1969,14 +2645,22 @@ function Returns({ toast }) {
                   if (!editable && !l.qty) return null
                   const over = editable && +q > (l.available_qty ?? Infinity)
                   return (
-                    <ProductRow key={l.id} line={l} onZoom={setZoom}>
-                      <td style={{ textAlign: 'right' }} title={l.already_returned
-                        ? `${l.already_returned} already returned on an earlier debit note`
-                        : 'Received on this invoice'}>
-                        {l.purchased_qty || '—'}
+                    <ProductRow key={l.id} line={l} onZoom={setZoom}
+                      style={l.is_shortage_claim ? { background: 'var(--warn-bg)' } : undefined}>
+                      <td style={{ textAlign: 'right' }} title={l.is_shortage_claim
+                        ? `${l.purchased_qty} counted short at receiving — this line claims goods that never arrived, so posting it moves no stock`
+                        : l.already_returned
+                          ? `${l.already_returned} already returned on an earlier debit note`
+                          : 'Received on this invoice'}>
+                        {l.is_shortage_claim
+                          ? <span className="badge review">{l.purchased_qty} short</span>
+                          : (l.purchased_qty || '—')}
                         {l.already_returned > 0 && <span className="small" style={{ color: 'var(--warn)' }}> −{l.already_returned}</span>}
                       </td>
-                      <td style={{ textAlign: 'right' }}>{l.on_hand}</td>
+                      {/* never arrived, so there is no stock figure and posting won't touch one */}
+                      <td style={{ textAlign: 'right' }}>{l.is_shortage_claim
+                        ? <span className="small" style={{ color: 'var(--muted)' }} title="These units never entered stock">no stock</span>
+                        : l.on_hand}</td>
                       <td style={{ textAlign: 'right' }} title={{
                         grn_variant_rate: 'The rate this variant was received at on the GRN breakdown',
                         invoice_line_rate: 'The rate the supplier billed on this invoice line',
@@ -1996,15 +2680,21 @@ function Returns({ toast }) {
                 })}</tbody>
               </table>
               <div className="items-foot">
-                <span>{detail.lines.length} received item(s)</span>
+                <span>{detail.lines.length - (detail.shortage_lines || 0)} received item(s)</span>
+                {detail.shortage_lines > 0 && (
+                  <span style={{ color: 'var(--warn)' }}>
+                    ⚠ {detail.shortage_lines} shortage claim(s) · goods that never arrived, already counted
+                    at the dock — posting these reduces the payable and moves no stock
+                  </span>
+                )}
                 <span>a bundle broken down at GRN comes back as its variants — each at its own received cost</span>
               </div>
-            </div>
+            </Section>
           </div>
           {editable && (
             <div className="actionbar">
               <div className="field" style={{ width: 180 }}><label>Reason</label><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. damaged / wrong item" /></div>
-              <div className="field" style={{ width: 120 }}><label>Date</label><input value={date} placeholder="2026-07-15" onChange={(e) => setDate(e.target.value)} /></div>
+              <DateField label="Date" width={150} value={date} onChange={setDate} />
               <div className="spacer" />
               <span className="small">Posting reverses stock and raises a debit note against the invoice,
                 valued at the GRN cost of each item.</span>
@@ -2019,26 +2709,61 @@ function Returns({ toast }) {
 }
 
 // ---------- reports ----------
-const REPORT_GROUPS = { stock: 'Stock', purchase: 'Purchase', finance: 'Finance', master: 'Masters' }
+// Group headings and their order come from the server (services/reports.GROUPS),
+// so the screen and the catalogue can never drift apart. This is only the
+// fallback for a server too old to serve them.
+const REPORT_GROUPS = {
+  transport: 'Transport Reports', invoice: 'Invoice Reports', stock: 'Stock Reports',
+  purchase: 'Purchase Reports', purchase_return: 'Purchase Return Reports',
+  outward: 'Outward Reports', master: 'Other Reports',
+}
+const PARAM_LABEL = { date_from: 'From', date_to: 'To', as_on: 'As on' }
+
 function Reports() {
   const [cat, setCat] = useState([])
+  const [groups, setGroups] = useState([])
   const [key, setKey] = useState(null)
   const [rep, setRep] = useState(null)
   const [q, setQ] = useState('')
-  useEffect(() => { api.reportCatalogue().then((c) => { setCat(c); if (c[0]) pick(c[0].key) }) }, [])
-  const pick = (k) => { setKey(k); setRep(null); setQ(''); api.runReport(k).then(setRep) }
+  const [filters, setFilters] = useState({})     // the values behind a report's params
+  const [busy, setBusy] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  useEffect(() => {
+    api.reportGroups().then(setGroups).catch(() => {})
+    api.reportCatalogue().then((c) => { setCat(c); if (c[0]) pick(c[0].key) })
+  }, [])
+  const entry = cat.find((r) => r.key === key)
+  // a filter only counts if the selected report declares it — switching from a
+  // date-ranged report to one without dates must not keep filtering silently
+  const active = (f = filters, e = entry) =>
+    Object.fromEntries(Object.entries(f).filter(([k, v]) => v && (e?.params || []).includes(k)))
+  const load = (k, f) => {
+    setBusy(true)
+    const e = cat.find((r) => r.key === k) || entry
+    return api.runReport(k, active(f, e)).then(setRep).finally(() => setBusy(false))
+  }
+  const pick = (k) => { setKey(k); setRep(null); setQ(''); load(k, filters) }
+  const setFilter = (p, v) => {
+    const next = { ...filters, [p]: v }
+    setFilters(next)
+    load(key, next)
+  }
   const rows = rep ? rep.rows.filter((row) => !q || rep.columns.some((c) => String(row[c] ?? '').toLowerCase().includes(q.toLowerCase()))) : []
   const grouped = cat.reduce((a, r) => { (a[r.group] = a[r.group] || []).push(r); return a }, {})
+  const order = groups.length ? groups : Object.entries(REPORT_GROUPS).map(([k2, n]) => ({ key: k2, name: n }))
+  const dateParams = (entry?.params || []).filter((p) => PARAM_LABEL[p])
   const fmt = (v) => typeof v === 'number' ? v.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : (v ?? '')
   return (
     <div className="body">
       <div className="sidebar">
-        <div className="head"><h3>Reports</h3></div>
+        <div className="head"><h3>Reports · {cat.length}</h3></div>
         <div className="list" style={{ padding: '6px 0' }}>
-          {Object.entries(grouped).map(([g, items]) => (
-            <div key={g}>
-              <div style={{ padding: '8px 14px 4px', fontSize: 11, textTransform: 'uppercase', color: 'var(--muted)', letterSpacing: '.5px' }}>{REPORT_GROUPS[g] || g}</div>
-              {items.map(r => (
+          {order.filter((g) => grouped[g.key]?.length).map((g) => (
+            <div key={g.key}>
+              <div style={{ padding: '10px 14px 4px', fontSize: 11, textTransform: 'uppercase', color: 'var(--muted)', letterSpacing: '.5px' }}>
+                {g.name} <span style={{ opacity: 0.6 }}>({grouped[g.key].length})</span>
+              </div>
+              {grouped[g.key].map(r => (
                 <div key={r.key} className={'doc-row' + (key === r.key ? ' sel' : '')} style={{ padding: '8px 14px' }} onClick={() => pick(r.key)}>
                   <div className="t" style={{ fontWeight: key === r.key ? 700 : 400 }}>{r.name}</div>
                 </div>
@@ -2050,19 +2775,48 @@ function Reports() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         {rep ? (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', borderBottom: '1px solid var(--line)' }}>
-              <h2 style={{ margin: 0 }}>{cat.find(r => r.key === key)?.name}</h2>
-              <div style={{ marginLeft: 16, display: 'flex', gap: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', borderBottom: '1px solid var(--line)', flexWrap: 'wrap', gap: 8 }}>
+              <h2 style={{ margin: 0 }}>{entry?.name}</h2>
+              <div style={{ marginLeft: 16, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                 {Object.entries(rep.totals).map(([k, v]) => (
                   <span key={k} className="small">{k.replace(/_/g, ' ')}: <b style={{ color: 'var(--text)' }}>{fmt(v)}</b></span>
                 ))}
               </div>
               <div className="spacer" style={{ flex: 1 }} />
-              <SearchBox value={q} onChange={setQ} placeholder="Filter rows…" style={{ width: 220, marginRight: 10 }} />
-              <a className="btn" href={api.reportCsvUrl(key)} target="_blank" rel="noreferrer">Export CSV</a>
+              <SearchBox value={q} onChange={setQ} placeholder="Search these rows…" style={{ width: 200 }} />
+              {/* Only the filters this report declares — see services/reports.run.
+                  Behind the same ⛭ control every other screen uses, so a report
+                  with a date range and a list with a status scope are the same
+                  gesture. Reports with no filters simply don't show the button. */}
+              {dateParams.length > 0 && (
+                <FilterButton open={filtersOpen} onToggle={() => setFiltersOpen((o) => !o)}
+                  active={Object.keys(active()).length} />
+              )}
+              {/* the export carries the same filters, so it can't quietly hand back
+                  a different set of rows than the one on screen */}
+              <a className="btn" href={api.reportCsvUrl(key, active())} target="_blank"
+                rel="noreferrer" title="Download exactly these rows, with these filters">Export CSV</a>
             </div>
+            {dateParams.length > 0 && (
+              <div style={{ padding: '0 22px' }}>
+                <FilterPanel open={filtersOpen} active={Object.keys(active()).length}
+                  onClear={() => { setFilters({}); load(key, {}) }}
+                  hint={`This report accepts: ${dateParams.map((p) => PARAM_LABEL[p]).join(', ')}`}>
+                  {dateParams.map((p) => (
+                    <DateField key={p} label={PARAM_LABEL[p]} width={150}
+                      value={filters[p] || ''} onChange={(v) => setFilter(p, v)} />
+                  ))}
+                </FilterPanel>
+              </div>
+            )}
             <div style={{ flex: 1, overflow: 'auto', padding: '0 22px 22px' }}>
-              <div className="small" style={{ padding: '8px 0', color: 'var(--muted)' }}>{rows.length} of {rep.rows.length} rows{q ? ` matching “${q}”` : ''}</div>
+              {rep.note && (
+                <div className="small" style={{ padding: '10px 0 2px', color: 'var(--muted)' }}>
+                  ⓘ {rep.note}
+                </div>
+              )}
+              <div className="small" style={{ padding: '8px 0', color: 'var(--muted)' }}>
+                {busy ? 'running…' : <>{rows.length} of {rep.rows.length} rows{q ? ` matching “${q}”` : ''}</>}</div>
               <table className="items">
                 <thead><tr>{rep.columns.map(c => <th key={c} style={{ textAlign: typeof rep.rows[0]?.[c] === 'number' ? 'right' : 'left' }}>{c.replace(/_/g, ' ')}</th>)}</tr></thead>
                 <tbody>{rows.map((row, i) => (
@@ -2118,7 +2872,7 @@ function VisionSettings({ onClose, onChanged, toast }) {
 
   const on = st?.vision_enabled
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 100,
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(42,35,32,.45)', zIndex: 100,
       display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
       <div style={{ width: 540, background: 'var(--panel)', border: '1px solid var(--line)',
         borderRadius: 12, padding: 24 }} onClick={(e) => e.stopPropagation()}>
@@ -2134,7 +2888,7 @@ function VisionSettings({ onClose, onChanged, toast }) {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0',
           padding: '10px 12px', borderRadius: 8,
-          background: on ? '#12241b' : 'var(--panel-2)', border: '1px solid ' + (on ? '#24503a' : 'var(--line)') }}>
+          background: on ? 'var(--ok-bg)' : 'var(--panel-2)', border: '1px solid ' + (on ? 'var(--ok-line)' : 'var(--line)') }}>
           <span style={{ fontSize: 20 }}>{on ? '🟢' : '⚪'}</span>
           <div>
             <div style={{ fontWeight: 600 }}>{on ? 'Vision mode is ON' : 'Vision mode is OFF'}</div>
@@ -2248,7 +3002,7 @@ function LRField({ spec, form, set, opts, lists }) {
   const v = form[key] ?? ''
   const style = o.wide ? { gridColumn: '1 / -1' } : null
   const choices = o.fixed || (o.list ? (opts[o.list] || []) : (lists[o.src] || []))
-  const req = o.req ? <span style={{ color: 'var(--danger, #c0392b)' }}> *</span> : null
+  const req = o.req ? <span style={{ color: 'var(--danger)' }}> *</span> : null
 
   if (type === 'charge') {
     // checkbox + amount, as on their form. The box says the charge APPLIES at
@@ -2288,9 +3042,14 @@ function LRField({ spec, form, set, opts, lists }) {
                     placeholder="pick one, or type a new name" />
                   <datalist id={'lrl-' + key}>{choices.map((c) => <option key={c} value={c} />)}</datalist>
                 </>
-              : <input value={v} type={type === 'date' ? 'date' : 'text'}
-                  inputMode={type === 'num' ? 'decimal' : undefined}
-                  onChange={(e) => set(key, e.target.value)} />}
+              : type === 'date'
+                /* a saved row may hold a date read off a register page in the
+                   page's own format — DateField shows what it can and never
+                   discards what it can't */
+                ? <DateField inline value={v} onChange={(x) => set(key, x)} />
+                : <input value={v} type="text"
+                    inputMode={type === 'num' ? 'decimal' : undefined}
+                    onChange={(e) => set(key, e.target.value)} />}
     </div>
   )
 }
@@ -2433,31 +3192,38 @@ function LRSearchPanel({ onResults, onClear, toast }) {
     catch { toast('Search failed', 'err') }
   }
   const clear = () => { setF({}); onClear() }
+  // "all" is the absence of a filter, not a filter — counting it would show 2
+  // active on a panel nobody has touched
+  const activeCount = Object.entries(f)
+    .filter(([, v]) => v && v !== 'all').length
   return (
-    <div className="section">
-      <h4>Search the register</h4>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+    <Section id="lr.search" title="Search the register"
+      summary={activeCount ? `${activeCount} filter(s) set` : 'no filters set'}>
+      <FilterPanel open active={activeCount} onClear={clear} onApply={run}
+        hint={activeCount
+          ? `${activeCount} filter(s) — Apply, or press Enter in any box`
+          : 'Set any of these, then Apply. Enter runs it too.'}>
         {LR_SEARCH_FIELDS.map(([k, label, w]) => (
           <div key={k} className="field" style={{ width: w }}><label>{label}</label>
             <input value={f[k] || ''} onChange={(e) => set(k, e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') run() }} /></div>
         ))}
-        <div className="field" style={{ width: 140 }}><label>Received from</label>
-          <input type="date" value={f.date_from || ''} onChange={(e) => set('date_from', e.target.value)} /></div>
-        <div className="field" style={{ width: 140 }}><label>to</label>
-          <input type="date" value={f.date_to || ''} onChange={(e) => set('date_to', e.target.value)} /></div>
+        <DateField label="Received from" width={140} value={f.date_from || ''}
+          onChange={(v) => set('date_from', v)} />
+        <DateField label="to" width={140} value={f.date_to || ''}
+          onChange={(v) => set('date_to', v)} />
         <div className="field" style={{ width: 120 }}><label>Received</label>
-          <select value={f.received || 'all'} onChange={(e) => set('received', e.target.value)}>
+          <select value={f.received || 'all'} onChange={(e) => set('received', e.target.value)}
+            title="Whether the warehouse has taken the consignment in">
             <option value="all">All</option><option value="pending">Not received</option>
             <option value="received">Received</option></select></div>
         <div className="field" style={{ width: 120 }}><label>Invoice</label>
-          <select value={f.status || 'all'} onChange={(e) => set('status', e.target.value)}>
+          <select value={f.status || 'all'} onChange={(e) => set('status', e.target.value)}
+            title="Whether an invoice has been matched to the consignment">
             <option value="all">All</option><option value="linked">Linked</option>
             <option value="unlinked">Not linked</option></select></div>
-        <button className="btn primary" onClick={run}>🔍 Search</button>
-        <button className="btn" onClick={clear}>Clear</button>
-      </div>
-    </div>
+      </FilterPanel>
+    </Section>
   )
 }
 
@@ -2473,6 +3239,8 @@ const LR_COLS = [
   ['paid_topay', 'Paid/ToPay', 80], ['freight_amount', 'Freight', 70],
   ['item', 'Item', 110],
 ]
+//: which of those are dates — picked from a calendar, never retyped
+const LR_DATE_COLS = new Set(['recv_date', 'lr_date', 'inv_date'])
 // The SAVED register is laid out to fit one screen rather than scroll sideways.
 // Two devices get it there without dropping anything:
 //   * `sub` puts a second, muted line in the same cell, so a value and its date
@@ -2595,9 +3363,11 @@ function LREntryView({ toast }) {
   const qtySum = toSave.reduce((s, x) => s + (+x.qty || 0), 0)
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 22px', borderBottom: '1px solid var(--line)' }}>
-        <h2 style={{ margin: 0 }}>LR Entry</h2>
-        <span className="small">Import a register page and the rows are read automatically — or key one consignment in.</span>
+      {/* the subtitle yields before any control does — a clipped button is a
+          control someone cannot reach, a clipped sentence is only a shorter one */}
+      <div className="pagehead">
+        <h2>LR Entry</h2>
+        <span className="small pagesub">Import a register page and the rows are read automatically — or key one consignment in.</span>
         <div style={{ flex: 1 }} />
         <button className="btn" onClick={() => setSearching((s) => !s)}
           title="Find entries by LR / invoice number, supplier, date, rack…">🔍 Search</button>
@@ -2626,7 +3396,7 @@ function LREntryView({ toast }) {
         )}
         {note && <div className="warnbox" style={{ marginBottom: 14 }}><h4 style={{ border: 'none', margin: 0, color: 'var(--muted)' }}>{note}</h4></div>}
         {dup && (dup.duplicates > 0 || dup.doubtful > 0) && (
-          <div className="warnbox" style={{ marginBottom: 14, borderColor: '#e0a800' }}>
+          <div className="warnbox" style={{ marginBottom: 14, borderColor: 'var(--warn)' }}>
             <h4 style={{ border: 'none', margin: 0 }}>
               {dup.duplicates > 0 && <>🚫 {dup.duplicates} exact duplicate{dup.duplicates > 1 ? 's' : ''} (identical to an existing row) — skipped. </>}
               {dup.doubtful > 0 && <>⚠ {dup.doubtful} doubtful row{dup.doubtful > 1 ? 's' : ''} — same LR/Invoice but other values differ; the changed cells are highlighted, please verify before saving. </>}
@@ -2641,36 +3411,40 @@ function LREntryView({ toast }) {
         )}
         {rows.length > 0 && (
           <>
-            <div className="section"><h4>Extracted rows — review &amp; save</h4>
+            <Section id="lr.extracted" title="Extracted rows — review & save">
               <div style={{ overflowX: 'auto' }}>
                 <table className="items" style={{ minWidth: 1560 }}>
                   <thead><tr><th style={{ minWidth: 70 }}>Status</th>{LR_COLS.map(([k, l, w]) => <th key={k} style={{ minWidth: w }}>{l}</th>)}<th></th></tr></thead>
                   <tbody>{rows.map((r, i) => (
-                    <tr key={i} style={isExact(r) ? { background: 'rgba(200,60,60,0.12)', opacity: 0.6 }
-                      : isDoubtful(r) ? { background: 'rgba(224,168,0,0.10)' } : undefined}>
+                    <tr key={i} style={isExact(r) ? { background: 'var(--danger-bg)', opacity: 0.6 }
+                      : isDoubtful(r) ? { background: 'var(--warn-bg)' } : undefined}>
                       <td style={{ whiteSpace: 'nowrap', fontSize: 11, fontWeight: 600 }}>
-                        {isExact(r) ? <span style={{ color: '#c0392b' }} title="Identical to an existing row — will be skipped">🚫 duplicate</span>
-                          : isDoubtful(r) ? <span style={{ color: '#b8860b' }}
+                        {isExact(r) ? <span style={{ color: 'var(--danger)' }} title="Identical to an existing row — will be skipped">🚫 duplicate</span>
+                          : isDoubtful(r) ? <span style={{ color: 'var(--warn)' }}
                               title={'Same LR/Invoice, but these differ from the saved row:\n' +
                                 (r._diffs || []).map(f => `${f}: saved “${r._conflict_with?.[f] ?? ''}” vs this “${r[f] ?? ''}”`).join('\n')}>⚠ verify</span>
-                          : <span style={{ color: 'var(--ok, #2a8)' }}>new</span>}
+                          : <span style={{ color: 'var(--ok)' }}>new</span>}
                       </td>
                       {LR_COLS.map(([k]) => {
                         const changed = isDoubtful(r) && (r._diffs || []).includes(k)
-                        return <td key={k} style={changed ? { background: 'rgba(224,168,0,0.28)' } : undefined}
+                        return <td key={k} style={changed ? { background: 'var(--warn-line)' } : undefined}
                           title={changed ? `Saved row has: ${r._conflict_with?.[k] ?? '(blank)'}` : undefined}>
-                          <input value={r[k] ?? ''} onChange={(e) => upd(i, k, e.target.value)} /></td>
+                          {/* vision reads a register page's dates in whatever the page
+                              used; the picker both corrects them and normalises them */}
+                          {LR_DATE_COLS.has(k)
+                            ? <DateField inline value={r[k]} onChange={(v) => upd(i, k, v)} />
+                            : <input value={r[k] ?? ''} onChange={(e) => upd(i, k, e.target.value)} />}</td>
                     })}<td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => del(i)}>×</button></td></tr>
                   ))}</tbody>
                 </table>
               </div>
               <div className="items-foot"><span>{toSave.length} to save{nDoubtful ? ` (incl. ${nDoubtful} to verify)` : ''}{rows.length !== toSave.length ? ` · ${rows.length - toSave.length} exact dup skipped` : ''}</span><span>Σ qty <b>{qtySum}</b></span>
                 <button className="btn primary" style={{ marginLeft: 'auto' }} onClick={save}>Save {toSave.length} Entr{toSave.length === 1 ? 'y' : 'ies'}</button></div>
-            </div>
+            </Section>
           </>
         )}
         {shown.length > 0 && (
-          <div className="section"><h4>{found ? 'Search results' : 'Saved LR entries'} · {shown.length}</h4>
+          <Section id="lr.saved" title={`${found ? 'Search results' : 'Saved LR entries'} · ${shown.length}`} summary={`${shown.length} row(s)`}>
             <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
               Paid/ToPay and Freight are editable in place — complete or correct them when the lorry
               delivers and the money changes hands. <b>Open</b> any row to edit the whole entry or
@@ -2693,8 +3467,8 @@ function LREntryView({ toast }) {
                   <tr key={r.id}>
                     <td style={{ fontSize: 11, fontWeight: 600 }}>
                       {r.mismatches && r.mismatches.length
-                        ? <span style={{ color: '#b8860b' }} title={r.mismatches.map(m => `${m.field}: register ${m.register} vs invoice ${m.invoice}`).join('\n')}>⚠ conflict</span>
-                        : r.matched ? <span style={{ color: 'var(--ok, #2a8)' }}>✓ linked</span>
+                        ? <span style={{ color: 'var(--warn)' }} title={r.mismatches.map(m => `${m.field}: register ${m.register} vs invoice ${m.invoice}`).join('\n')}>⚠ conflict</span>
+                        : r.matched ? <span style={{ color: 'var(--ok)' }}>✓ linked</span>
                         : <span style={{ color: 'var(--muted)' }}>pending</span>}
                     </td>
                     {LR_REG_COLS.map((c) => {
@@ -2720,7 +3494,7 @@ function LREntryView({ toast }) {
                         : (r[k] ?? '')
                       return (
                         <td key={k} className={cls}
-                          style={m ? { background: 'rgba(224,168,0,0.18)' } : undefined}
+                          style={m ? { background: 'var(--warn-bg)' } : undefined}
                           title={m ? `Register: ${m.register}\nInvoice: ${m.invoice}` : undefined}>
                           <div className="cellmain">{val}{m ? ' ⚠' : ''}</div>
                           {c.sub && r[c.sub] ? <div className="cellsub">{r[c.sub]}</div> : null}
@@ -2745,7 +3519,7 @@ function LREntryView({ toast }) {
                 ))}</tbody>
               </table>
             </div>
-          </div>
+          </Section>
         )}
         {found && found.rows.length === 0 && (
           <div className="empty" style={{ marginTop: 20 }}>No entries match those filters.</div>
@@ -2881,7 +3655,10 @@ function Masters({ toast }) {
 
 // ---------- app shell ----------
 export default function App() {
-  const [tab, setTab] = useState('lr')
+  // the open tab survives a reload — a warehouse screen is left on the module
+  // someone works in, and losing it on every refresh is a small daily tax
+  const [tab, setTabState] = useState(() => localStorage.getItem('essa_tab') || 'lr')
+  const setTab = (t) => { setTabState(t); try { localStorage.setItem('essa_tab', t) } catch { /* private mode */ } }
   const [status, setStatus] = useState(null)
   const [docs, setDocs] = useState([])
   const [sel, setSel] = useState(null)
@@ -2890,6 +3667,11 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [scanning, setScanning] = useState(null)   // {url, name} while extracting
   const [docQuery, setDocQuery] = useState('')
+  const [docScope, setDocScope] = useState('all')
+  // scope chip + search, applied together — the same pairing every list uses
+  const shownDocs = docs
+    .filter((d) => docScope === 'all' || d.status === docScope)
+    .filter((d) => matches(d, docQuery, ['supplier_name', 'filename', 'invoice_number', 'status']))
   const [authed, setAuthed] = useState(false)
   const [authChecked, setAuthChecked] = useState(false)
   const [user, setUser] = useState('')
@@ -2965,8 +3747,21 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Brand and account actions on one row, navigation on its own below it.
+          Eleven modules and five controls never fitted on a single line — the
+          last button was clipped at 1600px — and squeezing them is the wrong
+          trade: navigation is the most-used thing on the screen. */}
       <div className="topbar">
         <div className="brand">Essa <span>·</span> Document Intake<small>{status?.company?.name} — invoice → data, trained per supplier</small></div>
+        <div className="spacer" />
+        <button className={'pill ' + (providers.claude_vision ? 'on' : 'off')} style={{ cursor: 'pointer' }}
+          title="Configure vision extraction" onClick={() => setShowSettings(true)}>
+          👁 vision {providers.claude_vision ? 'on' : 'off'} ⚙</button>
+        <span className={'pill ' + (providers.tesseract ? 'on' : 'off')}>OCR {providers.tesseract ? 'on' : 'off'}</span>
+        <label className="btn primary uploadbtn">Upload invoice<input type="file" accept="image/*,.pdf" onChange={onUpload} /></label>
+        <button className="btn" title={'Signed in as ' + user} onClick={logout}>Logout</button>
+      </div>
+      <div className="navbar">
         <div className="tabs">
           <button className={tab === 'lr' ? 'active' : ''} onClick={() => setTab('lr')}>LR Entry</button>
           <button className={tab === 'documents' ? 'active' : ''} onClick={() => setTab('documents')}>Invoice Entry</button>
@@ -2980,13 +3775,6 @@ export default function App() {
           <button className={tab === 'suppliers' ? 'active' : ''} onClick={() => setTab('suppliers')}>Suppliers</button>
           {role === 'admin' && <button className={tab === 'masters' ? 'active' : ''} onClick={() => setTab('masters')}>Masters</button>}
         </div>
-        <div className="spacer" />
-        <button className={'pill ' + (providers.claude_vision ? 'on' : 'off')} style={{ cursor: 'pointer', background: 'none' }}
-          title="Configure vision extraction" onClick={() => setShowSettings(true)}>
-          👁 vision {providers.claude_vision ? 'on' : 'off'} ⚙</button>
-        <span className={'pill ' + (providers.tesseract ? 'on' : 'off')}>OCR {providers.tesseract ? 'on' : 'off'}</span>
-        <label className="btn primary uploadbtn">Upload invoice<input type="file" accept="image/*,.pdf" onChange={onUpload} /></label>
-        <button className="btn" style={{ padding: '7px 12px' }} title={'Signed in as ' + user} onClick={logout}>Logout</button>
       </div>
 
       {tab === 'lr' ? (
@@ -2997,11 +3785,21 @@ export default function App() {
             <div className="head"><h3>Documents · {docs.length}</h3>
               {docs.length > 0 && <button className="btn" style={{ padding: '3px 9px', fontSize: 11 }}
                 onClick={clearAll} title="Delete all documents & transaction data">Clear all</button>}</div>
-            {docs.length > 0 && <SearchBox value={docQuery} onChange={setDocQuery}
-              placeholder="Search supplier, invoice, status…" />}
+            {docs.length > 0 && <>
+              <SearchBox value={docQuery} onChange={setDocQuery}
+                placeholder="Search supplier, invoice, status…" />
+              <div className="toolbar"><FilterChips value={docScope} onChange={setDocScope} options={[
+                ['needs_review', 'To review', docs.filter((d) => d.status === 'needs_review').length, 'Read, but something did not reconcile'],
+                ['confirmed', 'Confirmed', docs.filter((d) => d.status === 'confirmed').length, 'Corrected and saved'],
+                ['posted', 'Posted', docs.filter((d) => d.status === 'posted').length, 'Already booked into stock'],
+                ['all', 'All', docs.length, 'Every document'],
+              ]} /></div>
+            </>}
             <div className="list">
               {docs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>No documents. Click “Upload invoice” to add one.</div>}
-              {docs.filter((d) => matches(d, docQuery, ['supplier_name', 'filename', 'invoice_number', 'status'])).map((d) => (
+              {docs.length > 0 && shownDocs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
+                Nothing matches. Try “All” or clear the search.</div>}
+              {shownDocs.map((d) => (
                 <div key={d.id} className={'doc-row' + (sel === d.id ? ' sel' : '')} onClick={() => setSel(d.id)}>
                   <div className="t" style={{ display: 'flex', alignItems: 'center' }}>
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.supplier_name || d.filename}</span>
