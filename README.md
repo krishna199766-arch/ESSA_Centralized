@@ -70,6 +70,24 @@ Invoice Entry, Inventory Entry and Stock Inward in the reference application.
   Depreciation, Job Work Outward/Inward, Invoice vs Purchase Order, Retail Stock
   Analysis, and Purchase Return (Cancelled). Each needs a data model first — see
   [ARCHITECTURE.md](ARCHITECTURE.md) §9.
+
+  **Ask a question instead of picking one.** The bar at the top of Reports takes a
+  question in English or Tamil — *"what did we buy last month"*, *"நிலுவை பாக்கி
+  எவ்வளவு"* — routes it to one of the 33 reports above and fills that report's
+  filters. It does not generate SQL: each report already knows what it is counting
+  and says so in its note, and a generated query would return a figure that
+  disagrees with the same figure elsewhere in the app with no way to tell which is
+  wrong. What it read is always shown above the table, including any filter the
+  report could not honour (nothing filters by supplier, so that is narrowed after
+  the fact and labelled as such). With no API key set it still works, matching on
+  keywords instead of reading the sentence, and says which of the two answered.
+
+  **🎤 or type.** The mic uses the browser's own recogniser — no audio leaves the
+  machine and there is no extra key or cost — with an EN / தமிழ் switch, because it
+  has to be told which language to expect. It needs a **secure context**, so it
+  works at `http://localhost:8000` on the machine running the app but *not* over
+  the LAN at `http://<computer-ip>:8000`; on that origin the button says so rather
+  than failing silently. Typing works everywhere.
 - **Suppliers** — suppliers and their learned formats.
 - **Masters** — product categories, agents, transporters, and the dropdown lists
   the LR Entry form uses (purchase managers; plus the fixed LR mode, transfer
@@ -563,13 +581,33 @@ essa-intake/
 │  │  │  └─ reports.py      report catalogue (stock, purchase, finance, masters)
 │  │  ├─ routers/           documents · suppliers · purchases · inventory
 │  │  │                     · outward · payments · returns · reports API
+│  │  ├─ pos_mount.py       loads the retail shop (Flask) and mounts it at /pos
 │  │  └─ seed.py            first-run seeding
 │  └─ data/
 │     ├─ ground_truth/      5 verified sample extractions (JSON)
 │     ├─ sample_images/     the 5 sample invoices
 │     └─ build_ground_truth.py  rebuilds + arithmetic-checks the fixtures
-└─ frontend/                React + Vite review/training UI
+├─ frontend/                React + Vite review/training UI
+└─ Textile Retail Shop/     the retail shop (Flask) — served at /pos
 ```
+
+## POS — the retail shop
+
+The **POS** button beside **Warehouse** in the nav bar opens the Taqua Silks
+retail shop: billing counter, floor sales on a phone, invoices, shop stock,
+customers, staff and shop reports. It is the Flask app in
+`Textile Retail Shop/`, with its own SQLite database (`textile_shop.db`) and its
+own login — sign in there the first time with `admin` / `admin123`.
+
+It is not a second server. `backend/app/pos_mount.py` imports it and mounts it
+as WSGI under this API at `/pos`, so both halves answer on one port. That is
+what makes the frame work: on a second port the shop's login cookie would be a
+third-party cookie inside the frame and the browser would throw it away.
+
+Both codebases name their package `app`, so the shop is imported with ours
+lifted out of `sys.modules` and put back afterwards. Its Python packages
+(Flask and friends) are in `backend/requirements.txt`; without them the POS
+screen says so instead of failing, and the rest of the app runs as before.
 
 ## Configuration
 

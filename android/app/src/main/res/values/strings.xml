@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ESSA AI</string>
+
+    <string name="setup_title">Connect to the warehouse</string>
+    <!-- No example address in the body: the first version offered "192.168.1.5",
+         which got typed in nearly verbatim instead of the PC's real address, and
+         the app timed out against a machine that was not there. An instruction
+         should say how to find the number, not hand over one to copy. -->
+    <string name="setup_help">Enter the address of the PC running the warehouse server — its IPv4 address, which running <b>ipconfig</b> on that PC will show. Address and port only; leave off /m or any other path. The phone must be on the same Wi\u2011Fi.</string>
+    <string name="setup_hint">the PC address, e.g. 192.168.0.7:8000</string>
+    <string name="setup_connect">Connect</string>
+    <string name="setup_checking">Checking\u2026</string>
+    <string name="setup_empty">Enter the address first.</string>
+    <string name="setup_failed">Couldn\'t reach the warehouse (%1$s). Check the address, that the server is running, and that both are on the same Wi\u2011Fi.</string>
+
+    <string name="scan_prompt">Point at the QR or barcode on the label</string>
+
+    <string name="unreachable_title">Warehouse not reachable</string>
+    <string name="unreachable_body">Couldn\'t load %1$s. The server may be off, or the phone may be on a different network.</string>
+    <string name="retry">Retry</string>
+    <string name="change_server">Change server</string>
+</resources>

@@ -111,22 +111,40 @@ class ClaudeVisionProvider(ExtractionProvider):
                          "conventions, column mapping and tax structure:\n"
                          + json.dumps(profile["reference_example"], indent=2, ensure_ascii=False))
 
-        msg = client.messages.create(
+        # max_tokens caps thinking AND the answer together, and the current models
+        # think before they answer — a 31-line invoice measured 3,884 thinking
+        # tokens, which left ~200 of a 4,096 budget for the JSON and cut it off
+        # mid-value. A cap is not a spend (only tokens actually produced are
+        # billed), so it is sized for the worst invoice rather than the average
+        # one: a two-page bill is ~3,500 tokens of JSON on top of the thinking.
+        # Above roughly 16k the SDK's own HTTP timeout is the next thing to break,
+        # which is why this streams — get_final_message() returns the same object
+        # messages.create() would have.
+        with client.messages.stream(
             model=model,
-            max_tokens=4096,
+            max_tokens=32000,
             system=SYSTEM,
             messages=[{"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64",
                  "media_type": self._media_type(image_path), "data": b64}},
                 {"type": "text", "text": guidance + "\n\nReturn the JSON now."},
             ]}],
-        )
+        ) as stream:
+            msg = stream.get_final_message()
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         data = self._parse_json(text)
         if not data:
+            # Truncation and a genuinely malformed reply both arrive here as
+            # unparseable text. They are not the same problem — one is fixed by
+            # raising the ceiling, the other by looking at the invoice — so the
+            # warning has to say which, or it sends the reader after the wrong one.
+            if msg.stop_reason == "max_tokens":
+                note = (f"invoice too large for one reply — the model hit the "
+                        f"{32000:,}-token ceiling and the JSON was cut off")
+            else:
+                note = "model did not return valid JSON"
             return ProviderResult(data=empty_invoice(), provider=self.name,
-                                  confidence=0.0, raw_text=text,
-                                  notes=["model did not return valid JSON"])
+                                  confidence=0.0, raw_text=text, notes=[note])
         return ProviderResult(data=data, provider=self.name, confidence=0.9,
                               raw_text=text, notes=["vision extraction"])
 

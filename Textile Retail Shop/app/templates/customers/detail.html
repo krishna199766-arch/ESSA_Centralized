@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4><i class="bi bi-person"></i> {{ customer.name }}</h4>
+  <div>
+    <a href="{{ url_for('customers.customer_card', cid=customer.id) }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-person-vcard"></i> Card</a>
+    <a href="{{ url_for('customers.edit_customer', cid=customer.id) }}" class="btn btn-outline-primary btn-sm">Edit</a>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body d-flex align-items-center justify-content-between flex-wrap gap-2">
+    <div>
+      <div class="text-muted small">Membership card — scan at POS to attach this customer</div>
+      <div>{{ customer.card_code | barcode }}</div>
+    </div>
+    <a href="{{ url_for('customers.customer_card', cid=customer.id) }}" class="btn btn-brand btn-sm"><i class="bi bi-printer"></i> Print card</a>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4"><div class="stat-card card p-3"><div class="label">Loyalty balance</div><div class="value">{{ '%.0f' % customer.loyalty_points }} pts</div></div></div>
+  <div class="col-md-4"><div class="stat-card card p-3"><div class="label">Total spent</div><div class="value">{{ customer.total_spent|inr }}</div></div></div>
+  <div class="col-md-4"><div class="stat-card card p-3"><div class="label">Invoices</div><div class="value">{{ invoices|length }}</div></div></div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header">Contact</div>
+  <div class="card-body">
+    <div>Phone: {{ customer.phone or '-' }}</div>
+    <div>Email: {{ customer.email or '-' }}</div>
+    <div>Address: {{ customer.address or '-' }}</div>
+    <div>GSTIN: {{ customer.gstin or '-' }} (State {{ customer.state_code }})</div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header">Purchase history</div>
+      <table class="table mb-0">
+        <thead><tr><th>#</th><th>Date</th><th class="text-end">Total</th></tr></thead>
+        <tbody>
+          {% for i in invoices %}
+          <tr>
+            <td><a href="{{ url_for('pos.view_invoice', iid=i.id) }}">{{ i.invoice_number }}</a></td>
+            <td>{{ i.invoice_date.strftime('%d %b %Y') }}</td>
+            <td class="text-end">{{ i.total|inr }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="text-center text-muted">No purchases yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-header">Loyalty ledger</div>
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Date</th><th>Reason</th><th class="text-end">Points</th></tr></thead>
+        <tbody>
+          {% for t in txns %}
+          <tr>
+            <td>{{ t.created_at.strftime('%d %b') }}</td>
+            <td>{{ t.reason }}</td>
+            <td class="text-end {{ 'text-success' if t.points>0 else 'text-danger' }}">{{ '%+.2f' % t.points }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="text-center text-muted">-</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

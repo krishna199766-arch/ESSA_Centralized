@@ -5,6 +5,13 @@ import { api } from './api.js'
 const num = (v) => (v === '' || v == null ? null : isNaN(+v) ? v : +v)
 const money = (v) => (v == null || v === '' ? '—' : Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
 const confClass = (c) => (c == null ? '' : c >= 0.9 ? 'hi' : c >= 0.6 ? 'mid' : 'lo')
+// Steps a headline figure down one size once it stops fitting on a single line.
+// A rupee total is three times the width of a count, and at the headline size
+// "₹ 1,03,389.00" broke across two lines mid-number — which reads as a mistake
+// and, worse, made that one tile taller than every other tile in its row.
+// Counted in characters because no CSS length unit knows how many digits a
+// number has.
+const longValue = (v) => String(v ?? '').length >= 12
 
 // text filter helpers
 const matches = (obj, q, fields) => {
@@ -115,6 +122,37 @@ function useMinimized(id, defaultOpen = true) {
     return next
   })
   return [open, toggle]
+}
+
+// The list down the left of most screens, with a collapse.
+//
+// Same three rules the panels keep: it slides away, it is remembered per screen
+// across navigation and reloads, and collapsed it still says what it holds — the
+// title and the count stay legible down the rail. A list that vanishes with no
+// trace of itself is a missing feature, not a hidden one, and the way back has to
+// be visible from where it went.
+//
+// The content stays mounted and is clipped rather than unmounted, so the width
+// genuinely animates instead of the panel popping between two states. It is
+// `visibility: hidden` while collapsed, which also takes it out of the tab order —
+// a keyboard user should not travel through a list they cannot see.
+function Sidebar({ id, label, children, width }) {
+  const [open, toggle] = useMinimized('side.' + id, true)
+  return (
+    <div className={'sidebar' + (open ? '' : ' collapsed')}
+      style={width && open ? { width, minWidth: width } : undefined}>
+      {open ? (
+        <button className="sidehide" onClick={toggle}
+          title={`Hide the ${label.toLowerCase()} list — the screen keeps this setting`}>«</button>
+      ) : (
+        <button className="siderail" onClick={toggle} title={`Show the ${label.toLowerCase()} list`}>
+          <span className="chev" aria-hidden="true">»</span>
+          <span className="raillabel">{label}</span>
+        </button>
+      )}
+      <div className="sidebody" style={width ? { width, minWidth: width } : undefined}>{children}</div>
+    </div>
+  )
 }
 
 // A section with a minimize control. `summary` is what it says while collapsed —
@@ -527,7 +565,7 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
 
   return (
     <div className="main">
-      <div className="viewer"><img src={api.imageUrl(docId)} alt="invoice" /></div>
+      <div className="viewer"><img src={api.imageUrl(docId, doc?.content_hash)} alt="invoice" /></div>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div className="editor">
           <div className={'warnbox ' + (warnings.filter((w)=>!w.includes('OCR')&&!w.includes('vision')&&!w.includes('sample')).length ? '' : 'clean')} style={{ marginBottom: 20 }}>
@@ -677,7 +715,7 @@ function Suppliers({ toast }) {
   useEffect(() => { if (sel) api.getSupplier(sel).then(setDetail) }, [sel])
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="suppliers" label="Suppliers">
         <div className="head"><h3>Suppliers · {list.length}</h3></div>
         <SearchBox value={q} onChange={setQ} placeholder="Search name, GSTIN, state…" />
         <div className="list">
@@ -691,7 +729,7 @@ function Suppliers({ toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       {detail ? (
         <div className="sup-detail">
           <h2 style={{ marginTop: 0 }}>{detail.name}</h2>
@@ -910,7 +948,7 @@ function Purchases({ selId, setSelId, toast }) {
   const [pcat, setPcat] = useState({})             // in-progress category per line id
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="grn" label="GRNs">
         <div className="head"><h3>GRNs · {shown.length}</h3></div>
         {list.length > 0 && <>
           <SearchBox value={q} onChange={setQ} placeholder="Search supplier, invoice, status…" />
@@ -941,7 +979,7 @@ function Purchases({ selId, setSelId, toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       {grn ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div className="editor">
@@ -2065,7 +2103,7 @@ function StockOutward({ toast }) {
   }
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="outward" label="Outwards">
         <div className="head"><h3>Outwards · {list.length}</h3>
           <button className="btn primary" style={{ padding: '4px 10px' }} onClick={() => { setCreating(true); setSel(null) }}>+ New</button></div>
         {list.length > 0 && <>
@@ -2088,7 +2126,7 @@ function StockOutward({ toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       {creating ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div className="editor">
@@ -2267,7 +2305,7 @@ function StockInward({ toast }) {
 
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="inward" label="Stock Inward">
         <div className="head"><h3>Stock Inward · {list.length}</h3></div>
         <div style={{ display: 'flex', gap: 6, padding: '0 12px 8px' }}>
         </div>
@@ -2292,7 +2330,7 @@ function StockInward({ toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       {detail ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div className="editor">
@@ -2384,7 +2422,8 @@ function Stat({ label, value }) {
   return (
     <div className="stat">
       <div className="lbl">{label}</div>
-      <div className="val">{value}</div>
+      {/* same length-aware step-down the dashboard tiles use */}
+      <div className={'val' + (longValue(value) ? ' long' : '')}>{value}</div>
     </div>
   )
 }
@@ -2432,7 +2471,7 @@ function Payments({ toast }) {
 
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="payables" label="Payables">
         <div className="head"><h3>Suppliers · payables</h3></div>
         <SearchBox value={q} onChange={setQ} placeholder="Search supplier, GSTIN…" />
         <div className="list">
@@ -2443,7 +2482,7 @@ function Payments({ toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       {sel ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div className="editor">
@@ -2560,7 +2599,7 @@ function Returns({ toast }) {
 
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="returns" label="Returns">
         <div className="head"><h3>Returns · {list.length}</h3>
           <button className="btn primary" style={{ padding: '4px 10px' }} onClick={openPicker}>+ New</button></div>
         {list.length > 0 && <>
@@ -2583,7 +2622,7 @@ function Returns({ toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       {picking ? (
         <div className="editor">
           <h2 style={{ marginTop: 0 }}>New Purchase Return — pick a reference invoice</h2>
@@ -2719,6 +2758,244 @@ const REPORT_GROUPS = {
 }
 const PARAM_LABEL = { date_from: 'From', date_to: 'To', as_on: 'As on' }
 
+// ==========================================================================
+//  Ask a report
+//  ------------------------------------------------------------------------
+//  A question in English or Tamil instead of picking one of 33 reports and
+//  setting its filters. The server routes the question to a real report from the
+//  catalogue and answers in the ordinary {columns, rows, totals} shape, so the
+//  answer lands in the table below unchanged.
+//
+//  The reading is shown, always. A router that quietly picks the wrong report
+//  hands someone a table of real numbers answering a question they did not ask,
+//  and nothing on screen would give them a way to notice. Saying "I read this as
+//  Purchase Items Report, 1–31 July, supplier AMS Garments" costs one line and
+//  makes a misread visible in the moment rather than a fortnight later.
+// ==========================================================================
+
+// Same shape the server's /csv writes, because someone comparing the two should
+// not have to wonder which is authoritative.
+const toCsv = (columns, rows, totals) => {
+  const cell = (v) => {
+    const s = v == null ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const lines = [columns.map(cell).join(',')]
+  rows.forEach((r) => lines.push(columns.map((c) => cell(r[c])).join(',')))
+  if (totals && Object.keys(totals).length) {
+    lines.push('')
+    lines.push(['TOTALS', ...Object.entries(totals).map(([k, v]) => cell(`${k}=${v}`))].join(','))
+  }
+  return lines.join('\r\n')
+}
+
+const downloadCsv = (name, text) => {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url; a.download = name; a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ---------- speaking the question instead of typing it ----------
+//
+// The browser's own recogniser, not an upload to a transcription service: it is
+// free, adds no key to configure, sends no audio anywhere, and already speaks
+// ta-IN. What comes out is dropped into the same box someone would have typed
+// into, so the question takes the identical path from there.
+//
+// WHERE THIS DOES NOT WORK, AND WHY IT SAYS SO
+// Speech recognition needs a secure context — https, or localhost. run.bat binds
+// 0.0.0.0:8000 and the README tells people to reach the app from a phone at
+// http://<computer-ip>:8000, and on that origin the API is simply absent. A mic
+// button that silently does nothing there would read as a broken feature, so the
+// reason is detected and shown instead.
+const SpeechRec = typeof window !== 'undefined' &&
+  (window.SpeechRecognition || window.webkitSpeechRecognition)
+
+//: The recogniser has to be told which language to expect — it cannot be left to
+//: work it out, and the two are far enough apart that guessing wrong transcribes
+//: to nonsense. So this is a choice someone makes, and it is remembered.
+const VOICE_LANGS = [
+  ['en-IN', 'EN', 'English — Indian English'],
+  ['ta-IN', 'தமிழ்', 'Tamil'],
+]
+
+const voiceBlockedBecause = () => {
+  if (!SpeechRec) return 'this browser has no speech recognition — Chrome or Edge does'
+  if (!window.isSecureContext) {
+    return `voice needs https or localhost, and this page is on `
+      + `${window.location.protocol}//${window.location.hostname} — `
+      + `open the app at http://localhost:8000 on the machine running it`
+  }
+  return null
+}
+
+function VoiceButton({ onInterim, onSpoken, disabled }) {
+  const [listening, setListening] = useState(false)
+  const [err, setErr] = useState('')
+  const [lang, setLang] = useState(() => {
+    try { return localStorage.getItem('essa_voice_lang') || 'en-IN' } catch { return 'en-IN' }
+  })
+  const rec = useRef(null)
+  const blocked = voiceBlockedBecause()
+
+  const pickLang = (l) => {
+    setLang(l)
+    try { localStorage.setItem('essa_voice_lang', l) } catch { /* private mode */ }
+  }
+
+  // A live recogniser holding the microphone open after this screen is gone is
+  // both a stuck mic light and a callback firing into an unmounted component.
+  useEffect(() => () => { try { rec.current?.abort() } catch { /* already gone */ } }, [])
+
+  const stop = () => { try { rec.current?.stop() } catch { /* not started */ } }
+
+  const start = () => {
+    if (blocked || listening) return
+    setErr('')
+    const r = new SpeechRec()
+    rec.current = r
+    r.lang = lang
+    r.interimResults = true      // so the words appear while they are being said
+    r.continuous = false         // one question per press, not an open microphone
+    r.maxAlternatives = 1
+
+    r.onresult = (e) => {
+      let interim = '', final = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const chunk = e.results[i][0].transcript
+        if (e.results[i].isFinal) final += chunk; else interim += chunk
+      }
+      if (interim) onInterim(interim)
+      // Asked as soon as it is heard, and the words stay in the box: a mishearing
+      // is then visible both in the box and in the reading above the table, which
+      // is a better correction loop than making someone press Ask every time.
+      //
+      // Listening is cleared here rather than left to `onend`. With
+      // continuous = false the recogniser does end itself, but not always
+      // promptly — and until it does, the button still pulses as though the mic
+      // were open and the language switch stays disabled.
+      if (final) { onInterim(final); setListening(false); onSpoken(final.trim()) }
+    }
+    r.onerror = (e) => {
+      setErr({
+        'not-allowed': 'microphone permission was refused — allow it in the browser address bar',
+        'service-not-allowed': 'the browser blocked speech recognition on this page',
+        'no-speech': 'nothing was heard — try again a little closer to the microphone',
+        'audio-capture': 'no microphone was found',
+        'network': 'speech recognition could not reach the network',
+        'aborted': '',
+      }[e.error] || `speech recognition failed (${e.error})`)
+      setListening(false)
+    }
+    r.onend = () => setListening(false)
+    try { r.start(); setListening(true) } catch (e) { setErr('could not start the microphone') }
+  }
+
+  if (blocked) {
+    return (
+      <span className="askvoice-off" title={`Voice input unavailable: ${blocked}`}>
+        🎤 <span className="askvoice-why">off</span>
+      </span>
+    )
+  }
+
+  return (
+    <span className="askvoice">
+      <button className={'askmic' + (listening ? ' on' : '')} disabled={disabled}
+        onClick={() => (listening ? stop() : start())}
+        title={listening ? 'Stop listening' : `Ask by voice (${VOICE_LANGS.find(([l]) => l === lang)?.[2]})`}>
+        {listening ? '⏹' : '🎤'}
+      </button>
+      {/* Which language to listen for. Two buttons rather than a select: it is a
+          two-way switch someone flips mid-shift, not a setting to go and find. */}
+      <span className="asklangs">
+        {VOICE_LANGS.map(([l, short, full]) => (
+          <button key={l} className={'asklang' + (lang === l ? ' on' : '')} title={`Listen for ${full}`}
+            disabled={listening} onClick={() => pickLang(l)}>{short}</button>
+        ))}
+      </span>
+      {listening && <span className="asklistening" title="Listening — speak your question">listening…</span>}
+      {err && <span className="askvoice-err" title={err}>{err}</span>}
+    </span>
+  )
+}
+
+function AskBar({ value, onChange, onAsk, busy, engine }) {
+  return (
+    <div className="askbar">
+      <span className="ico" aria-hidden="true">✨</span>
+      {/* the clear button is positioned against this wrapper, not the bar, so
+          adding controls to the right of the input cannot displace it */}
+      <span className="askfield">
+        <input value={value} onChange={(e) => onChange(e.target.value)}
+          placeholder="Ask a question, or press 🎤 — “what did we buy last month”, “நிலுவை பாக்கி எவ்வளவு”"
+          title="Ask in English or Tamil, typed or spoken. The question is routed to one of the reports on the left."
+          onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) onAsk() }} />
+        {value && <button className="askclear" title="Clear" onClick={() => onChange('')}>×</button>}
+      </span>
+      {/* Spoken words land in the same box, so voice is a way of filling this
+          control rather than a second path through the feature. */}
+      <VoiceButton onInterim={onChange} onSpoken={(t) => onAsk(t)} disabled={busy} />
+      {/* onAsk() called with no argument on purpose — onClick={onAsk} would hand
+          it the click event as the question text. */}
+      <button className="btn primary" disabled={busy || !value.trim()} onClick={() => onAsk()}
+        title="Find the report that answers this">{busy ? 'Reading…' : 'Ask'}</button>
+      {engine === 'keywords' && (
+        <span className="askengine" title={'No vision/API key is set, so questions are matched on keywords rather than read. '
+          + 'Turn on a key in the top bar for full sentences and Tamil phrasing this list does not cover.'}>
+          keyword mode
+        </span>
+      )}
+    </div>
+  )
+}
+
+// What the question was taken to mean, what the report could honour, and what it
+// could not. The last of those is the point: only `stock_movement` filters by
+// product and nothing filters by supplier, so a question can easily ask for a cut
+// the report cannot make.
+function AskReading({ read, onDismiss }) {
+  const chips = Object.entries(read.applied || {})
+  return (
+    <div className={'askread' + (read.report_key ? '' : ' miss')}>
+      <div className="askread-top">
+        <span className="askread-what">
+          {read.report_key
+            ? <><b>{read.report_name}</b> — {read.reading}</>
+            : <>Nothing in the catalogue answers that. <span className="small">{read.reading}</span></>}
+        </span>
+        <span className="spacer" />
+        {read.engine === 'model' && read.confidence !== 'high' && (
+          <span className="askflag" title="The router was not certain of this match — check it is the report you meant before trusting the figures.">
+            {read.confidence} confidence
+          </span>
+        )}
+        {read.engine === 'keywords' && (
+          <span className="askflag" title="Matched on keywords, not read as a sentence.">keywords</span>
+        )}
+        <button className="askclear" title="Dismiss this reading" onClick={onDismiss}>×</button>
+      </div>
+      {chips.length > 0 && (
+        <div className="askchips">
+          {chips.map(([k, v]) => (
+            <span key={k} className="askchip" title={`The report ran with ${k} = ${v}`}>
+              {(PARAM_LABEL[k] || k.replace(/_/g, ' '))}: <b>{String(v)}</b>
+            </span>
+          ))}
+        </div>
+      )}
+      {(read.narrowed || []).map((n, i) => (
+        <div key={'n' + i} className="asknote">↳ {n}</div>
+      ))}
+      {(read.ignored || []).map((n, i) => (
+        <div key={'i' + i} className="asknote warn">⚠ {n}</div>
+      ))}
+      {read.degraded && <div className="asknote warn">⚠ {read.degraded}</div>}
+    </div>
+  )
+}
+
 function Reports() {
   const [cat, setCat] = useState([])
   const [groups, setGroups] = useState([])
@@ -2728,9 +3005,15 @@ function Reports() {
   const [filters, setFilters] = useState({})     // the values behind a report's params
   const [busy, setBusy] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
+  // --- ask ---
+  const [ask, setAsk] = useState('')
+  const [asked, setAsked] = useState(null)      // the interpretation, while it stands
+  const [asking, setAsking] = useState(false)
+  const [askMeta, setAskMeta] = useState(null)  // engine + example questions
   useEffect(() => {
     api.reportGroups().then(setGroups).catch(() => {})
     api.reportCatalogue().then((c) => { setCat(c); if (c[0]) pick(c[0].key) })
+    api.reportAskExamples().then(setAskMeta).catch(() => {})
   }, [])
   const entry = cat.find((r) => r.key === key)
   // a filter only counts if the selected report declares it — switching from a
@@ -2742,20 +3025,70 @@ function Reports() {
     const e = cat.find((r) => r.key === k) || entry
     return api.runReport(k, active(f, e)).then(setRep).finally(() => setBusy(false))
   }
-  const pick = (k) => { setKey(k); setRep(null); setQ(''); load(k, filters) }
+  // Picking a report by hand, or touching a filter, means the question no longer
+  // describes what is on screen — so the reading goes rather than sitting there
+  // captioning a table it no longer refers to.
+  const pick = (k) => { setKey(k); setRep(null); setQ(''); setAsked(null); load(k, filters) }
   const setFilter = (p, v) => {
     const next = { ...filters, [p]: v }
     setFilters(next)
+    setAsked(null)
     load(key, next)
+  }
+
+  // An answered question drives the ordinary controls: it selects the report in
+  // the list and writes its filters into the filter panel. So the search box, the
+  // filter panel and the export keep working on the result exactly as they would
+  // if the report had been picked by hand — nothing downstream needs an ask path.
+  // `text` is passed explicitly by the example buttons: they setAsk() and ask in
+  // the same handler, and a runAsk() closing over `ask` would still be holding
+  // the previous render's value at that point. Typed rather than trusted, because
+  // wiring this straight to an onClick hands it a MouseEvent instead.
+  const runAsk = async (text) => {
+    const question = (typeof text === 'string' ? text : ask).trim()
+    if (!question) return
+    setAsking(true); setQ('')
+    try {
+      const r = await api.askReport(question)
+      setAsked(r.interpretation)
+      if (r.ok && r.report) {
+        setKey(r.interpretation.report_key)
+        setFilters(r.interpretation.applied || {})
+        setRep(r.report)
+      } else {
+        setRep(null)
+      }
+    } catch (e) {
+      // The frontend is served off disk and picks up a rebuild on refresh, but
+      // routes are registered when Python starts — so a backend left running
+      // from before this endpoint existed serves the new screen and then rejects
+      // its calls. That is a restart, not a broken feature, and saying "Method
+      // Not Allowed" sends someone looking in entirely the wrong place.
+      const stale = e.status === 404 || e.status === 405
+      setAsked({
+        report_key: null, engine: 'none',
+        reading: stale
+          ? 'the server is still running the code from before this feature was added — '
+            + 'restart the backend (Ctrl-C in the run window, then run.bat again) and ask again'
+          : (e.detail || 'the question could not be sent'),
+      })
+      setRep(null)
+    }
+    setAsking(false)
   }
   const rows = rep ? rep.rows.filter((row) => !q || rep.columns.some((c) => String(row[c] ?? '').toLowerCase().includes(q.toLowerCase()))) : []
   const grouped = cat.reduce((a, r) => { (a[r.group] = a[r.group] || []).push(r); return a }, {})
   const order = groups.length ? groups : Object.entries(REPORT_GROUPS).map(([k2, n]) => ({ key: k2, name: n }))
   const dateParams = (entry?.params || []).filter((p) => PARAM_LABEL[p])
   const fmt = (v) => typeof v === 'number' ? v.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : (v ?? '')
+  // A question that routed nowhere: no table, and no report claiming to be it
+  const miss = !!(asked && !asked.report_key)
+  // Dismissing a miss puts the previously selected report back, rather than
+  // leaving the pane empty with a live selection behind it
+  const dismissReading = () => { setAsked(null); if (!rep && key) load(key, filters) }
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="reports" label="Reports">
         <div className="head"><h3>Reports · {cat.length}</h3></div>
         <div className="list" style={{ padding: '6px 0' }}>
           {order.filter((g) => grouped[g.key]?.length).map((g) => (
@@ -2764,15 +3097,33 @@ function Reports() {
                 {g.name} <span style={{ opacity: 0.6 }}>({grouped[g.key].length})</span>
               </div>
               {grouped[g.key].map(r => (
-                <div key={r.key} className={'doc-row' + (key === r.key ? ' sel' : '')} style={{ padding: '8px 14px' }} onClick={() => pick(r.key)}>
-                  <div className="t" style={{ fontWeight: key === r.key ? 700 : 400 }}>{r.name}</div>
+                // A question nothing answered leaves no report on screen, so
+                // nothing in this list is highlighted either — a highlight with
+                // no table next to it reads as "this is what you are looking at".
+                <div key={r.key} className={'doc-row' + (key === r.key && !miss ? ' sel' : '')}
+                  style={{ padding: '8px 14px' }} onClick={() => pick(r.key)}>
+                  <div className="t" style={{ fontWeight: key === r.key && !miss ? 700 : 400 }}>{r.name}</div>
                 </div>
               ))}
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <AskBar value={ask} onChange={setAsk} onAsk={runAsk} busy={asking}
+          engine={askMeta?.engine} />
+        {asked && <AskReading read={asked} onDismiss={dismissReading} />}
+        {/* Examples until the first question — a blank box teaches nobody what it
+            will accept, and the Tamil ones are the only signal that it does. */}
+        {!asked && !ask && (askMeta?.examples || []).length > 0 && (
+          <div className="askegs">
+            <span className="small">Try:</span>
+            {askMeta.examples.map((e) => (
+              <button key={e.q} className="askeg" title={e.note}
+                onClick={() => { setAsk(e.q); runAsk(e.q) }}>{e.q}</button>
+            ))}
+          </div>
+        )}
         {rep ? (
           <>
             <div style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', borderBottom: '1px solid var(--line)', flexWrap: 'wrap', gap: 8 }}>
@@ -2793,9 +3144,20 @@ function Reports() {
                   active={Object.keys(active()).length} />
               )}
               {/* the export carries the same filters, so it can't quietly hand back
-                  a different set of rows than the one on screen */}
-              <a className="btn" href={api.reportCsvUrl(key, active())} target="_blank"
-                rel="noreferrer" title="Download exactly these rows, with these filters">Export CSV</a>
+                  a different set of rows than the one on screen.
+
+                  Once rows have been narrowed after the report ran, the server
+                  cannot reproduce them from filters alone — asking it would return
+                  the wider set under the same button. So a narrowed result is
+                  written from the rows on screen instead. */}
+              {asked?.narrowed?.length ? (
+                <button className="btn" onClick={() => downloadCsv(`${key}.csv`, toCsv(rep.columns, rep.rows, rep.totals))}
+                  title="Download exactly these rows, including the narrowing applied after the report ran">
+                  Export CSV</button>
+              ) : (
+                <a className="btn" href={api.reportCsvUrl(key, active())} target="_blank"
+                  rel="noreferrer" title="Download exactly these rows, with these filters">Export CSV</a>
+              )}
             </div>
             {dateParams.length > 0 && (
               <div style={{ padding: '0 22px' }}>
@@ -2829,6 +3191,12 @@ function Reports() {
               {rep.rows.length === 0 && <p className="empty" style={{ marginTop: 40 }}>No data yet.</p>}
             </div>
           </>
+        ) : asked && !asked.report_key ? (
+          <div className="empty" style={{ marginTop: 60 }}>
+            No report answers that question.<br />
+            <span className="small">Pick one from the list on the left, or try a question closer to
+              what the reports cover — purchases, stock, payments, shortages, transfers, transport.</span>
+          </div>
         ) : <div className="empty">Loading report…</div>}
       </div>
     </div>
@@ -3591,7 +3959,7 @@ function Masters({ toast }) {
   const optTab = OPTION_TABS.find(([k]) => k === tab)
   return (
     <div className="body">
-      <div className="sidebar">
+      <Sidebar id="masters" label="Masters">
         <div className="head"><h3>Masters</h3></div>
         <div className="list" style={{ padding: '6px 0' }}>
           {[['categories', `Product Categories · ${cats ? cats.count : '…'}`],
@@ -3604,7 +3972,7 @@ function Masters({ toast }) {
             </div>
           ))}
         </div>
-      </div>
+      </Sidebar>
       <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
         {tab === 'categories' && (
           <>
@@ -3653,11 +4021,802 @@ function Masters({ toast }) {
   )
 }
 
+// ==========================================================================
+//  Warehouse menu · Dashboard
+//  ------------------------------------------------------------------------
+//  Eleven modules laid out on one strip made the strip into the screen, and it
+//  still scrolled sideways at 1600px. They are not eleven unrelated things —
+//  they are one warehouse, walked through in an order (a consignment arrives,
+//  an invoice is read, goods are received, stock moves, money settles). So they
+//  live behind one WAREHOUSE menu, in that order, each saying what it is for.
+//
+//  The dashboard sits at the top of that same menu, above a rule, because it is
+//  not a twelfth module — it is the way in to the eleven. It earns first place
+//  by answering the question that used to be answered by opening all of them:
+//  what is waiting on me. Every figure on it is a link to the screen that clears
+//  it — a number nobody can act on is decoration.
+// ==========================================================================
+
+const DASHBOARD = { key: 'dashboard', icon: '🏠', label: 'Dashboard',
+  blurb: 'What is waiting on someone, across every module' }
+
+const MODULES = [
+  { key: 'lr', icon: '🚚', label: 'LR Entry', blurb: 'The transport register — consignments as they arrive' },
+  { key: 'documents', icon: '🧾', label: 'Invoice Entry', blurb: 'Read a supplier invoice and review what came off it' },
+  { key: 'purchases', icon: '📋', label: 'GRN', blurb: 'Receive against an invoice — count, claim shortages, post' },
+  { key: 'inventory', icon: '📦', label: 'Inventory', blurb: 'Stock on hand, labels and per-piece codes' },
+  { key: 'outward', icon: '📤', label: 'Stock Outward', blurb: 'Dispatch stock to a shop or another godown' },
+  { key: 'inward', icon: '📥', label: 'Stock Inward', blurb: 'Accept a dispatched transfer, line by line' },
+  { key: 'returns', icon: '↩', label: 'Returns', blurb: 'Debit notes raised against a posted GRN' },
+  { key: 'payments', icon: '₹', label: 'Payments', blurb: 'Settle supplier bills and read the ledger' },
+  { key: 'reports', icon: '📊', label: 'Reports', blurb: 'Every register, filtered and exportable' },
+  { key: 'suppliers', icon: '🏭', label: 'Suppliers', blurb: 'Supplier master and trained invoice formats' },
+  { key: 'masters', icon: '⚙', label: 'Masters', blurb: 'Categories, agents, transporters and the dropdown lists', admin: true },
+]
+
+// ==========================================================================
+//  POS — the retail shop, mounted at /pos
+//  ------------------------------------------------------------------------
+//  The shop (Taqua Silks) is a finished Flask app with its own database and
+//  its own login. It is served by this same backend, at this same origin, and
+//  shown here in a frame — not rewritten screen by screen into React. Same
+//  origin is the load-bearing part: on a second port its login cookie would be
+//  third-party inside the frame and the browser would drop it.
+//
+//  It sits beside Warehouse rather than inside it because it is the other half
+//  of the business, not a twelfth warehouse screen: the warehouse receives
+//  goods, the shop sells them. Its screens are listed here for the same reason
+//  the warehouse's are — so the way in is the menu, not a tour of the frame's
+//  own navigation.
+// ==========================================================================
+
+const POS_HOME = { key: 'pos:home', icon: '🏠', label: 'Shop Dashboard', path: '/',
+  blurb: "Today's sales, low stock and the last few bills" }
+
+// In the shop's own order — the same sequence as the navigation inside the
+// frame, so choosing a screen here and then moving around in there does not feel
+// like two different products. A sale goes left to right: build it on the floor
+// or at the counter, look it up afterwards, take it back, alter it.
+const POS_SCREENS = [
+  { key: 'pos:floor', icon: '📱', label: 'Floor Sales', path: '/floor/',
+    blurb: 'Build a sale on the phone while walking the floor' },
+  { key: 'pos:counter', icon: '🧮', label: 'Billing Counter', path: '/pos/',
+    blurb: 'Scan, bill and take payment at the counter' },
+  { key: 'pos:inventory', icon: '📦', label: 'Shop Stock', path: '/inventory/',
+    blurb: 'What is on the shop floor, with the warehouse QR on every item' },
+  { key: 'pos:customers', icon: '🧍', label: 'Customers', path: '/customers/',
+    blurb: 'Customer master, loyalty points and history' },
+  { key: 'pos:invoices', icon: '🧾', label: 'Invoices', path: '/pos/invoices',
+    blurb: 'Every bill raised, searchable and reprintable' },
+  { key: 'pos:returns', icon: '↩️', label: 'Returns', path: '/returns/',
+    blurb: 'Take goods back against a bill and raise a credit note' },
+  { key: 'pos:alterations', icon: '✂️', label: 'Alteration', path: '/alterations/',
+    blurb: 'Garments out for tailoring, and what each tailor is holding' },
+  { key: 'pos:staff', icon: '👥', label: 'Staff', path: '/staff/',
+    blurb: 'Attendance, roles and sales commission' },
+  { key: 'pos:reports', icon: '📈', label: 'Shop Reports', path: '/reports/',
+    blurb: 'Sales, tax and low-stock registers' },
+]
+
+const POS_ITEMS = [POS_HOME, null, ...POS_SCREENS]
+
+// One frame, keyed on the path so choosing another screen from the menu loads
+// it rather than leaving the frame on whatever it had drifted to.
+function PosScreen({ screen, available, error }) {
+  if (available === false) return (
+    <div className="empty" style={{ margin: 40, maxWidth: 620 }}>
+      <p><b>The POS module is not loaded.</b></p>
+      <p className="small">{error || 'The server started without it.'}</p>
+      <p className="small">It lives in the <b>Textile Retail Shop</b> folder beside this
+        project. Install the backend requirements (<code>pip install -r requirements.txt</code>)
+        and restart the server.</p>
+    </div>
+  )
+  return (
+    <div className="posframe">
+      <iframe key={screen.path} src={'/pos' + screen.path} title={'POS — ' + screen.label} />
+    </div>
+  )
+}
+
+// The one navigation control. It says which screen is open even while closed,
+// because a collapsed navigation that doesn't say where you are is how someone
+// loses the screen and re-opens the menu only to find out. `items` may hold a
+// null, which draws a rule — that is what separates the dashboard from the
+// modules it leads into. Warehouse and POS are the same control with different
+// contents; nothing about it was ever specific to the warehouse.
+function NavMenu({ tab, setTab, items, icon, label, hint }) {
+  const [open, setOpen] = useState(false)
+  const wrap = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const away = (e) => { if (wrap.current && !wrap.current.contains(e.target)) setOpen(false) }
+    const esc = (e) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', away)
+    document.addEventListener('keydown', esc)
+    return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', esc) }
+  }, [open])
+
+  const here = items.find((m) => m && m.key === tab)
+  return (
+    <div className="navmenu" ref={wrap}>
+      <button className={'navmenu-btn' + (here ? ' active' : '') + (open ? ' open' : '')}
+        aria-haspopup="menu" aria-expanded={open}
+        title={here ? `${label} — ${here.label} is open. Click for the other screens.` : hint}
+        onClick={() => setOpen((o) => !o)}>
+        <span aria-hidden="true">{icon}</span> {label}
+        {here && <span className="where">{here.label}</span>}
+        <span className="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="navmenu-pop" role="menu">
+          {items.map((m, i) => (m ? (
+            <button key={m.key} role="menuitem" title={m.blurb}
+              className={'navmenu-item' + (m.key === tab ? ' on' : '')}
+              onClick={() => { setTab(m.key); setOpen(false) }}>
+              <span className="ico" aria-hidden="true">{m.icon}</span>
+              <span className="txt">
+                <span className="lbl">{m.label}</span>
+                <span className="blurb">{m.blurb}</span>
+              </span>
+            </button>
+          ) : <div key={'sep' + i} className="navmenu-sep" role="separator" />))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ==========================================================================
+//  Charts
+//  ------------------------------------------------------------------------
+//  Hand-drawn SVG rather than a charting library. Five chart types on one
+//  screen do not justify a dependency several times the size of this entire
+//  bundle, and the specs below — 2px lines, ≤24px bars with a 4px rounded
+//  data-end, a 2px surface gap between touching marks, hairline solid grid —
+//  are easier to hold exactly when they are written out than when they are
+//  configured through someone else's theme object.
+//
+//  Fixed rules these all keep:
+//    * The form is chosen by the data's job, not by variety. One series over
+//      time is a line; two series compared is grouped columns; magnitude across
+//      names is bars in ONE colour (colouring those by value would encode the
+//      bar length twice and waste the only free channel); an ordered band is one
+//      hue getting darker; part-to-whole with few slices is a ring.
+//    * Never two y-scales on one plot. Two measures of different size are two
+//      charts.
+//    * Text never wears the series colour — a swatch beside the label carries
+//      identity, so a pale hue is never asked to be legible as type.
+//    * Every chart has a table twin. A value that only exists inside a tooltip
+//      is a value someone cannot read, print or check.
+// ==========================================================================
+
+const VB = { w: 620, h: 240 }                    // viewBox; charts scale to their cell
+const PAD = { t: 16, r: 16, b: 34, l: 58 }       // bottom band sized to hold the x labels
+const PLOT = { w: VB.w - PAD.l - PAD.r, h: VB.h - PAD.t - PAD.b }
+const VIZ = ['var(--viz-1)', 'var(--viz-2)', 'var(--viz-3)', 'var(--viz-4)', 'var(--viz-5)']
+const SEQ = 'var(--viz-2)'                       // single-series / sequential default
+
+// Axis ticks land on clean numbers — a gridline at 83,417 is a gridline nobody
+// reads a value off.
+const niceTicks = (max, count = 4) => {
+  if (!(max > 0)) return [0, 1]
+  const raw = max / count
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)))
+  const step = [1, 2, 2.5, 5, 10].find((m) => mag * m >= raw) * mag
+  const out = []
+  for (let v = 0; v <= max + step * 0.001; v += step) out.push(v)
+  return out
+}
+const compact = (v) => {
+  const n = Math.abs(v)
+  if (n >= 1e7) return (v / 1e7).toFixed(n >= 1e8 ? 0 : 1) + 'Cr'
+  if (n >= 1e5) return (v / 1e5).toFixed(n >= 1e6 ? 0 : 1) + 'L'
+  if (n >= 1000) return (v / 1000).toFixed(n >= 1e4 ? 0 : 1) + 'k'
+  return String(Math.round(v * 100) / 100)
+}
+
+// The frame every plotted chart shares: hairline solid gridlines (never dashed —
+// dashing reads as "projection" when it is just a grid), clean ticks, and axis
+// text in the muted ink rather than in any series colour.
+function Grid({ ticks, max }) {
+  return (
+    <g>
+      {ticks.map((t) => {
+        const y = PAD.t + PLOT.h - (max ? (t / max) * PLOT.h : 0)
+        return (
+          <g key={t}>
+            <line x1={PAD.l} x2={PAD.l + PLOT.w} y1={y} y2={y}
+              stroke="var(--viz-grid)" strokeWidth="1" />
+            <text x={PAD.l - 8} y={y + 3.5} textAnchor="end" className="viztick">{compact(t)}</text>
+          </g>
+        )
+      })}
+    </g>
+  )
+}
+
+// x labels thin out rather than overlap — a collided axis is unreadable, and
+// every value is still in the tooltip and the table.
+const everyNth = (n, keep = 6) => Math.max(1, Math.ceil(n / keep))
+
+function ChartCard({ title, note, legend, rows, columns, children }) {
+  const [table, setTable] = useState(false)
+  return (
+    <div className="vizcard">
+      {/* Title and the table switch hold the first row on their own; the legend
+          takes its own line below. Sharing one row made the switch wrap under the
+          legend on the cards that have one, so the control sat in a different
+          place on different cards. */}
+      <div className="vizhead">
+        <h5>{title}</h5>
+        <span className="spacer" />
+        <button className="vizswap" onClick={() => setTable((t) => !t)}
+          title={table ? 'Back to the chart' : 'Show these numbers as a table'}>
+          {table ? 'Chart' : 'Table'}
+        </button>
+      </div>
+      {legend && <div className="vizlegendrow">{legend}</div>}
+      {note && <div className="viznote">{note}</div>}
+      {/* The table twin is the same numbers, not a summary of them — so a value
+          is never reachable only by hovering. */}
+      {table ? (
+        <div className="vizscroll">
+          <table className="items">
+            <thead><tr>{columns.map((c) => <th key={c} className={c === columns[0] ? '' : 'num'}>{c}</th>)}</tr></thead>
+            <tbody>{rows.map((r, i) => (
+              <tr key={i}>{r.map((cell, j) => (
+                <td key={j} className={j ? 'num mono' : ''}>{cell}</td>
+              ))}</tr>
+            ))}</tbody>
+          </table>
+        </div>
+      ) : children}
+    </div>
+  )
+}
+
+function Legend({ items }) {
+  return (
+    <span className="vizlegend">
+      {items.map((it) => (
+        <span key={it.label} className="vizkey">
+          <i style={{ background: it.color }} /> {it.label}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+// Tooltip in HTML over the SVG rather than SVG text: it needs a background,
+// padding and wrapping, all of which are free here and fiddly in SVG.
+function VizTip({ at, children }) {
+  if (!at) return null
+  return (
+    <div className="viztip" style={{ left: `${at.x}%`, top: `${at.y}%` }}>{children}</div>
+  )
+}
+
+// ---- one series over time ----
+function LineChart({ labels, values, unit, valueFmt }) {
+  const [hover, setHover] = useState(null)
+  const max = Math.max(...values, 0)
+  const ticks = niceTicks(max)
+  const top = ticks[ticks.length - 1] || 1
+  const x = (i) => PAD.l + (values.length === 1 ? PLOT.w / 2 : (i / (values.length - 1)) * PLOT.w)
+  const y = (v) => PAD.t + PLOT.h - (v / top) * PLOT.h
+  const pts = values.map((v, i) => `${x(i)},${y(v)}`).join(' ')
+  const nth = everyNth(labels.length)
+  const peak = values.indexOf(max)
+  const fmt = valueFmt || compact
+  return (
+    <div className="vizplot">
+      <svg viewBox={`0 0 ${VB.w} ${VB.h}`} className="vizsvg" role="img"
+        aria-label={`${unit} over ${labels.length} months`}>
+        <Grid ticks={ticks} max={top} />
+        {/* area wash at ~10%, never a saturated block */}
+        <polygon fill={SEQ} fillOpacity="0.10"
+          points={`${PAD.l},${PAD.t + PLOT.h} ${pts} ${PAD.l + PLOT.w},${PAD.t + PLOT.h}`} />
+        <polyline points={pts} fill="none" stroke={SEQ} strokeWidth="2"
+          strokeLinejoin="round" strokeLinecap="round" />
+        {/* the peak is direct-labelled; every other value rides the axis and the
+            tooltip, because a number on every point goes unread */}
+        {max > 0 && (() => {
+          // The label flips below the point when there is no room above it.
+          // Drawn above unconditionally it escapes the plot and lands on the card
+          // title — a label clipped by, or overflowing, its own chart.
+          const above = y(max) - PAD.t > 16
+          const lx = Math.min(Math.max(x(peak), PAD.l + 16), PAD.l + PLOT.w - 16)
+          return (
+            <g>
+              <circle cx={x(peak)} cy={y(max)} r="4.5" fill={SEQ}
+                stroke="var(--panel)" strokeWidth="2" />
+              <text x={lx} y={y(max) + (above ? -10 : 18)} textAnchor="middle"
+                className="vizlabel">{fmt(max)}</text>
+            </g>
+          )
+        })()}
+        {labels.map((l, i) => i % nth === 0 && (
+          <text key={l} x={x(i)} y={VB.h - 12} textAnchor="middle" className="viztick">{l}</text>
+        ))}
+        {/* hit bands are the full plot height and far wider than the 2px line */}
+        {labels.map((l, i) => (
+          <rect key={'h' + i} x={x(i) - PLOT.w / (labels.length * 2)} y={PAD.t}
+            width={PLOT.w / labels.length} height={PLOT.h} fill="transparent"
+            onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} />
+        ))}
+        {hover != null && (
+          <g pointerEvents="none">
+            <line x1={x(hover)} x2={x(hover)} y1={PAD.t} y2={PAD.t + PLOT.h}
+              stroke="var(--viz-axis)" strokeWidth="1" />
+            <circle cx={x(hover)} cy={y(values[hover])} r="4.5" fill={SEQ}
+              stroke="var(--panel)" strokeWidth="2" />
+          </g>
+        )}
+      </svg>
+      {hover != null && (
+        <VizTip at={{ x: (x(hover) / VB.w) * 100, y: (y(values[hover]) / VB.h) * 100 }}>
+          <b>{labels[hover]}</b><br />{fmt(values[hover])} {unit}
+        </VizTip>
+      )}
+    </div>
+  )
+}
+
+// ---- two series compared over time ----
+function GroupedBars({ labels, series, unit }) {
+  const [hover, setHover] = useState(null)
+  const max = Math.max(...series.flatMap((s) => s.values), 0)
+  const ticks = niceTicks(max)
+  const top = ticks[ticks.length - 1] || 1
+  const band = PLOT.w / labels.length
+  const GAP = 2                                   // the surface gap between neighbours
+  const bw = Math.min(24, (band - 14 - GAP) / series.length)
+  const nth = everyNth(labels.length)
+  return (
+    <div className="vizplot">
+      <svg viewBox={`0 0 ${VB.w} ${VB.h}`} className="vizsvg" role="img"
+        aria-label={`${series.map((s) => s.name).join(' and ')} by month`}>
+        <Grid ticks={ticks} max={top} />
+        {labels.map((l, i) => {
+          const groupW = bw * series.length + GAP * (series.length - 1)
+          const x0 = PAD.l + band * i + (band - groupW) / 2
+          return (
+            <g key={l}>
+              {series.map((s, si) => {
+                const v = s.values[i] || 0
+                const h = (v / top) * PLOT.h
+                const bx = x0 + si * (bw + GAP)
+                return v > 0 ? (
+                  // rounded at the data end, square at the baseline
+                  <path key={s.name} fill={VIZ[si]} d={roundedTop(bx, PAD.t + PLOT.h - h, bw, h, 4)} />
+                ) : null
+              })}
+              <rect x={PAD.l + band * i} y={PAD.t} width={band} height={PLOT.h} fill="transparent"
+                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} />
+            </g>
+          )
+        })}
+        {labels.map((l, i) => i % nth === 0 && (
+          <text key={l} x={PAD.l + band * i + band / 2} y={VB.h - 12} textAnchor="middle"
+            className="viztick">{l}</text>
+        ))}
+      </svg>
+      {hover != null && (
+        <VizTip at={{ x: ((PAD.l + band * hover + band / 2) / VB.w) * 100, y: 8 }}>
+          <b>{labels[hover]}</b>
+          {series.map((s, si) => (
+            <div key={s.name}><i className="tipkey" style={{ background: VIZ[si] }} />
+              {s.name}: {compact(s.values[hover] || 0)} {unit}</div>
+          ))}
+        </VizTip>
+      )}
+    </div>
+  )
+}
+
+// A bar rounded on the data end only — square where it meets the baseline, so
+// the bar reads as growing from the axis rather than floating.
+const roundedTop = (x, y, w, h, r) => {
+  const rr = Math.min(r, h, w / 2)
+  return `M${x},${y + h} L${x},${y + rr} Q${x},${y} ${x + rr},${y} `
+    + `L${x + w - rr},${y} Q${x + w},${y} ${x + w},${y + rr} L${x + w},${y + h} Z`
+}
+
+// ---- magnitude across names: one colour for every bar ----
+function HBars({ rows, unit, ordinal }) {
+  const [hover, setHover] = useState(null)
+  const max = Math.max(...rows.map((r) => r.value), 0) || 1
+  const H = Math.max(120, rows.length * 34 + 20)
+  const LW = 140                                  // room for the name
+  const barW = VB.w - LW - 80
+  const ORD = ['var(--viz-ord-1)', 'var(--viz-ord-2)', 'var(--viz-ord-3)', 'var(--viz-ord-4)']
+  return (
+    <div className="vizplot">
+      <svg viewBox={`0 0 ${VB.w} ${H}`} className="vizsvg" role="img" aria-label={unit}>
+        {rows.map((r, i) => {
+          const y = 12 + i * 34
+          const w = Math.max(2, (r.value / max) * barW)
+          // ordinal = an ordered scale (ageing bands), so one hue gets darker.
+          // Otherwise every bar is slot-1 blue: these names have no order, and
+          // shading them by value would encode the length twice.
+          const fill = ordinal ? ORD[Math.min(i, ORD.length - 1)] : SEQ
+          return (
+            <g key={r.label} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+              <text x={LW - 10} y={y + 15} textAnchor="end" className="vizname">{r.label}</text>
+              <path fill={fill} d={roundedRight(LW, y, w, 20, 4)} />
+              <text x={LW + w + 8} y={y + 15} className="vizlabel">{compact(r.value)}</text>
+              <rect x={0} y={y - 6} width={VB.w} height={32} fill="transparent" />
+            </g>
+          )
+        })}
+      </svg>
+      {hover != null && (
+        <VizTip at={{ x: 50, y: ((12 + hover * 34) / H) * 100 }}>
+          <b>{rows[hover].label}</b><br />{compact(rows[hover].value)} {unit}
+          {rows[hover].bills != null && <> · {rows[hover].bills} bill(s)</>}
+        </VizTip>
+      )}
+    </div>
+  )
+}
+
+const roundedRight = (x, y, w, h, r) => {
+  const rr = Math.min(r, w, h / 2)
+  return `M${x},${y} L${x + w - rr},${y} Q${x + w},${y} ${x + w},${y + rr} `
+    + `L${x + w},${y + h - rr} Q${x + w},${y + h} ${x + w - rr},${y + h} L${x},${y + h} Z`
+}
+
+// ---- part-to-whole, at a glance ----
+// A ring is only honest for a few slices read as shares, so the tail is folded
+// into one neutral "Other" rather than spawning more hues — and the fold is
+// counted in its label so the ring still visibly totals the whole.
+function Donut({ rows, unit }) {
+  const [hover, setHover] = useState(null)
+  const total = rows.reduce((a, r) => a + r.value, 0) || 1
+  const R = 82, r0 = 50, cx = 110, cy = 110
+  let angle = -Math.PI / 2
+  const arcs = rows.map((row, i) => {
+    const frac = row.value / total
+    const a0 = angle
+    const a1 = angle + frac * Math.PI * 2
+    angle = a1
+    // a 2px gap in the surface separates touching segments — no stroke around
+    // the mark, which would add ink that is not data
+    const gap = rows.length > 1 ? 0.012 : 0
+    return { row, i, a0: a0 + gap, a1: Math.max(a0 + gap, a1 - gap), frac }
+  })
+  const arcPath = (a0, a1) => {
+    const big = a1 - a0 > Math.PI ? 1 : 0
+    const p = (a, rad) => `${cx + Math.cos(a) * rad},${cy + Math.sin(a) * rad}`
+    return `M${p(a0, R)} A${R},${R} 0 ${big} 1 ${p(a1, R)} L${p(a1, r0)} A${r0},${r0} 0 ${big} 0 ${p(a0, r0)} Z`
+  }
+  return (
+    <div className="vizplot donut">
+      <svg viewBox="0 0 620 224" className="vizsvg" role="img" aria-label={unit}>
+        {arcs.map(({ row, i, a0, a1 }) => (
+          <path key={row.label} d={arcPath(a0, a1)}
+            fill={row.other ? 'var(--viz-other)' : VIZ[i % VIZ.length]}
+            opacity={hover == null || hover === i ? 1 : 0.45}
+            onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} />
+        ))}
+        {/* the whole, in the hole */}
+        <text x={cx} y={cy - 2} textAnchor="middle" className="vizhero">{compact(total)}</text>
+        <text x={cx} y={cy + 16} textAnchor="middle" className="viztick">{unit}</text>
+        {/* labels sit outside the ring in ink, never in the slice colour */}
+        {arcs.map(({ row, i, frac }) => (
+          <g key={'l' + row.label} transform={`translate(238, ${18 + i * 30})`}
+            onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+            <rect x="-6" y="-12" width="380" height="26" fill="transparent" />
+            <rect x="0" y="-7" width="12" height="12" rx="3"
+              fill={row.other ? 'var(--viz-other)' : VIZ[i % VIZ.length]} />
+            <text x="20" y="3" className="vizname">{row.label}</text>
+            <text x="330" y="3" textAnchor="end" className="vizlabel">
+              {compact(row.value)} · {(frac * 100).toFixed(frac < 0.01 ? 2 : 0)}%
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  )
+}
+
+// A figure and the screen that clears it. `tone` is 'warn' only when there is
+// something to do — a tile that shouts at zero teaches people to ignore it.
+function DashTile({ label, value, sub, tone, hint, onClick }) {
+  return (
+    <button className={'dtile' + (tone ? ' ' + tone : '')} onClick={onClick}
+      title={hint || `Open ${label}`}>
+      <span className="lbl">{label}</span>
+      <span className={'val' + (longValue(value) ? ' long' : '')}>{value}</span>
+      <span className="sub">{sub || ' '}</span>
+    </button>
+  )
+}
+
+const sum = (rows, f) => rows.reduce((a, r) => a + (+f(r) || 0), 0)
+
+// The graphical half. Kept in its own component so its data is fetched only when
+// someone actually opens it — the aggregation walks every product and movement,
+// and the static view has no use for it.
+function DashboardCharts({ money }) {
+  const [c, setC] = useState(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    api.dashboardCharts().then(setC).catch((e) => setErr(
+      // The frontend is read off disk and refreshes with the browser, but routes
+      // are registered when Python starts. A backend left running from before
+      // this endpoint existed serves the new screen and 404s its calls — a
+      // restart, not a fault, and a bare "404" sends someone hunting the wrong thing.
+      (e.status === 404 || e.status === 405)
+        ? 'the server is still running the code from before the charts were added — '
+          + 'restart the backend (Ctrl-C in the run window, then run.bat again) and reload this page'
+        : `${e.message || 'the request failed'} — the figures on the static view are unaffected`))
+  }, [])
+
+  if (err) return <div className="warnbox"><h4>The charts could not be loaded</h4>
+    <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div></div>
+  if (!c) return <div className="empty" style={{ marginTop: 60 }}>Building the charts…</div>
+
+  const mv = c.movement
+  const hasAny = c.purchases.values.some((v) => v > 0) ||
+    mv.series.some((s) => s.values.some((v) => v > 0)) || c.stock_by_category.length > 0
+  if (!hasAny) return (
+    <div className="empty" style={{ marginTop: 60 }}>Nothing to plot yet.<br />
+      <span className="small">Charts appear once there are posted receipts and stock
+        movements to draw — the static view shows what is recorded so far.</span></div>
+  )
+
+  return (
+    <div className="vizgrid">
+      <ChartCard title="Purchases per month"
+        note="Posted receipts, on the invoice date rather than the day they were keyed."
+        columns={['Month', 'Purchases (₹)']}
+        rows={c.purchases.labels.map((l, i) => [l, money(c.purchases.values[i])])}>
+        <LineChart labels={c.purchases.labels} values={c.purchases.values} unit="₹" />
+      </ChartCard>
+
+      <ChartCard title="Stock received and dispatched"
+        note="Pieces moved per month. Both are counted positive so the two can be compared."
+        legend={<Legend items={[{ label: mv.series[0].name, color: VIZ[0] },
+                                { label: mv.series[1].name, color: VIZ[1] }]} />}
+        columns={['Month', mv.series[0].name, mv.series[1].name]}
+        rows={mv.labels.map((l, i) => [l, mv.series[0].values[i], mv.series[1].values[i]])}>
+        <GroupedBars labels={mv.labels} series={mv.series} unit="pcs" />
+      </ChartCard>
+
+      <ChartCard title="Stock value by category"
+        note="Only stock a posted GRN created — the same rule behind the Stock value tile, so the ring totals it."
+        columns={['Category', 'Value (₹)']}
+        rows={c.stock_by_category.map((r) => [r.label, money(r.value)])}>
+        <Donut rows={c.stock_by_category} unit="₹ stock value" />
+      </ChartCard>
+
+      <ChartCard title="Top suppliers by purchase value"
+        note="Posted receipts, all periods."
+        columns={['Supplier', 'Purchases (₹)']}
+        rows={c.top_suppliers.map((r) => [r.label, money(r.value)])}>
+        <HBars rows={c.top_suppliers} unit="₹" />
+      </ChartCard>
+
+      <ChartCard title="Payables by age"
+        note="What is owed, by how long it has been owed. An unreadable invoice date counts as oldest rather than being dropped, so this totals the payables tile."
+        columns={['Age', 'Outstanding (₹)', 'Bills']}
+        rows={c.payables_ageing.map((r) => [r.label, money(r.value), r.bills])}>
+        <HBars rows={c.payables_ageing} unit="₹ outstanding" ordinal />
+      </ChartCard>
+    </div>
+  )
+}
+
+function Dashboard({ modules, go, company, docs, refreshDocs }) {
+  const [d, setD] = useState(null)
+  const [partial, setPartial] = useState(false)
+  const [busy, setBusy] = useState(false)
+  // Which half is showing. Remembered, because someone who works from the charts
+  // wants the charts every morning, not the tiles again.
+  const [view, setViewState] = useState(() => {
+    try { return localStorage.getItem('essa_dash_view') || 'static' } catch { return 'static' }
+  })
+  const setView = (v) => {
+    setViewState(v)
+    try { localStorage.setItem('essa_dash_view', v) } catch { /* private mode */ }
+  }
+
+  // allSettled, not all: an inventory scan that fails must not blank the six
+  // figures that loaded. What is missing is said out loud instead.
+  const load = useCallback(() => {
+    setBusy(true)
+    return Promise.allSettled([
+      api.listPurchases(), api.inventorySummary(), api.listOutwards('posted'),
+      api.listOutwards('draft'), api.pendingBills(), api.listReturns(),
+      api.lrList(), api.listSuppliers(),
+    ]).then((r) => {
+      const v = (i, fb) => (r[i].status === 'fulfilled' ? r[i].value : fb)
+      setPartial(r.some((x) => x.status === 'rejected'))
+      setD({
+        grns: v(0, []), stock: v(1, {}), transit: v(2, []), outDrafts: v(3, []),
+        bills: v(4, []), returns: v(5, []), lr: v(6, []), suppliers: v(7, []),
+      })
+    }).finally(() => setBusy(false))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  if (!d) return <div className="empty" style={{ marginTop: 120 }}>Loading the dashboard…</div>
+
+  const toReview = docs.filter((x) => x.status === 'needs_review').length
+  const grnDrafts = d.grns.filter((g) => g.status === 'draft')
+  const grnPosted = d.grns.filter((g) => g.status === 'posted')
+  const shortLines = sum(d.grns, (g) => g.short_lines)
+  const shortValue = sum(d.grns, (g) => g.short_value)
+  const lrPending = d.lr.filter((e) => !e.received_by).length
+  const lrUnlinked = d.lr.filter((e) => !e.matched).length
+  const payable = sum(d.bills, (b) => b.outstanding)
+  const overdue = d.bills.filter((b) => (b.days || 0) > 30)
+  const retDrafts = d.returns.filter((r) => r.status === 'draft').length
+  const pendingDetail = d.stock.pending_detail || 0
+  const transitQty = sum(d.transit, (o) => o.total_qty)
+
+  const attention = [
+    { key: 'documents', label: 'Invoices to review', value: toReview, tone: toReview ? 'warn' : '',
+      sub: toReview ? 'read, but something did not reconcile' : 'nothing waiting',
+      hint: 'Open Invoice Entry — documents extracted but not yet confirmed' },
+    { key: 'purchases', label: 'GRNs in draft', value: grnDrafts.length, tone: grnDrafts.length ? 'warn' : '',
+      sub: grnDrafts.length ? `₹ ${money(sum(grnDrafts, (g) => g.grand_total))} not yet in stock` : 'all receipts posted',
+      hint: 'Open GRN — receipts counted but not posted, so the goods are not stock yet' },
+    { key: 'inward', label: 'Transfers in transit', value: d.transit.length, tone: d.transit.length ? 'warn' : '',
+      sub: d.transit.length ? `${transitQty} pcs dispatched, not accepted` : 'nothing on the road',
+      hint: 'Open Stock Inward — dispatched transfers no destination has checked in' },
+    { key: 'lr', label: 'Consignments not received', value: lrPending, tone: lrPending ? 'warn' : '',
+      sub: lrPending ? 'in the register, not taken in' : 'register is clear',
+      hint: 'Open LR Entry — consignments booked but nobody has signed for them' },
+    { key: 'purchases', label: 'Open shortage claims', value: shortLines, tone: shortLines ? 'warn' : '',
+      sub: shortLines ? `₹ ${money(shortValue)} billed and not delivered` : 'no open claims',
+      hint: 'Open GRN — goods billed that the boxes did not hold, not yet waived or claimed' },
+    { key: 'payments', label: 'Payable to suppliers', value: '₹ ' + money(payable),
+      tone: overdue.length ? 'warn' : '',
+      sub: d.bills.length ? `${d.bills.length} bill${d.bills.length === 1 ? '' : 's'}${overdue.length ? ` · ${overdue.length} over 30 days` : ''}` : 'nothing outstanding',
+      hint: 'Open Payments — unpaid supplier invoices' },
+  ]
+  const open = attention.filter((a) => a.tone === 'warn').length
+
+  const recentDocs = docs.slice(0, 6)
+  const recentGrns = d.grns.slice(0, 6)
+
+  return (
+    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+      <div className="pagehead">
+        <h2>Dashboard</h2>
+        <div className="pagesub small">
+          {company || 'Essa'} — {open
+            ? `${open} thing${open === 1 ? '' : 's'} waiting on someone`
+            : 'nothing is waiting — every queue is clear'}
+        </div>
+        {/* Two ways of reading the same warehouse: the figures, or their shape
+            over time. A segmented control rather than tabs — it is one thing
+            with two states, not two screens. */}
+        <div className="segbar" role="tablist" aria-label="Dashboard view">
+          <button role="tab" aria-selected={view === 'static'}
+            className={'seg' + (view === 'static' ? ' on' : '')} onClick={() => setView('static')}
+            title="Figures, counts and what is waiting on someone">▦ Figures</button>
+          <button role="tab" aria-selected={view === 'graphical'}
+            className={'seg' + (view === 'graphical' ? ' on' : '')} onClick={() => setView('graphical')}
+            title="The same warehouse as trends and shares over time">📈 Charts</button>
+        </div>
+        <button className="btn" onClick={() => { refreshDocs(); load() }} disabled={busy}
+          title="Re-read every figure on this screen">{busy ? 'Refreshing…' : '↻ Refresh'}</button>
+      </div>
+
+      <div className="dash">
+        {view === 'graphical' && <DashboardCharts money={money} />}
+        {view === 'static' && <>
+        {partial && <div className="warnbox" style={{ marginBottom: 'var(--sp-5)' }}>
+          <h4>Some figures did not load</h4>
+          <div className="small" style={{ color: 'var(--text-2)' }}>
+            The tiles below show what the server did return. Refresh to try the rest again —
+            a blank tile here means unread, not zero.
+          </div>
+        </div>}
+
+        <Section id="dash-attention" title="Waiting on someone"
+          summary={open ? `${open} queue${open === 1 ? '' : 's'} not clear` : 'all clear'}>
+          <div className="dgrid">
+            {attention.map((a, i) => (
+              <DashTile key={i} label={a.label} value={a.value} sub={a.sub} tone={a.tone}
+                hint={a.hint} onClick={() => go(a.key)} />
+            ))}
+          </div>
+        </Section>
+
+        <Section id="dash-stock" title="Stock at a glance"
+          summary={`${d.stock.product_count || 0} records · ₹ ${money(d.stock.total_stock_value)}`}>
+          <div className="dgrid">
+            <DashTile label="Stock value" value={'₹ ' + money(d.stock.total_stock_value)}
+              sub="at purchase cost, posted receipts only" onClick={() => go('inventory')}
+              hint="Open Inventory — only records a posted GRN created are counted" />
+            <DashTile label="Pieces on hand" value={(d.stock.total_units || 0).toLocaleString('en-IN')}
+              sub={`${d.stock.product_count || 0} inventory records`} onClick={() => go('inventory')} />
+            <DashTile label="Awaiting physical detail" value={pendingDetail}
+              tone={pendingDetail ? 'warn' : ''}
+              sub={pendingDetail ? 'colour, size and fit not recorded yet' : 'every item detailed'}
+              hint="Open Inventory — items received but never looked at on the phone"
+              onClick={() => go('inventory')} />
+            <DashTile label="Purchase returns in draft" value={retDrafts}
+              tone={retDrafts ? 'warn' : ''}
+              sub={retDrafts ? 'debit notes not yet raised' : 'no open debit notes'}
+              onClick={() => go('returns')} />
+            <DashTile label="Outward drafts" value={d.outDrafts.length}
+              tone={d.outDrafts.length ? 'warn' : ''}
+              sub={d.outDrafts.length ? 'packed but not dispatched' : 'nothing packed'}
+              onClick={() => go('outward')} />
+            <DashTile label="LR rows without an invoice" value={lrUnlinked}
+              sub={lrUnlinked ? 'no invoice matched to them yet' : 'every row is linked'}
+              hint="Open LR Entry — register rows no invoice has been matched against"
+              onClick={() => go('lr')} />
+          </div>
+          <div className="items-foot">
+            <span>Posted GRNs <b>{grnPosted.length}</b></span>
+            <span>Suppliers <b>{d.suppliers.length}</b></span>
+            <span>Documents <b>{docs.length}</b></span>
+            <span>LR entries <b>{d.lr.length}</b></span>
+            {d.stock.excluded_products > 0 && <span title="Records not traceable to a posted GRN — debris, or kept at zero after an unpost. They are not stock, so they are not valued.">
+              Excluded from stock <b>{d.stock.excluded_products}</b></span>}
+          </div>
+        </Section>
+
+        <Section id="dash-modules" title="Warehouse modules" summary={`${modules.length} screens`}>
+          <div className="modgrid">
+            {modules.map((m) => (
+              <button key={m.key} className="modcard" onClick={() => go(m.key)} title={m.blurb}>
+                <span className="ico" aria-hidden="true">{m.icon}</span>
+                <span className="lbl">{m.label}</span>
+                <span className="blurb">{m.blurb}</span>
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        <Section id="dash-recent" title="Latest activity" defaultOpen={false}
+          summary={`${recentDocs.length} documents · ${recentGrns.length} receipts`}>
+          <div className="drecent">
+            <div>
+              <h5>Documents</h5>
+              {recentDocs.length === 0 && <div className="small">Nothing uploaded yet.</div>}
+              {recentDocs.map((x) => (
+                <button key={x.id} className="drow" onClick={() => go('documents')}
+                  title="Open Invoice Entry">
+                  <span className="nm">{x.supplier_name || x.filename}</span>
+                  <span className={'badge ' + x.status}>{x.status.replace('_', ' ')}</span>
+                  <span className="amt">₹ {money(x.grand_total)}</span>
+                </button>
+              ))}
+            </div>
+            <div>
+              <h5>Goods receipts</h5>
+              {recentGrns.length === 0 && <div className="small">No GRN has been created yet.</div>}
+              {recentGrns.map((g) => (
+                <button key={g.id} className="drow" onClick={() => go('purchases')}
+                  title="Open GRN">
+                  <span className="nm">{g.grn_no || '#' + g.id} · {g.supplier_name || '—'}</span>
+                  {/* same two colours the GRN screen uses for the same two states */}
+                  <span className={'badge ' + (g.status === 'posted' ? 'confirmed' : 'uploaded')}>{g.status}</span>
+                  <span className="amt">₹ {money(g.grand_total)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </Section>
+        </>}
+      </div>
+    </div>
+  )
+}
+
 // ---------- app shell ----------
 export default function App() {
   // the open tab survives a reload — a warehouse screen is left on the module
   // someone works in, and losing it on every refresh is a small daily tax
-  const [tab, setTabState] = useState(() => localStorage.getItem('essa_tab') || 'lr')
+  const [tab, setTabState] = useState(() => localStorage.getItem('essa_tab') || 'dashboard')
   const setTab = (t) => { setTabState(t); try { localStorage.setItem('essa_tab', t) } catch { /* private mode */ } }
   const [status, setStatus] = useState(null)
   const [docs, setDocs] = useState([])
@@ -3741,6 +4900,12 @@ export default function App() {
   }
 
   const providers = status?.providers || {}
+  // Masters is admin-only, so it is absent from the menu and the dashboard grid
+  // for everyone else rather than present and refusing.
+  const modules = MODULES.filter((m) => !m.admin || role === 'admin')
+  // A `pos:` tab is a screen of the shop rather than one of ours, and is served
+  // in a frame — so it is answered before the warehouse chain below.
+  const posScreen = POS_ITEMS.find((p) => p && p.key === tab)
 
   if (!authChecked) return <div className="login-wrap"><div className="login-bg" /></div>
   if (!authed) return <LoginScreen onLogin={handleLogin} />
@@ -3748,9 +4913,9 @@ export default function App() {
   return (
     <div className="app">
       {/* Brand and account actions on one row, navigation on its own below it.
-          Eleven modules and five controls never fitted on a single line — the
-          last button was clipped at 1600px — and squeezing them is the wrong
-          trade: navigation is the most-used thing on the screen. */}
+          The eleven modules are one warehouse, so they sit behind one menu on
+          that row; what the row opens with is the dashboard, which is the only
+          screen that answers "which of the eleven did I need". */}
       <div className="topbar">
         <div className="brand">Essa <span>·</span> Document Intake<small>{status?.company?.name} — invoice → data, trained per supplier</small></div>
         <div className="spacer" />
@@ -3761,27 +4926,28 @@ export default function App() {
         <label className="btn primary uploadbtn">Upload invoice<input type="file" accept="image/*,.pdf" onChange={onUpload} /></label>
         <button className="btn" title={'Signed in as ' + user} onClick={logout}>Logout</button>
       </div>
+      {/* Not wrapped in .tabs: that class styles a strip of tab buttons, and its
+          rules (nowrap above all) reach into the menu's own buttons and stop the
+          descriptions wrapping. There is no strip left to style anyway. */}
       <div className="navbar">
-        <div className="tabs">
-          <button className={tab === 'lr' ? 'active' : ''} onClick={() => setTab('lr')}>LR Entry</button>
-          <button className={tab === 'documents' ? 'active' : ''} onClick={() => setTab('documents')}>Invoice Entry</button>
-          <button className={tab === 'purchases' ? 'active' : ''} onClick={() => setTab('purchases')}>GRN</button>
-          <button className={tab === 'inventory' ? 'active' : ''} onClick={() => setTab('inventory')}>Inventory</button>
-          <button className={tab === 'outward' ? 'active' : ''} onClick={() => setTab('outward')}>Stock Outward</button>
-          <button className={tab === 'inward' ? 'active' : ''} onClick={() => setTab('inward')}>Stock Inward</button>
-          <button className={tab === 'returns' ? 'active' : ''} onClick={() => setTab('returns')}>Returns</button>
-          <button className={tab === 'payments' ? 'active' : ''} onClick={() => setTab('payments')}>Payments</button>
-          <button className={tab === 'reports' ? 'active' : ''} onClick={() => setTab('reports')}>Reports</button>
-          <button className={tab === 'suppliers' ? 'active' : ''} onClick={() => setTab('suppliers')}>Suppliers</button>
-          {role === 'admin' && <button className={tab === 'masters' ? 'active' : ''} onClick={() => setTab('masters')}>Masters</button>}
-        </div>
+        <NavMenu tab={tab} setTab={setTab} items={[DASHBOARD, null, ...modules]}
+          icon="🏬" label="Warehouse" hint="Every warehouse screen" />
+        <span className="navsep" aria-hidden="true" />
+        <NavMenu tab={tab} setTab={setTab} items={POS_ITEMS}
+          icon="🛍" label="POS" hint="The retail shop — billing, floor sales and shop stock" />
       </div>
 
-      {tab === 'lr' ? (
+      {posScreen ? (
+        <PosScreen screen={posScreen} available={status?.pos?.available}
+          error={status?.pos?.error} />
+      ) : tab === 'dashboard' ? (
+        <Dashboard modules={modules} go={setTab} company={status?.company?.name}
+          docs={docs} refreshDocs={refresh} />
+      ) : tab === 'lr' ? (
         <div className="body"><LREntryView toast={toast} /></div>
       ) : tab === 'documents' ? (
         <div className="body">
-          <div className="sidebar">
+          <Sidebar id="documents" label="Documents">
             <div className="head"><h3>Documents · {docs.length}</h3>
               {docs.length > 0 && <button className="btn" style={{ padding: '3px 9px', fontSize: 11 }}
                 onClick={clearAll} title="Delete all documents & transaction data">Clear all</button>}</div>
@@ -3814,7 +4980,7 @@ export default function App() {
                 </div>
               ))}
             </div>
-          </div>
+          </Sidebar>
           <Review docId={sel} onSaved={refresh} onCreateGrn={gotoPurchase} toast={toast} />
         </div>
       ) : tab === 'purchases' ? (
@@ -3833,7 +4999,14 @@ export default function App() {
         <Reports />
       ) : tab === 'masters' ? (
         role === 'admin' ? <Masters toast={toast} /> : <div className="empty">Masters are admin-only.</div>
-      ) : <Suppliers toast={toast} />}
+      ) : tab === 'suppliers' ? (
+        <Suppliers toast={toast} />
+      ) : (
+        // an unknown saved tab (a module renamed since it was stored) lands on
+        // the dashboard rather than on a blank screen
+        <Dashboard modules={modules} go={setTab} company={status?.company?.name}
+          docs={docs} refreshDocs={refresh} />
+      )}
 
       {scanning && <ScanningOverlay url={scanning.url} name={scanning.name}
         vision={!!providers.claude_vision} />}

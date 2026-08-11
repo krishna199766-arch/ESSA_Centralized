@@ -9,3 +9,24 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# Android build. `local.properties` holds a machine-specific SDK path, and the
+# APK is a build product — GitHub Actions rebuilds it from source on demand
+# (.github/workflows/android-apk.yml), so a copy here would only go stale.
+android/build-output/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# The shop's own database, and the backups taken before anything destructive.
+Textile Retail Shop/textile_shop.db
+*.db.bak*
+
+# The shop's virtualenvs. `backend/.venv/` is ignored above; these were missed
+# when the shop was added, and `.venv-win` alone is 1,674 files and 55 MB of
+# vendored packages. `.venv` happens to self-ignore (venv writes a `.gitignore`
+# containing `*` into the directory it creates) — `.venv-win` predates that and
+# does not, so both are named here rather than relying on that.
+Textile Retail Shop/.venv/
+Textile Retail Shop/.venv-win/

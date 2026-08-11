@@ -43,6 +43,12 @@ def _doc_out(doc: models.Document):
         "invoice_number": (data.get("invoice", {}) or {}).get("number"),
         "confidence": ex.confidence if ex else None,
         "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+        # The viewer hangs this off the image URL. Document ids are recycled —
+        # "Clear all" empties the table and the next upload takes id 1 again — so
+        # a URL built from the id alone can be answered from cache with the file
+        # that used to live at that id. The hash changes when the bytes do, which
+        # is the only thing that makes the URL mean one specific image.
+        "content_hash": doc.content_hash,
     }
 
 
@@ -212,7 +218,19 @@ def get_image(doc_id: int, db: Session = Depends(get_db)):
     doc = db.get(models.Document, doc_id)
     if not doc or not os.path.exists(doc.stored_path):
         raise HTTPException(404, "image not found")
-    return FileResponse(doc.stored_path)
+    # This URL is not content-addressed — it names a row, and rows are recycled:
+    # "Clear all" empties the table, and SQLite hands the next upload the same id
+    # the deleted one had. Without a directive the browser applies *heuristic*
+    # freshness (a fraction of the file's age) and reuses the bytes it cached
+    # under this URL without asking, so the viewer shows the invoice that used to
+    # be document 2 next to the data of the one that is document 2 now.
+    # no-cache means "ask before reusing". FileResponse sends an ETag but does
+    # not answer conditional requests with 304, so in practice every view of a
+    # document re-fetches the file — a couple of hundred KB over localhost, which
+    # is the cheap half of this trade. Caching it properly would mean putting the
+    # content hash in the URL so the URL changes when the bytes do; until the
+    # payload carries that hash, correct beats clever here.
+    return FileResponse(doc.stored_path, headers={"Cache-Control": "no-cache"})
 
 
 def _searched_for(data):

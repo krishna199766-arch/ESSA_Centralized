@@ -42,6 +42,76 @@
   --text-2: #574C46;
   --muted: #7C6F68;
 
+  /* --- dark chrome ---
+     The top bar and the nav row are a dark coffee brown; everything below them
+     stays light. Text on the chrome is white (13.40:1) with #DCC9C1 for the
+     second rank (8.40:1) and #B08D80 for its borders (4.44:1) — the brand tints
+     already in this file, which is why they sit with it.
+
+     --brand itself is unusable here: 1.25:1 on the chrome, invisible. That is
+     the whole reason the accent is gold, and why the active nav state cannot be
+     carried by its fill alone — #6B3712 is 1.39:1 against the chrome, well under
+     the 3:1 this file asks of any UI boundary. A gold left marker carries it
+     instead (4.16:1 against the fill), and the label stays white (9.63:1).
+     Gold as *text* on that fill is 4.16:1 and would fail, so it is never used
+     that way — only as the marker. */
+  --chrome: #4B2509;
+  --chrome-active: #6B3712;   /* the open module */
+  --chrome-line: rgba(0,0,0,.22);
+  /* Depth comes from gradients that only ever darken from --chrome, never
+     lighten past it. That direction is deliberate: every ratio below was
+     measured against #4B2509, and going darker can only improve them, so the
+     chrome can gain dimension without re-opening the contrast question.
+     Lightest stop in play is #552D0C — white 11.89:1, gold 5.13:1. */
+  --chrome-top: linear-gradient(180deg, #552D0C 0%, #45220A 100%);
+  --chrome-nav: linear-gradient(180deg, #45220A 0%, #3A1C05 100%);
+  --on-chrome: #FFFFFF;             /* 13.40:1 */
+  --on-chrome-2: var(--brand-200);  /*  8.40:1 — subtitles, pill labels */
+  --on-chrome-line: var(--brand-300); /* 4.44:1 — ghost-button borders */
+
+  /* --- gold: the primary action, on light surfaces and on the chrome ---
+     Dark label, never white: #2A2320 on gold is 6.67:1, white is 2.31:1 and
+     fails. Gold against the light page is only 2.08:1, so a gold button on a
+     light panel needs --gold-line to have a findable edge (3.43:1). */
+  --gold: #D4A24C;
+  --gold-700: #C9962C;    /* hover — 5.80:1 with the dark label */
+  --gold-line: #A87A2E;   /* 3.43:1 on --bg, and 3.32:1 on --panel-2 —
+                             which is why accent bars on tiles use THIS and not
+                             --gold, at 2.01:1 there it would be a bar nobody
+                             can see */
+  /* Both stops carry the dark label: 7.68:1 and 5.80:1. */
+  --gold-fill: linear-gradient(180deg, #DDB05E 0%, #C9962C 100%);
+  --gold-fill-hover: linear-gradient(180deg, #E3B863 0%, #BE8A22 100%);
+  --gold-glow: 0 2px 10px rgba(168,122,46,.38);
+
+  /* --- chart palette ---
+     Categorical slots, assigned in this fixed order and never cycled, so an
+     entity keeps its colour when a filter changes the series count.
+
+     The order is the colourblind-safety mechanism, not a preference: candidate
+     orderings were run through the validator against THIS surface (#FFFFFF, the
+     panel charts sit on) and this one is a passing order — worst adjacent pair
+     ΔE 22.7 under simulated protan/deutan (≥8 target) and 29.0 under normal
+     vision (≥15 floor), every slot ≥3:1 against the surface. No warnings.
+
+     These are deliberately NOT --ok / --warn / --danger, even though those are
+     the right hues. A status colour has one job in this app — it means good or
+     bad — and a series wearing it would claim a meaning the chart is not making.
+     Reordering or substituting any slot means re-running the validator. */
+  --viz-1: #008300;   /* green  */
+  --viz-2: #2a78d6;   /* blue   — also the single-series / sequential default */
+  --viz-3: #eb6834;   /* orange */
+  --viz-4: #4a3aa7;   /* violet */
+  --viz-5: #e34948;   /* red    */
+  --viz-other: #8C837B;   /* the folded tail — neutral, never a categorical hue */
+  --viz-grid: #EFEAE6;    /* hairline, one step off the surface */
+  --viz-axis: #D6CEC8;
+  /* Ordinal ramp for ordered bands (payables ageing). One hue getting darker —
+     the app's own brand scale, validated: monotone lightness, every gap ≥0.06,
+     light end 3.01:1 on white, hue spread 3°. */
+  --viz-ord-1: #B08D80; --viz-ord-2: #7A4C3D;
+  --viz-ord-3: #5A3428; --viz-ord-4: #40241B;
+
   /* --- semantic. Kept away from the brand hue on purpose. --- */
   --ok: #1E7A4D;        --ok-bg: #E7F4ED;      --ok-line: #BFE0CE;
   --warn: #B45309;      --warn-bg: #FDF2E3;    --warn-line: #F0D6AE;
@@ -54,7 +124,7 @@
 
   /* --- type scale --- */
   --fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px; --fs-md: 14px;
-  --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 26px;
+  --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 26px; --fs-3xl: 31px;
   --lh-tight: 1.25; --lh: 1.45;
 
   /* --- spacing scale --- */
@@ -70,6 +140,13 @@
   color-scheme: light;
 }
 * { box-sizing: border-box; }
+/* The hover lifts are the only motion added for polish, and polish is exactly
+   what someone who asked the OS for less motion does not want. Colour and shadow
+   still respond, so nothing loses its affordance. */
+@media (prefers-reduced-motion: reduce) {
+  .btn, .dtile, .modcard { transition-property: background, border-color, color, box-shadow; }
+  .btn.primary:hover, .dtile:hover, .modcard:hover { transform: none; }
+}
 body { margin: 0; background: var(--bg); color: var(--text); font-size: var(--fs-md);
   line-height: var(--lh); -webkit-font-smoothing: antialiased; }
 button { font-family: inherit; cursor: pointer; }
@@ -83,45 +160,325 @@ a { color: var(--brand); text-underline-offset: 2px; }
 /* ---------- top bar ---------- */
 .topbar {
   display: flex; align-items: center; gap: var(--sp-3); flex: 0 0 auto;
-  padding: var(--sp-3) var(--sp-5); background: var(--panel);
-  border-bottom: 1px solid var(--line); z-index: 11;
+  padding: var(--sp-3) var(--sp-5);
+  background-color: var(--chrome); background-image: var(--chrome-top);
+  border-bottom: 1px solid var(--chrome-line); z-index: 11;
 }
 /* actions never shrink — a clipped button is worse than a scrolled tab strip */
 .topbar > .btn, .topbar > .pill, .topbar > label { flex: 0 0 auto; }
 .brand { font-weight: 700; font-size: var(--fs-lg); letter-spacing: -.2px;
-  color: var(--brand); flex: 0 1 auto; min-width: 0; line-height: var(--lh-tight); }
-.brand span { color: var(--brand-500); }
-.brand small { display: block; font-weight: 400; color: var(--muted);
+  color: var(--on-chrome); flex: 0 1 auto; min-width: 0; line-height: var(--lh-tight); }
+.brand span { color: var(--gold); }
+.brand small { display: block; font-weight: 400; color: var(--on-chrome-2);
   font-size: var(--fs-xs); letter-spacing: 0; line-height: 1.35; margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar .spacer { flex: 1; }
 
-/* navigation gets its own full-width row: eleven modules and five controls do
-   not fit on one line, and navigation is the thing people use most */
+/* The brown focus ring is 1.25:1 on the chrome — it would be a focus indicator
+   nobody can see. Gold is 5.79:1 there. */
+.topbar :focus-visible, .navbar :focus-visible { outline-color: var(--gold); }
+
+/* Ghost buttons on the chrome: a white-filled button up here reads as a card
+   sitting on the bar rather than as an action on it. The primary action is
+   excluded by name rather than left to source order — "Upload invoice" is gold
+   up here like everywhere else. */
+.topbar .btn:not(.primary) { background: transparent; border-color: var(--on-chrome-line);
+  color: var(--on-chrome); }
+.topbar .btn:not(.primary):hover { background: rgba(255,255,255,.12);
+  border-color: var(--on-chrome); color: var(--on-chrome); }
+/* the provider pills read on the chrome, keeping green for "on" */
+.topbar .pill { background: transparent; border-color: var(--on-chrome-line);
+  color: var(--on-chrome-2); }
+.topbar .pill.on { background: rgba(255,255,255,.10); border-color: var(--ok-line);
+  color: var(--ok-line); }
+.topbar .pill.off { color: var(--on-chrome-2); }
+
+/* navigation gets its own full-width row: it is the thing people use most, and
+   it never shares a line with the account controls */
 .navbar { display: flex; align-items: center; flex: 0 0 auto;
-  padding: var(--sp-1) var(--sp-5); background: var(--panel);
-  border-bottom: 1px solid var(--line); box-shadow: var(--shadow-1); z-index: 10; }
-.navbar .tabs { overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
+  padding: var(--sp-1) var(--sp-5);
+  background-color: var(--chrome); background-image: var(--chrome-nav);
+  box-shadow: var(--shadow-1); position: relative; z-index: 10; }
+/* A gold hairline where the dark chrome meets the light page. It is the one
+   flourish that does the most work: it finishes the dark block, ties the gold
+   accent to the chrome rather than leaving it stranded on the buttons, and it
+   is decoration only — the chrome/page boundary is already carried by a 12:1
+   luminance step, so this line is never load-bearing. */
+.navbar::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0;
+  height: 2px; pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, var(--gold-line) 12%,
+    var(--gold) 38%, #F0C97A 50%, var(--gold) 62%, var(--gold-line) 88%, transparent 100%); }
+/* No overflow rule here, deliberately: the row used to scroll sideways because
+   it carried all eleven modules as buttons, and a scroll container would now
+   clip the Warehouse menu that drops out of it. The `.tabs` strip those buttons
+   sat in is gone with them — its `white-space: nowrap` reached into the menu's
+   own buttons and stopped the descriptions wrapping. */
 .pill { font-size: var(--fs-xs); padding: 4px 10px; border-radius: 999px;
   border: 1px solid var(--line); color: var(--muted); background: var(--panel); }
 .pill.on { color: var(--ok); border-color: var(--ok-line); background: var(--ok-bg); }
 .pill.off { color: var(--muted); }
-.tabs { display: flex; gap: 2px; }
-.tabs button {
-  background: transparent; border: none; color: var(--text-2);
-  padding: 8px 14px; border-radius: var(--radius-sm); font-size: var(--fs-base);
-  font-weight: 500; line-height: var(--lh-tight); white-space: nowrap;
-}
-.tabs button:hover { background: var(--brand-50); color: var(--brand); }
-.tabs button.active { background: var(--brand); color: #fff; font-weight: 600; }
+
+/* ---------- the Warehouse menu ----------
+   One button for the eleven modules. It keeps saying which one is open while
+   closed — a collapsed navigation that doesn't say where you are is how someone
+   loses the screen and re-opens the menu just to find out. */
+.navmenu { position: relative; display: inline-flex; }
+.navmenu-btn { display: inline-flex; align-items: center; gap: var(--sp-2);
+  background: transparent; border: none; color: var(--on-chrome); padding: 8px 14px;
+  border-radius: var(--radius-sm); font-size: var(--fs-base); font-weight: 500;
+  line-height: var(--lh-tight); white-space: nowrap; }
+.navmenu-btn:hover { background: rgba(255,255,255,.12); }
+.navmenu-btn.open { background: rgba(255,255,255,.16); }
+/* The open module, as the page surface coming forward and attaching to the bar.
+   A brown pill cannot do this job: #6B3712 measured 1.47:1 against this bar and
+   every lighter brown tops out around 3.0 only by dragging its own white label
+   down to 4.67:1 — it trades one problem for the other and never gets crisp.
+   This light pill is 12.95:1 against the bar with a 9.84:1 label, so "where you
+   are" is unmistakable at a glance.
+   Gold would also have been visible (6.1:1), and is deliberately not used here:
+   gold means "this is the action to take" on this screen, and the module you are
+   already looking at is not an action. Gold stays as the edge marker only. */
+.navmenu-btn.active { font-weight: 700; color: var(--brand);
+  background-color: var(--panel);
+  background-image: linear-gradient(180deg, #FFFFFF 0%, #F2EEEB 100%);
+  box-shadow: inset 3px 0 0 var(--gold-line), 0 2px 8px rgba(0,0,0,.28);
+  padding-left: 17px; }
+.navmenu-btn.active:hover { background-image: linear-gradient(180deg, #FFFFFF 0%, #EAE4E0 100%); }
+.navmenu-btn .where { font-weight: 700; padding-left: var(--sp-2);
+  border-left: 1px solid rgba(255,255,255,.45); }
+.navmenu-btn .caret { color: var(--on-chrome-2); font-size: var(--fs-sm); }
+/* On the light pill the white divider and the pale caret are 1.46:1 — invisible.
+   They have to flip with the surface they sit on. */
+.navmenu-btn.active .where { border-left-color: var(--line-strong); }
+.navmenu-btn.active .caret { color: var(--muted); }
+
+.navmenu-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  width: 360px; max-height: min(78vh, 660px); overflow-y: auto; padding: var(--sp-2);
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-3); }
+.navmenu-item { display: flex; align-items: flex-start; gap: var(--sp-3); width: 100%;
+  text-align: left; background: transparent; border: none; padding: 9px 10px;
+  border-radius: var(--radius-sm); color: var(--text); white-space: normal; }
+.navmenu-item:hover { background: var(--brand-50); }
+/* the open screen gets the same gold mark the nav button wears, so the menu and
+   the bar agree about where you are */
+.navmenu-item.on { background: var(--brand-100);
+  box-shadow: inset 3px 0 0 var(--gold-line); }
+.navmenu-item .ico { flex: 0 0 22px; font-size: var(--fs-lg); line-height: 1.25;
+  text-align: center; }
+.navmenu-item .txt { min-width: 0; }
+.navmenu-item .lbl { display: block; font-size: var(--fs-base); font-weight: 600;
+  line-height: var(--lh-tight); }
+.navmenu-item.on .lbl { color: var(--brand); }
+.navmenu-item .blurb { display: block; font-size: var(--fs-xs); color: var(--muted);
+  line-height: 1.35; margin-top: 1px; }
+/* the rule under the dashboard: it is the way in to the modules, not one of them */
+.navmenu-sep { height: 1px; background: var(--line); margin: var(--sp-2) 10px; }
+/* Warehouse and POS are two halves of the business, not two items in a list —
+   a hairline says so without spending a second colour on the bar. */
+.navsep { width: 1px; align-self: stretch; margin: 7px 4px;
+  background: rgba(255,255,255,.22); }
+
+/* ---------- POS ----------
+   The retail shop is a separate app served at /pos on this same origin. It
+   fills the page below the bar: it has its own navigation and its own header,
+   and a border or padding around it would only read as a seam. */
+.posframe { flex: 1; min-height: 0; display: flex; background: var(--panel); }
+.posframe iframe { flex: 1; border: none; width: 100%; height: 100%; }
+
+/* ---------- dashboard ---------- */
+.dash { padding: var(--sp-5); max-width: 1400px; }
+.dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
+  gap: var(--sp-3); }
+/* The left bar is what turns twelve boxes into one row that reads: gold for a
+   figure at rest, amber the moment it needs someone. --gold-line, not --gold —
+   on this fill gold measures 2.01:1 and the bar disappears. */
+.dtile { display: flex; flex-direction: column; gap: 2px; text-align: left;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-left: 3px solid var(--gold-line); border-radius: var(--radius-lg);
+  padding: var(--sp-3) var(--sp-4); color: var(--text);
+  transition: border-color .12s, background .12s, box-shadow .14s, transform .14s; }
+.dtile:hover { border-color: var(--brand); border-left-color: var(--gold-line);
+  background: var(--brand-50); box-shadow: var(--shadow-2); transform: translateY(-2px); }
+.dtile .lbl { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase;
+  letter-spacing: .5px; font-weight: 700; }
+/* The figure is the reason the tile exists, so it is sized like it. Tabular and
+   tightened — a row of headline numbers that do not line up cannot be compared,
+   which is the whole job of putting them side by side. */
+.dtile .val, .stat .val { white-space: nowrap; }
+/* a rupee total gets one size down so it stays on its line — see longValue() */
+.dtile .val.long, .stat .val.long { font-size: var(--fs-2xl); letter-spacing: -.4px; }
+.dtile .val { font-size: var(--fs-3xl); font-weight: 700; color: var(--brand);
+  font-variant-numeric: tabular-nums; line-height: 1.1; letter-spacing: -.6px; }
+.dtile .sub { font-size: var(--fs-xs); color: var(--muted); line-height: 1.35;
+  min-height: 15px; }
+/* amber only where there is something to do. A tile that shouts at zero teaches
+   people to stop reading tiles. */
+/* border-left-color is restated after border-color on purpose — the shorthand
+   would repaint the accent bar --warn-line (1.x:1 here), losing it. */
+.dtile.warn { background: var(--warn-bg); border-color: var(--warn-line);
+  border-left-color: var(--warn); }
+.dtile.warn .val { color: var(--warn); }
+.dtile.warn .sub { color: var(--text-2); }
+.dtile.warn:hover { border-color: var(--warn); border-left-color: var(--warn);
+  background: #FBEBD2; }
+
+.modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: var(--sp-3); }
+.modcard { display: grid; grid-template-columns: 34px 1fr; grid-template-rows: auto auto;
+  gap: 0 var(--sp-3); text-align: left; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: var(--sp-3) var(--sp-4); color: var(--text); align-items: start;
+  transition: border-color .12s, background .12s, box-shadow .14s, transform .14s; }
+.modcard:hover { border-color: var(--gold-line); background: var(--brand-50);
+  box-shadow: var(--shadow-2); transform: translateY(-2px); }
+/* the icon sits in a gold-tinted disc, so eleven emoji read as one set of
+   module marks rather than eleven loose glyphs */
+.modcard .ico { grid-row: 1 / span 2; font-size: var(--fs-lg); line-height: 1;
+  width: 34px; height: 34px; display: inline-flex; align-items: center;
+  justify-content: center; border-radius: 50%;
+  background: rgba(212,162,76,.16); border: 1px solid rgba(168,122,46,.28); }
+.modcard:hover .ico { background: rgba(212,162,76,.28); }
+.modcard .lbl { font-size: var(--fs-md); font-weight: 700; color: var(--brand);
+  line-height: var(--lh-tight); }
+.modcard .blurb { font-size: var(--fs-xs); color: var(--muted); line-height: 1.4;
+  margin-top: 2px; }
+
+/* ---------- Figures / Charts switch ---------- */
+.segbar { display: inline-flex; border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); overflow: hidden; flex: 0 0 auto; }
+.seg { background: var(--panel); border: none; color: var(--text-2);
+  font-size: var(--fs-sm); font-weight: 600; padding: 7px 13px; line-height: var(--lh-tight);
+  white-space: nowrap; }
+.seg + .seg { border-left: 1px solid var(--line-strong); }
+.seg:hover:not(.on) { background: var(--brand-50); color: var(--brand); }
+.seg.on { background: var(--brand); color: #fff; }
+
+/* ---------- charts ----------
+   The data is the only thing allowed to be loud: hairline grid, muted axis ink,
+   generous padding, and no chart junk. */
+/* 520px min so a 1440px window gets two charts per row, not three. At three the
+   cards were 407px wide and a twelve-month axis had no room to breathe — the
+   marks were legible but the labels were not. */
+.vizgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
+  gap: var(--sp-4); }
+.vizcard { background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); padding: var(--sp-4); box-shadow: var(--shadow-1);
+  min-width: 0; }
+.vizhead { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap;
+  margin-bottom: var(--sp-1); }
+.vizhead h5 { margin: 0; font-size: var(--fs-sm); text-transform: uppercase;
+  letter-spacing: .5px; color: var(--brand); font-weight: 700; }
+.vizhead .spacer { flex: 1; }
+.vizswap { background: var(--panel); border: 1px solid var(--line-strong);
+  color: var(--text-2); border-radius: 999px; font-size: var(--fs-xs); font-weight: 600;
+  padding: 2px 10px; }
+.vizswap:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-50); }
+.viznote { font-size: var(--fs-xs); color: var(--muted); line-height: 1.4;
+  margin-bottom: var(--sp-2); }
+.vizscroll { overflow-x: auto; }
+
+.vizplot { position: relative; }
+.vizsvg { display: block; width: 100%; height: auto; overflow: visible; }
+
+/* Axis and label text wears TEXT tokens, never a series colour — a pale hue is
+   unreadable as type, and identity comes from the swatch beside the words. */
+.viztick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.vizname { fill: var(--text-2); font-size: 12px; }
+.vizlabel { fill: var(--text); font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+/* the one standalone number: proportional figures, not tabular — equal-width
+   digits make a large number look loose */
+.vizhero { fill: var(--text); font-size: 22px; font-weight: 700; }
+
+.vizlegendrow { margin: 0 0 var(--sp-1); }
+.vizlegend { display: inline-flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.vizkey { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs);
+  color: var(--text-2); }
+.vizkey i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+.viztip { position: absolute; transform: translate(-50%, -125%); pointer-events: none;
+  background: var(--text); color: #fff; font-size: var(--fs-xs); line-height: 1.45;
+  padding: 6px 9px; border-radius: var(--radius-sm); white-space: nowrap;
+  box-shadow: var(--shadow-2); z-index: 5; }
+.viztip .tipkey { width: 8px; height: 8px; border-radius: 2px; display: inline-block;
+  margin-right: 5px; }
+
+.drecent { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-5); }
+.drecent h5 { margin: 0 0 var(--sp-2); font-size: var(--fs-xs); text-transform: uppercase;
+  letter-spacing: .5px; color: var(--muted); font-weight: 700; }
+.drow { display: flex; align-items: center; gap: var(--sp-2); width: 100%; text-align: left;
+  background: transparent; border: none; border-bottom: 1px solid var(--line);
+  padding: 7px 6px; color: var(--text); font-size: var(--fs-base); border-radius: 5px; }
+.drow:hover { background: var(--brand-50); }
+.drow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 600; }
+.drow .amt { font-variant-numeric: tabular-nums; color: var(--text-2); }
 
 .body { flex: 1; display: flex; min-height: 0; }
 
-/* ---------- sidebar ---------- */
-.sidebar { width: 300px; border-right: 1px solid var(--line); background: var(--panel);
-  display: flex; flex-direction: column; min-height: 0; }
+/* ---------- why the working panes may shrink ----------
+   A flex item's `min-width` defaults to `auto`, not 0: it will not shrink below
+   its own content's minimum width. So a pane holding a wide table — the LR
+   register is fixed-layout at ~1560px — grew instead, and took the PAGE with it.
+   The top bar and the nav row are sized to the window, not to that width, so
+   scrolling right left them ending mid-screen against bare background: the whole
+   chrome looked misaligned when the actual fault was one table downstairs.
+
+   Every one of these panes already wraps its wide content in its own
+   overflow-x; this is the line that lets them use it, so a wide table scrolls
+   inside its panel and the page itself never does. The sidebar and the document
+   viewer are excluded on purpose — their width is the point of them. */
+.body > *:not(.sidebar), .main > *:not(.viewer) { min-width: 0; }
+
+/* ---------- sidebar ----------
+   The list slides away rather than disappearing: the content stays mounted and
+   the panel clips it, so the width animates instead of the panel popping between
+   two states. Collapsed it leaves a rail carrying the title, because the way back
+   has to be visible from where the list went. */
+.sidebar { width: 300px; flex: 0 0 auto; border-right: 1px solid var(--line);
+  background: var(--panel); display: flex; flex-direction: column; min-height: 0;
+  position: relative; overflow: hidden; transition: width .18s ease; }
+.sidebar.collapsed { width: 36px; }
+.sidebody { display: flex; flex-direction: column; flex: 1; min-height: 0;
+  width: 300px; min-width: 300px; }
+/* hidden, not display:none — it keeps the slide smooth, and visibility also
+   takes the list out of the tab order while it is off screen */
+.sidebar.collapsed .sidebody { visibility: hidden; }
+
+/* the control that puts it away — pinned to the head row's right edge */
+.sidehide { position: absolute; top: 9px; right: 7px; z-index: 2;
+  background: var(--panel); border: 1px solid var(--line-strong); color: var(--muted);
+  border-radius: 6px; width: 22px; height: 22px; line-height: 1; font-size: var(--fs-md);
+  display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.sidehide:hover { color: var(--brand); border-color: var(--brand); background: var(--brand-50); }
+
+/* The collapsed rail: the whole 36px strip is the way back, so it is one button.
+   --panel-3 rather than --panel-2 because at one step off the page background it
+   read as leftover margin instead of as something to press. */
+.siderail { position: absolute; inset: 0; z-index: 2; background: var(--panel-3);
+  border: none; display: flex; flex-direction: column; align-items: center;
+  gap: var(--sp-2); padding: 9px 0; color: var(--text-2);
+  transition: background .12s, color .12s; }
+.siderail:hover { background: var(--brand-100); color: var(--brand); }
+/* the chevron wears the same small-button shape as the panel minimise controls,
+   so it reads as the same gesture rather than as decoration on a strip */
+.siderail .chev { font-size: var(--fs-md); line-height: 1; width: 22px; height: 22px;
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); }
+.siderail:hover .chev { border-color: var(--brand); color: var(--brand); }
+.siderail .raillabel { writing-mode: vertical-rl; font-size: var(--fs-xs);
+  font-weight: 700; letter-spacing: .6px; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+@media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+
 .sidebar .head { padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line);
   display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+/* after the shorthand above, or it would be overwritten by it — reserves room so
+   the hide control never lands on a head action like “Clear all” or “+ New” */
+.sidebar .head { padding-right: 36px; }
 .sidebar .head h3 { margin: 0; font-size: var(--fs-sm); text-transform: uppercase;
   letter-spacing: .6px; color: var(--muted); font-weight: 700; }
 .list { overflow-y: auto; flex: 1; }
@@ -138,9 +495,10 @@ a { color: var(--brand); text-underline-offset: 2px; }
   display: flex; gap: var(--sp-2); align-items: center; }
 .badge { font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 700;
   letter-spacing: .2px; text-transform: uppercase; }
-.badge.review { background: var(--warn-bg); color: var(--warn); }
+.badge.review, .badge.needs_review { background: var(--warn-bg); color: var(--warn); }
 .badge.confirmed { background: var(--ok-bg); color: var(--ok); }
-.badge.uploaded { background: var(--panel-3); color: var(--text-2); }
+.badge.uploaded, .badge.draft { background: var(--panel-3); color: var(--text-2); }
+.badge.posted { background: var(--info-bg); color: var(--info); }
 .conf { font-variant-numeric: tabular-nums; }
 .conf.hi { color: var(--ok); } .conf.mid { color: var(--warn); } .conf.lo { color: var(--danger); }
 
@@ -154,7 +512,7 @@ a { color: var(--brand); text-underline-offset: 2px; }
 
 /* ---------- panels ---------- */
 .section { margin-bottom: var(--sp-5); background: var(--panel);
-  border: 1px solid var(--line); border-radius: var(--radius);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
   padding: var(--sp-4); box-shadow: var(--shadow-1); }
 .section h4 { font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .6px;
   color: var(--brand); margin: 0 0 var(--sp-3); padding-bottom: var(--sp-2);
@@ -255,11 +613,22 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .btn { background: var(--panel); border: 1px solid var(--line-strong); color: var(--text);
   padding: 8px 15px; border-radius: var(--radius-sm); font-size: var(--fs-base);
   font-weight: 600; line-height: var(--lh-tight); white-space: nowrap;
-  transition: background .12s, border-color .12s, color .12s; }
+  transition: background .12s, border-color .12s, color .12s,
+    box-shadow .14s, transform .14s; }
 .btn:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-50); }
-.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
-.btn.primary:hover { background: var(--brand-700); border-color: var(--brand-700); color: #fff; }
-.btn.primary:active { background: var(--brand-800); }
+/* Gold is the primary action, on the chrome and on light panels alike. The label
+   is the page's own dark text, never white: 6.67:1 against gold, where white is
+   2.31:1 and fails. --gold-line is not decoration — gold on the light page is
+   2.08:1, so without it the button has no findable edge. */
+.btn.primary { background-color: var(--gold); background-image: var(--gold-fill);
+  border-color: var(--gold-line); color: var(--text);
+  box-shadow: 0 1px 2px rgba(42,35,32,.14), inset 0 1px 0 rgba(255,255,255,.28); }
+.btn.primary:hover { background-image: var(--gold-fill-hover);
+  border-color: var(--gold-line); color: var(--text);
+  box-shadow: var(--gold-glow), inset 0 1px 0 rgba(255,255,255,.28);
+  transform: translateY(-1px); }
+.btn.primary:active { background-image: none; background-color: var(--gold-line);
+  transform: none; box-shadow: inset 0 1px 3px rgba(42,35,32,.28); }
 .btn.danger { color: var(--danger); border-color: var(--danger-line); }
 .btn.danger:hover { background: var(--danger-bg); border-color: var(--danger); color: var(--danger); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
@@ -300,13 +669,18 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .small { font-size: var(--fs-sm); color: var(--muted); line-height: var(--lh); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
-/* ---------- stat tiles ---------- */
+/* ---------- stat tiles ----------
+   Same accent bar and same figure treatment as the dashboard's tiles. These sit
+   on Inventory and Stock Inward, and a headline number should not be a different
+   object on a different screen. */
 .stat { flex: 1; background: var(--panel); border: 1px solid var(--line);
-  border-radius: var(--radius); padding: var(--sp-4); box-shadow: var(--shadow-1); }
+  border-left: 3px solid var(--gold-line); border-radius: var(--radius-lg);
+  padding: var(--sp-4); box-shadow: var(--shadow-1); }
 .stat .lbl { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase;
   letter-spacing: .5px; font-weight: 700; }
-.stat .val { font-size: var(--fs-2xl); font-weight: 700; margin-top: var(--sp-1);
-  color: var(--brand); font-variant-numeric: tabular-nums; line-height: 1.15; }
+.stat .val { font-size: var(--fs-3xl); font-weight: 700; margin-top: var(--sp-1);
+  color: var(--brand); font-variant-numeric: tabular-nums; line-height: 1.1;
+  letter-spacing: -.6px; }
 
 /* ---------- per-piece codes ---------- */
 .qtylink { background: none; border: none; color: var(--text); font: inherit; cursor: pointer;
@@ -490,6 +864,90 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
   font-size: var(--fs-base); padding: 2px 0; }
 .scanbox input:focus { outline: none; }
 
+/* ---------- ask a report ----------
+   The one control on the Reports screen that does not need you to know which of
+   the 33 reports holds your answer. It sits above them rather than among them:
+   it is a different way in, not another filter. */
+.askbar { display: flex; align-items: center; gap: var(--sp-2); position: relative;
+  padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--brand-50), var(--panel)); }
+.askbar .ico { font-size: var(--fs-lg); line-height: 1; }
+.askfield { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+.askbar input { flex: 1; min-width: 0; background: var(--panel);
+  border: 1px solid var(--line-strong); color: var(--text);
+  padding: 9px 28px 9px 12px; border-radius: var(--radius-sm); font-size: var(--fs-md);
+  transition: border-color .12s, box-shadow .12s; }
+.askbar input::placeholder { color: var(--muted); }
+.askbar input:hover { border-color: var(--brand-300); }
+.askbar input:focus { outline: none; border-color: var(--brand); box-shadow: var(--focus); }
+.askclear { background: transparent; border: none; color: var(--muted);
+  font-size: var(--fs-lg); line-height: 1; cursor: pointer; padding: 0 4px; }
+.askclear:hover { color: var(--danger); }
+.askfield .askclear { position: absolute; right: 6px; }
+
+/* ---------- voice input ----------
+   The mic fills the box above; it is not a second way of asking. It pulses while
+   the microphone is open, because an open mic that does not look open is the one
+   state nobody should have to guess at. */
+.askvoice { display: inline-flex; align-items: center; gap: var(--sp-1); flex: 0 0 auto; }
+.askmic { background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); font-size: var(--fs-md); line-height: 1;
+  padding: 8px 11px; color: var(--text); transition: background .12s, border-color .12s; }
+.askmic:hover { border-color: var(--brand); background: var(--brand-50); }
+.askmic.on { background: var(--danger-bg); border-color: var(--danger); color: var(--danger);
+  animation: micpulse 1.2s ease-in-out infinite; }
+.askmic:disabled { opacity: .45; cursor: not-allowed; }
+@keyframes micpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(192,57,43,.34); }
+  50%      { box-shadow: 0 0 0 5px rgba(192,57,43,0); }
+}
+.asklangs { display: inline-flex; border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); overflow: hidden; }
+.asklang { background: var(--panel); border: none; color: var(--text-2);
+  font-size: var(--fs-xs); font-weight: 600; padding: 7px 8px; line-height: 1.2; }
+.asklang + .asklang { border-left: 1px solid var(--line-strong); }
+.asklang:hover:not(:disabled) { background: var(--brand-50); color: var(--brand); }
+.asklang.on { background: var(--brand); color: #fff; }
+.asklang:disabled { opacity: .6; cursor: not-allowed; }
+.asklistening { font-size: var(--fs-xs); color: var(--danger); font-weight: 600;
+  white-space: nowrap; }
+.askvoice-err { font-size: var(--fs-xs); color: var(--warn); max-width: 230px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+/* Unavailable rather than hidden, and it says why when you hover it — a control
+   that vanishes on the LAN origin reads as a feature that does not exist. */
+.askvoice-off { font-size: var(--fs-base); color: var(--muted); opacity: .6;
+  cursor: help; white-space: nowrap; flex: 0 0 auto; }
+.askvoice-off .askvoice-why { font-size: var(--fs-xs); }
+.askengine { font-size: var(--fs-xs); color: var(--warn); background: var(--warn-bg);
+  border: 1px solid var(--warn-line); border-radius: 999px; padding: 3px 9px;
+  white-space: nowrap; cursor: help; }
+
+/* The reading. Amber when the router missed, because a miss the person doesn't
+   notice is the one failure mode of this whole feature. */
+.askread { padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
+  background: var(--info-bg); }
+.askread.miss { background: var(--warn-bg); }
+.askread-top { display: flex; align-items: flex-start; gap: var(--sp-2);
+  font-size: var(--fs-base); line-height: var(--lh); }
+.askread-what { min-width: 0; }
+.askread-top .spacer { flex: 1; }
+.askflag { font-size: var(--fs-xs); font-weight: 600; color: var(--warn);
+  background: var(--panel); border: 1px solid var(--warn-line); border-radius: 999px;
+  padding: 2px 9px; white-space: nowrap; cursor: help; flex: 0 0 auto; }
+.askchips { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-top: var(--sp-2); }
+.askchip { font-size: var(--fs-xs); background: var(--panel); color: var(--text-2);
+  border: 1px solid var(--info-line); border-radius: 5px; padding: 2px 8px; }
+.asknote { font-size: var(--fs-xs); color: var(--text-2); margin-top: var(--sp-1);
+  line-height: 1.4; }
+.asknote.warn { color: var(--warn); font-weight: 500; }
+
+.askegs { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-5); border-bottom: 1px solid var(--line); }
+.askeg { font-size: var(--fs-xs); background: var(--panel-2); color: var(--text-2);
+  border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px 10px;
+  white-space: nowrap; }
+.askeg:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-50); }
+
 /* ---------- page header ----------
    A screen title, a one-line explanation, and the actions for that screen. The
    explanation is the only part allowed to shrink: an action people cannot reach
@@ -498,7 +956,12 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
   padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
   background: var(--panel); }
 .pagehead h2 { margin: 0; font-size: var(--fs-xl); color: var(--brand);
-  letter-spacing: -.3px; flex: 0 0 auto; }
+  letter-spacing: -.3px; flex: 0 0 auto; display: flex; align-items: center;
+  gap: var(--sp-3); }
+/* a gold rule before every screen title — the same accent as the chrome hairline,
+   so the eye picks up "this is the page you are on" in the same colour twice */
+.pagehead h2::before { content: ''; width: 3px; height: 1.05em; border-radius: 2px;
+  background: linear-gradient(180deg, var(--gold), var(--gold-line)); }
 .pagehead .pagesub { flex: 1 1 200px; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .pagehead .btn, .pagehead label { flex: 0 0 auto; }

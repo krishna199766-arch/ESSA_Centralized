@@ -8,7 +8,7 @@ from .database import Base, engine
 from . import models  # noqa: F401  (register tables)
 from .routers import (documents, suppliers, purchases, inventory, outward,
                       payments, returns, reports, settings, auth, masters, lr,
-                      bundles)
+                      bundles, dashboard)
 from .extraction.engine import provider_status
 from .config import COMPANY_NAME, COMPANY_GSTIN
 from . import runtime
@@ -187,6 +187,43 @@ app.include_router(auth.router)
 app.include_router(masters.router)
 app.include_router(lr.router)
 app.include_router(bundles.router)
+app.include_router(dashboard.router)
+
+
+# ---- the retail shop (POS) at /pos ----
+# A separate Flask app, mounted here so it shares this origin — see pos_mount.
+# It is optional: a missing folder or an environment without Flask leaves the
+# POS screen saying what to install, which is more use than a 500 behind a
+# button someone just clicked.
+_pos_error = None
+try:
+    from .pos_mount import load_pos_app
+    _pos_app = load_pos_app()
+except Exception as exc:                              # noqa: BLE001 — reported, not raised
+    _pos_app, _pos_error = None, f"{type(exc).__name__}: {exc}"
+
+if _pos_app is not None:
+    import warnings
+    with warnings.catch_warnings():                   # the module warns on import
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from starlette.middleware.wsgi import WSGIMiddleware
+    app.mount("/pos", WSGIMiddleware(_pos_app))
+else:
+    from fastapi.responses import HTMLResponse
+
+    @app.get("/pos", response_class=HTMLResponse)
+    @app.get("/pos/{rest:path}", response_class=HTMLResponse)
+    def pos_unavailable(rest: str = ""):
+        return HTMLResponse(
+            "<body style=\"font:14px/1.6 system-ui;padding:32px;color:#33261F\">"
+            "<h2 style='margin:0 0 8px'>POS is not loaded</h2>"
+            f"<p>{_pos_error}</p>"
+            "<p>The shop lives in the <b>Textile Retail Shop</b> folder beside "
+            "this project and needs its Python packages in the backend "
+            "environment:</p>"
+            "<pre style='background:#F2EEEB;padding:12px;border-radius:6px'>"
+            "cd backend\n.venv\\Scripts\\activate\npip install -r requirements.txt</pre>"
+            "<p>Then restart the server.</p></body>", status_code=503)
 
 
 @app.get("/api/status")
@@ -195,6 +232,7 @@ def status():
         "company": {"name": COMPANY_NAME, "gstin": COMPANY_GSTIN},
         "provider_preference": runtime.get("provider_preference"),
         "providers": provider_status(),
+        "pos": {"available": _pos_app is not None, "error": _pos_error},
     }
 
 
@@ -228,4 +266,10 @@ if os.path.isdir(FRONTEND_DIST):
 
     @app.get("/")
     def spa_root():
-        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))
+        # Everything under /assets is content-hashed by the build, so a stale copy
+        # is impossible — a rebuild changes the filename. index.html is the one
+        # file with a fixed name, and it is what points at those filenames. Cached
+        # without a directive it goes on naming the previous build's bundle, and a
+        # rebuild silently does nothing until the browser decides to look again.
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"),
+                            headers={"Cache-Control": "no-cache"})

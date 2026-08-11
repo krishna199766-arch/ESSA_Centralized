@@ -1,0 +1,61 @@
+name: Build warehouse APK
+
+# Builds the phone app and attaches the APK to the run, so a phone can install it
+# without anyone having Android Studio. Run it from the Actions tab (Run workflow)
+# or just push a change under android/.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-apk.yml'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap and first: the injected scanner shim leans on the mobile page's
+      # internals, and a rename there breaks the phone's scan button without
+      # breaking the build. Better to fail here than to ship a working-looking APK.
+      - name: Check the scanner shim still matches the page
+        run: node android/tools/shim_test.mjs
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The runner image already carries the Android SDK; this points the build at
+      # it and accepts the licences non-interactively.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # No Gradle wrapper is committed — a wrapper is a binary jar, and pinning the
+      # version here does the same job without one.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - name: Name the APK
+        id: name
+        run: |
+          SRC=android/app/build/outputs/apk/debug/app-debug.apk
+          OUT="essa-warehouse-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}.apk"
+          cp "$SRC" "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: essa-warehouse-apk
+          path: ${{ steps.name.outputs.path }}
+          if-no-files-found: error

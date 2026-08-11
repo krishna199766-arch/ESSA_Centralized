@@ -1,0 +1,47 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.essa.warehouse'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.essa.warehouse"
+        minSdk 24              // Android 7. Anything older has no usable WebView.
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        // Debug only, deliberately: a debug APK is signed with the standard debug
+        // key, which is all an internally side-loaded app needs. A release build
+        // would need a keystore that does not belong in a repository.
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // The scanner. The web app's own camera path cannot run here — see
+    // MainActivity — so scanning is native and handed back to the page.
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
+    // Kotlin 1.8 folded kotlin-stdlib-jdk7 and -jdk8 into kotlin-stdlib. ZXing
+    // still asks for the 1.6.21 versions of those, and AppCompat brings 1.8.22 of
+    // the merged one, so every class in them arrives twice and dex merging fails
+    // on hundreds of duplicates. Pinning the old two to 1.8.22 turns them into the
+    // empty shims that version ships, which simply point at kotlin-stdlib.
+    constraints {
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+}

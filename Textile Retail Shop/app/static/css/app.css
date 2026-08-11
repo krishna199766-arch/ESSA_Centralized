@@ -1,0 +1,277 @@
+/* ==========================================================================
+   Shop — theme
+   --------------------------------------------------------------------------
+   This app runs inside the Essa backend at /pos, directly under Essa's own
+   chrome. It used to carry a purple of its own, which made the mount read as
+   two products stacked on one screen. The tokens below are Essa's, copied
+   verbatim from frontend/src/styles.css so the two surfaces stay one palette:
+   deep warm brown chrome, gold for the primary action, warm neutrals, and
+   semantic colours kept clearly off the brand hue.
+
+   Bootstrap 5.3 is loaded before this file and ships its own blue. Its theme
+   is driven by CSS variables, so it is re-pointed at these tokens here rather
+   than fought class by class in the templates.
+   ========================================================================== */
+:root {
+  /* --- brand --- */
+  --brand: #5A3428;
+  --brand-800: #40241B;   /* pressed */
+  --brand-700: #4A2B21;   /* hover */
+  --brand-500: #7A4C3D;   /* secondary marks, icons */
+  --brand-300: #B08D80;   /* decorative borders */
+  --brand-200: #DCC9C1;   /* strong tint border */
+  --brand-100: #EFE4DF;   /* selected row */
+  --brand-50:  #F9F4F2;   /* hover row */
+
+  /* --- neutrals, warmed to match --- */
+  --bg: #F5F2F0;
+  --panel: #FFFFFF;
+  --panel-2: #F2EEEB;
+  --panel-3: #EAE4E0;
+  --line: #E4DCD7;        /* dividers — decorative, may be soft */
+  --line-strong: #96867C; /* interactive borders — 3.50:1 on white */
+  --text: #2A2320;
+  --text-2: #574C46;
+  --muted: #7C6F68;
+
+  /* --- dark chrome ---
+     The navbar. White text is 13.40:1 on it, --brand-200 is 8.40:1 for the
+     second rank and --brand-300 is 4.44:1 for ghost-button borders. --brand
+     itself is 1.25:1 here and is never used on the bar — that is the whole
+     reason the accent is gold. */
+  --chrome: #4B2509;
+  --chrome-active: #6B3712;
+  --chrome-line: rgba(0,0,0,.22);
+  --chrome-top: linear-gradient(180deg, #552D0C 0%, #45220A 100%);
+  --chrome-nav: linear-gradient(180deg, #45220A 0%, #3A1C05 100%);
+  --on-chrome: #FFFFFF;
+  --on-chrome-2: var(--brand-200);
+  --on-chrome-line: var(--brand-300);
+
+  /* --- gold: the primary action ---
+     Dark label, never white: #2A2320 on gold is 6.67:1, white is 2.31:1 and
+     fails. Gold against the light page is only 2.08:1, so a gold button on a
+     light panel needs --gold-line to have a findable edge (3.43:1). */
+  --gold: #D4A24C;
+  --gold-700: #C9962C;
+  --gold-line: #A87A2E;
+  --gold-fill: linear-gradient(180deg, #DDB05E 0%, #C9962C 100%);
+  --gold-fill-hover: linear-gradient(180deg, #E3B863 0%, #BE8A22 100%);
+  --gold-glow: 0 2px 10px rgba(168,122,46,.38);
+
+  /* --- chart palette. Fixed slot order — see the note in Essa's styles.css;
+     --viz-2 is the single-series default both apps use. --- */
+  --viz-1: #008300;  --viz-2: #2a78d6;  --viz-3: #eb6834;
+  --viz-4: #4a3aa7;  --viz-5: #e34948;  --viz-other: #8C837B;
+
+  /* --- semantic. Kept away from the brand hue on purpose. --- */
+  --ok: #1E7A4D;        --ok-bg: #E7F4ED;      --ok-line: #BFE0CE;
+  --warn: #B45309;      --warn-bg: #FDF2E3;    --warn-line: #F0D6AE;
+  --danger: #C0392B;    --danger-bg: #FBEBE9;  --danger-line: #F0C7C1;
+  --info: #1F6FB2;      --info-bg: #E9F2FA;    --info-line: #C3DBF0;
+
+  --radius: 10px; --radius-sm: 7px; --radius-lg: 14px;
+  --shadow-1: 0 1px 2px rgba(42,35,32,.06), 0 1px 3px rgba(42,35,32,.05);
+  --shadow-2: 0 4px 14px rgba(42,35,32,.10);
+  --focus: 0 0 0 3px rgba(90,52,40,.18);
+
+  /* Aliases the templates already name. --brand-dark is used as a text colour
+     on white (prices, totals, headings), so it points at the darkest step. */
+  --brand-dark: var(--brand-800);
+  --brand-light: var(--brand-200);
+  --accent: var(--gold);
+
+  /* --- Bootstrap re-point ---
+     bg-*/text-*/border-* utilities and .badge all read the -rgb pairs, so
+     setting them here retints every one of those in the templates at once. */
+  --bs-primary: #5A3428;          --bs-primary-rgb: 90,52,40;
+  --bs-secondary: #7C6F68;        --bs-secondary-rgb: 124,111,104;
+  --bs-success: #1E7A4D;          --bs-success-rgb: 30,122,77;
+  --bs-danger: #C0392B;           --bs-danger-rgb: 192,57,43;
+  --bs-warning: #B45309;          --bs-warning-rgb: 180,83,9;
+  --bs-info: #1F6FB2;             --bs-info-rgb: 31,111,178;
+  --bs-light: #F2EEEB;            --bs-light-rgb: 242,238,235;
+  --bs-dark: #2A2320;             --bs-dark-rgb: 42,35,32;
+  --bs-body-bg: #F5F2F0;          --bs-body-bg-rgb: 245,242,240;
+  --bs-body-color: #2A2320;       --bs-body-color-rgb: 42,35,32;
+  --bs-secondary-color: rgba(42,35,32,.66);
+  --bs-tertiary-bg: #F2EEEB;
+  --bs-border-color: #E4DCD7;
+  --bs-border-color-translucent: rgba(42,35,32,.12);
+  --bs-link-color: #5A3428;       --bs-link-color-rgb: 90,52,40;
+  --bs-link-hover-color: #40241B; --bs-link-hover-color-rgb: 64,36,27;
+  --bs-emphasis-color: #2A2320;
+  --bs-heading-color: #2A2320;
+  --bs-focus-ring-color: rgba(90,52,40,.18);
+  --bs-code-color: #7A4C3D;
+}
+
+body { background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+
+/* One focus treatment, and it is always visible. On the chrome the brown ring
+   is 1.25:1 — invisible — so the bar gets the gold one instead. */
+:where(button, input, select, textarea, a):focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 1px; }
+.brand-nav :focus-visible { outline-color: var(--gold); }
+
+/* ---------- the bar ----------
+   Same chrome as Essa's top bar, which sits immediately above it under the
+   /pos mount, finished with the same gold hairline where the dark block meets
+   the light page. The line is decoration only — the boundary itself is already
+   carried by a 12:1 luminance step. */
+.brand-nav {
+  background-color: var(--chrome); background-image: var(--chrome-nav);
+  border-bottom: 1px solid var(--chrome-line);
+  box-shadow: var(--shadow-1); position: relative;
+}
+.brand-nav::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0;
+  height: 2px; pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, var(--gold-line) 12%,
+    var(--gold) 38%, #F0C97A 50%, var(--gold) 62%, var(--gold-line) 88%, transparent 100%); }
+.brand-nav .navbar-brand { color: var(--on-chrome); letter-spacing: -.2px; }
+.navbar-dark .navbar-nav .nav-link { color: var(--on-chrome-2); }
+.navbar-dark .navbar-nav .nav-link:hover,
+.navbar-dark .navbar-nav .nav-link.show { color: var(--on-chrome); }
+.brand-nav .navbar-toggler { border-color: var(--on-chrome-line); }
+.brand-nav .badge.bg-light { background: rgba(255,255,255,.14) !important;
+  color: var(--on-chrome) !important; }
+
+/* The module dropdown: gold marker for the open screen, not a brand fill —
+   the fill alone would be under 3:1 against the menu surface. */
+.dropdown-menu { --bs-dropdown-link-active-bg: var(--brand-100);
+  --bs-dropdown-link-active-color: var(--brand);
+  --bs-dropdown-link-hover-bg: var(--brand-50);
+  --bs-dropdown-border-color: var(--line); border-radius: var(--radius); }
+.dropdown-item.active { box-shadow: inset 3px 0 0 var(--gold-line); font-weight: 600; }
+.dropdown-item.active .text-muted { color: var(--brand-500) !important; }
+
+/* ---------- surfaces ---------- */
+.card { border: 0; border-radius: var(--radius); box-shadow: var(--shadow-1); }
+.card-header { background: var(--panel); border-bottom: 1px solid var(--line);
+  font-weight: 600; color: var(--text); }
+.stat-card { border: 0; border-radius: var(--radius-lg); overflow: hidden;
+  box-shadow: var(--shadow-2); }
+.stat-card .value { font-size: 1.6rem; font-weight: 700; color: var(--brand); }
+.stat-card .label { color: var(--muted); font-size: .85rem;
+  text-transform: uppercase; letter-spacing: .5px; }
+.list-group { --bs-list-group-border-color: var(--line);
+  --bs-list-group-action-hover-bg: var(--brand-50);
+  --bs-list-group-active-bg: var(--brand); --bs-list-group-active-border-color: var(--brand); }
+.table { --bs-table-border-color: var(--line); --bs-table-hover-bg: var(--brand-50);
+  --bs-table-striped-bg: var(--brand-50); }
+
+/* ---------- buttons ----------
+   .btn-brand is this app's primary action. Gold, dark label — the same button
+   "Upload invoice" is next door. .btn-primary is aliased onto it so the handful
+   of templates that reached for Bootstrap's own primary land in the same place
+   instead of on a stray blue. */
+.btn-brand, .btn-primary {
+  --bs-btn-color: var(--text);        --bs-btn-bg: var(--gold);
+  --bs-btn-border-color: var(--gold-line);
+  --bs-btn-hover-color: var(--text);  --bs-btn-hover-bg: var(--gold-700);
+  --bs-btn-hover-border-color: var(--gold-line);
+  --bs-btn-active-color: var(--text); --bs-btn-active-bg: #BE8A22;
+  --bs-btn-active-border-color: var(--gold-line);
+  --bs-btn-disabled-color: var(--text); --bs-btn-disabled-bg: var(--gold);
+  --bs-btn-disabled-border-color: var(--gold-line);
+  --bs-btn-focus-shadow-rgb: 168,122,46;
+  background-image: var(--gold-fill); font-weight: 600;
+}
+.btn-brand:hover, .btn-primary:hover { background-image: var(--gold-fill-hover);
+  box-shadow: var(--gold-glow); }
+/* On the chrome a gold fill is right, but a *white* one reads as a card sitting
+   on the bar. Nothing gold lives up there yet; if it does, it keeps this fill. */
+
+/* Secondary: 44 templates use btn-outline-secondary as their quiet action, so
+   it carries the warm neutral rather than Bootstrap's cold grey. */
+.btn-outline-secondary {
+  --bs-btn-color: var(--text-2);        --bs-btn-border-color: var(--line-strong);
+  --bs-btn-hover-color: var(--brand);   --bs-btn-hover-bg: var(--brand-50);
+  --bs-btn-hover-border-color: var(--brand-300);
+  --bs-btn-active-color: var(--brand);  --bs-btn-active-bg: var(--brand-100);
+  --bs-btn-active-border-color: var(--brand-300);
+  --bs-btn-focus-shadow-rgb: 90,52,40;
+}
+.btn-outline-primary {
+  --bs-btn-color: var(--brand);         --bs-btn-border-color: var(--brand-300);
+  --bs-btn-hover-color: #fff;           --bs-btn-hover-bg: var(--brand);
+  --bs-btn-hover-border-color: var(--brand);
+  --bs-btn-active-color: #fff;          --bs-btn-active-bg: var(--brand-800);
+  --bs-btn-active-border-color: var(--brand-800);
+  --bs-btn-focus-shadow-rgb: 90,52,40;
+}
+.btn-outline-dark {
+  --bs-btn-color: var(--text);          --bs-btn-border-color: var(--line-strong);
+  --bs-btn-hover-bg: var(--text);       --bs-btn-hover-border-color: var(--text);
+  --bs-btn-active-bg: var(--text);      --bs-btn-active-border-color: var(--text);
+}
+.btn-success { --bs-btn-bg: var(--ok); --bs-btn-border-color: var(--ok);
+  --bs-btn-hover-bg: #196841; --bs-btn-hover-border-color: #196841;
+  --bs-btn-active-bg: #145735; --bs-btn-active-border-color: #145735; }
+.btn-outline-success { --bs-btn-color: var(--ok); --bs-btn-border-color: var(--ok);
+  --bs-btn-hover-bg: var(--ok); --bs-btn-hover-border-color: var(--ok); }
+.btn-danger { --bs-btn-bg: var(--danger); --bs-btn-border-color: var(--danger);
+  --bs-btn-hover-bg: #A62F23; --bs-btn-hover-border-color: #A62F23;
+  --bs-btn-active-bg: #8E281E; --bs-btn-active-border-color: #8E281E; }
+.btn-outline-danger { --bs-btn-color: var(--danger); --bs-btn-border-color: var(--danger);
+  --bs-btn-hover-bg: var(--danger); --bs-btn-hover-border-color: var(--danger); }
+.btn-outline-warning { --bs-btn-color: var(--warn); --bs-btn-border-color: var(--warn);
+  --bs-btn-hover-color: #fff; --bs-btn-hover-bg: var(--warn);
+  --bs-btn-hover-border-color: var(--warn); }
+
+/* ---------- inputs ---------- */
+.form-control, .form-select { border-color: var(--line-strong); color: var(--text); }
+.form-control:hover, .form-select:hover { border-color: var(--brand-300); }
+.form-control:focus, .form-select:focus, .form-check-input:focus {
+  border-color: var(--brand-300); box-shadow: var(--focus); }
+.form-check-input:checked { background-color: var(--brand); border-color: var(--brand); }
+.input-group-text { background: var(--panel-2); border-color: var(--line-strong);
+  color: var(--text-2); }
+
+/* ---------- flashes ---------- */
+.alert-success { --bs-alert-color: var(--ok); --bs-alert-bg: var(--ok-bg);
+  --bs-alert-border-color: var(--ok-line); }
+.alert-warning { --bs-alert-color: var(--warn); --bs-alert-bg: var(--warn-bg);
+  --bs-alert-border-color: var(--warn-line); }
+.alert-danger, .alert-error { --bs-alert-color: var(--danger); --bs-alert-bg: var(--danger-bg);
+  --bs-alert-border-color: var(--danger-line); }
+.alert-info, .alert-message { --bs-alert-color: var(--info); --bs-alert-bg: var(--info-bg);
+  --bs-alert-border-color: var(--info-line); }
+.table-warning { --bs-table-bg: var(--warn-bg); --bs-table-color: var(--text); }
+.table-danger { --bs-table-bg: var(--danger-bg); --bs-table-color: var(--text); }
+
+/* ---------- counter ---------- */
+.pos-product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; max-height: 60vh; overflow: auto; }
+.pos-product { border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px; cursor: pointer; text-align: center; background: var(--panel); transition: .15s; }
+.pos-product:hover { border-color: var(--brand); background: var(--brand-50); transform: translateY(-2px); }
+.pos-product .name { font-size: .85rem; font-weight: 600; }
+.pos-product .price { color: var(--brand-dark); font-weight: 700; }
+.pos-product .stock { font-size: .7rem; color: var(--muted); }
+
+.cart-table tbody tr td { vertical-align: middle; }
+
+/* amber, and it means the same thing here as on the warehouse screens */
+.low-stock { background: var(--warn-bg) !important; }
+
+@media print {
+  .no-print, nav, .alert { display: none !important; }
+  body { background: #fff; }
+  .container-fluid { padding: 0; }
+}
+
+.invoice-print { max-width: 800px; margin: 0 auto; padding: 20px; background: #fff; }
+.invoice-header { border-bottom: 2px solid var(--brand); padding-bottom: 10px; margin-bottom: 15px; }
+.invoice-total-row { font-weight: 700; font-size: 1.1rem; border-top: 2px solid var(--text); }
+
+/* motion is polish, and polish is what a reduced-motion request opts out of */
+@media (prefers-reduced-motion: reduce) {
+  .pos-product { transition-property: background, border-color, box-shadow; }
+  .pos-product:hover, .btn-brand:hover, .btn-primary:hover { transform: none; }
+}
+
+/* mobile-friendly */
+@media (max-width: 768px) {
+  .stat-card .value { font-size: 1.3rem; }
+  .pos-product-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+}

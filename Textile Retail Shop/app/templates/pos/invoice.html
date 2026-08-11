@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="no-print mb-3">
+  <a href="{{ url_for('pos.counter') }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
+  <button class="btn btn-brand btn-sm" onclick="window.print()"><i class="bi bi-printer"></i> Print</button>
+</div>
+
+<div class="invoice-print card">
+  <div class="invoice-header d-flex justify-content-between">
+    <div>
+      <h3 class="fw-bold mb-0" style="color: var(--brand-dark);">{{ SHOP_NAME }}</h3>
+      <div>{{ SHOP_ADDRESS }}</div>
+      <div>Phone: {{ SHOP_PHONE }}</div>
+      <div>GSTIN: <strong>{{ SHOP_GSTIN }}</strong></div>
+    </div>
+    <div class="text-end">
+      <h5>TAX INVOICE</h5>
+      <div><strong>{{ inv.invoice_number }}</strong></div>
+      <div>{{ inv.invoice_date.strftime('%d %b %Y %I:%M %p') }}</div>
+      {# Who served it, and — when it isn't the same person — who rang it up. #}
+      {% if inv.staff %}
+      <div>Served by: {{ inv.staff.full_name }} <span class="text-muted">({{ inv.staff.staff_code }})</span></div>
+      {% endif %}
+      {% if not inv.staff or inv.staff_id != inv.cashier_id %}
+      <div>Cashier: {{ inv.cashier.full_name }}</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="row mb-3">
+    <div class="col-6">
+      <strong>Bill To:</strong><br>
+      {% if inv.customer %}
+        {{ inv.customer.name }}<br>
+        {% if inv.customer.phone %}Ph: {{ inv.customer.phone }}<br>{% endif %}
+        {% if inv.customer.address %}{{ inv.customer.address }}<br>{% endif %}
+        {% if inv.customer.gstin %}GSTIN: {{ inv.customer.gstin }}{% endif %}
+      {% else %}
+        Walk-in customer
+      {% endif %}
+    </div>
+    <div class="col-6 text-end">
+      <strong>Payment:</strong> {{ inv.payment_method|upper }}<br>
+      <strong>Status:</strong> <span class="badge bg-success">{{ inv.payment_status }}</span>
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-sm">
+      <thead>
+        <tr><th>#</th><th>Item</th><th>HSN</th><th class="text-end">Qty</th><th class="text-end">Rate</th><th class="text-end">GST%</th><th class="text-end">Amount</th></tr>
+      </thead>
+      <tbody>
+        {% for it in inv.items %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ it.product.name }}<br><small class="text-muted">SKU {{ it.product.sku }}</small></td>
+          <td>{{ it.product.hsn_code }}</td>
+          <td class="text-end">{{ it.quantity }} {{ it.product.unit }}</td>
+          <td class="text-end">{{ it.unit_price|inr }}</td>
+          <td class="text-end">{{ it.gst_rate }}%</td>
+          <td class="text-end">{{ it.line_total|inr }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="row justify-content-end">
+    <div class="col-md-5">
+      <table class="table table-sm">
+        <tr><td>Subtotal (taxable)</td><td class="text-end">{{ inv.subtotal|inr }}</td></tr>
+        {% if inv.discount %}<tr><td>Discount</td><td class="text-end">- {{ inv.discount|inr }}</td></tr>{% endif %}
+        {% if inv.is_interstate %}
+          <tr><td>IGST</td><td class="text-end">{{ inv.igst|inr }}</td></tr>
+        {% else %}
+          <tr><td>CGST</td><td class="text-end">{{ inv.cgst|inr }}</td></tr>
+          <tr><td>SGST</td><td class="text-end">{{ inv.sgst|inr }}</td></tr>
+        {% endif %}
+        {% if inv.loyalty_redeemed %}<tr><td>Loyalty redeemed ({{ inv.loyalty_redeemed }} pts)</td><td class="text-end">- {{ inv.loyalty_redeemed|inr }}</td></tr>{% endif %}
+        <tr class="invoice-total-row"><td>TOTAL</td><td class="text-end">{{ inv.total|inr }}</td></tr>
+        {% if inv.loyalty_earned %}<tr><td colspan="2" class="text-success small">You earned {{ inv.loyalty_earned }} loyalty points.</td></tr>{% endif %}
+      </table>
+    </div>
+  </div>
+
+  <p class="text-muted small text-center mt-4">Thank you for shopping with us! Goods once sold cannot be returned after 7 days.</p>
+</div>
+{% endblock %}

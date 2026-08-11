@@ -1,0 +1,538 @@
+{% extends "base.html" %}
+{% block content %}
+
+{# Who is serving. Asked before anything is rung up, because the commission on
+   this sale is worked out from it — see routes/staff.py. Checkout stays disabled
+   until it is answered, rather than letting a cart be built and refused at the
+   very end. #}
+<div id="staffGate" class="card p-3 mb-3" style="border:1px solid #d9c9a8; background:#fffdf6;">
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <h6 class="mb-1"><i class="bi bi-person-badge"></i> Who is serving this customer?</h6>
+      <div class="small text-muted">Scan the staff ID card, or enter the staff code.</div>
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <div class="input-group input-group-sm" style="width:280px">
+        <input id="staffCode" class="form-control" placeholder="STF000003 or username" autocomplete="off">
+        <button id="staffScanBtn" class="btn btn-outline-primary" type="button" title="Scan the ID card">
+          <i class="bi bi-camera"></i></button>
+        <button id="staffGo" class="btn btn-outline-primary" type="button">Set</button>
+      </div>
+      <select id="staffPick" class="form-select form-select-sm" style="width:190px">
+        <option value="">or choose…</option>
+        {% for u in staff %}
+        <option value="{{ u.id }}">{{ u.full_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div id="staffScanBox" style="display:none" class="mt-2">
+    <div id="staffReader" style="width:100%;max-width:320px"></div>
+    <button id="staffStopScan" class="btn btn-outline-secondary btn-sm mt-1">Stop</button>
+  </div>
+
+  <div id="staffChosen" class="mt-2 d-none">
+    <span class="badge text-bg-success" style="font-size:.95rem">
+      <i class="bi bi-check-circle"></i> Serving: <span id="staffName"></span>
+      <span id="staffCodeShown" class="opacity-75"></span>
+    </span>
+    <button id="staffClear" class="btn btn-sm btn-outline-secondary ms-1">Change</button>
+  </div>
+  <div id="staffMsg" class="small text-danger mt-1"></div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-7">
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="mb-0"><i class="bi bi-grid"></i> Products</h5>
+        <input id="productSearch" class="form-control form-control-sm" style="max-width:250px" placeholder="Search or scan SKU / QR...">
+      </div>
+      <div id="productGrid" class="pos-product-grid">
+        {% for p in products %}
+        <div class="pos-product" data-id="{{ p.id }}" data-sku="{{ p.sku }}" data-name="{{ p.name }}" data-price="{{ p.selling_price }}" data-gst="{{ p.gst_rate }}" data-stock="{{ p.stock_qty }}">
+          <div class="name">{{ p.name }}</div>
+          {# Two items can share a category name — the attributes are what tell
+             a cashier which tile is the one in their hand. #}
+          <div class="text-muted small">
+            {{ [p.size, p.color, p.fabric] | select | join(' · ') }}
+          </div>
+          <div class="price">{{ p.selling_price|inr }}</div>
+          <div class="stock">Stock: {{ p.stock_qty }} {{ p.unit }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card p-3">
+      <h5><i class="bi bi-cart"></i> Cart</h5>
+      <div class="mb-2">
+        <label class="form-label small mb-1">Customer</label>
+        <div class="input-group input-group-sm mb-1">
+          <input id="custLookup" class="form-control" placeholder="Mobile / invoice # / card / scan">
+          <button id="custLookupBtn" class="btn btn-outline-primary" type="button" title="Search"><i class="bi bi-search"></i></button>
+          <button id="custScanBtn"   class="btn btn-outline-primary" type="button" title="Scan"><i class="bi bi-camera"></i></button>
+        </div>
+        <div id="custScannerBox" style="display:none">
+          <div id="custReader" style="width:100%;max-width:320px;"></div>
+          <button id="custStopScan" class="btn btn-outline-secondary btn-sm mt-1">Stop</button>
+        </div>
+
+        <div id="custCard" class="p-2 border rounded d-none" style="background:var(--brand-50);">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <div class="fw-bold" id="custName">-</div>
+              <div class="small text-muted"><i class="bi bi-telephone"></i> <span id="custPhone">-</span></div>
+              <div class="small"><span class="badge bg-warning text-dark" id="custPoints">0 pts</span>
+                <span class="text-muted ms-1" id="custStats"></span></div>
+            </div>
+            <button id="custClear" class="btn btn-sm btn-outline-danger" title="Clear"><i class="bi bi-x"></i></button>
+          </div>
+        </div>
+        <div id="custWalkin" class="small text-muted mt-1 d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-person"></i> Walk-in customer</span>
+          <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newCustModal">
+            <i class="bi bi-person-plus"></i> New
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick-add customer modal -->
+      <div class="modal fade" id="newCustModal" tabindex="-1">
+        <div class="modal-dialog"><div class="modal-content">
+          <div class="modal-header"><h5 class="modal-title">Add new customer</h5>
+            <button class="btn-close" data-bs-dismiss="modal"></button></div>
+          <div class="modal-body">
+            <div class="mb-2"><label class="form-label small">Name *</label>
+              <input id="ncName" class="form-control" required></div>
+            <div class="mb-2"><label class="form-label small">Mobile</label>
+              <input id="ncPhone" class="form-control" placeholder="+91 …"></div>
+            <div class="mb-2"><label class="form-label small">Email</label>
+              <input id="ncEmail" class="form-control"></div>
+            <div class="mb-2"><label class="form-label small">State code</label>
+              <input id="ncState" class="form-control" value="33"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button id="ncSave" class="btn btn-brand">Save &amp; use</button>
+          </div>
+        </div></div>
+      </div>
+
+      <div class="table-responsive" style="max-height:38vh; overflow:auto;">
+        <table class="table table-sm cart-table">
+          <thead><tr><th>Item</th><th style="width:80px">Qty</th><th class="text-end">Amt</th><th></th></tr></thead>
+          <tbody id="cartBody"><tr><td colspan="4" class="text-center text-muted">Cart empty</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="border-top pt-2 mt-2">
+        <div class="d-flex justify-content-between"><span>Subtotal</span><span id="subtotal">₹0.00</span></div>
+        <div class="d-flex justify-content-between"><span>GST</span><span id="tax">₹0.00</span></div>
+        <div class="row g-2 mt-1">
+          <div class="col-6">
+            <label class="form-label small mb-1">Discount ₹</label>
+            <input id="discount" class="form-control form-control-sm" type="number" min="0" step="0.01" value="0">
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-1 d-flex justify-content-between">
+              <span>Redeem pts <span class="text-muted">(1 pt = ₹1)</span></span>
+              <button type="button" id="useAllPts" class="btn btn-link btn-sm p-0" style="display:none">Use all</button>
+            </label>
+            <input id="redeemPoints" class="form-control form-control-sm" type="number" min="0" step="1" value="0">
+            <div id="ptsHelp" class="small text-muted mt-1">Attach a customer to redeem points.</div>
+          </div>
+        </div>
+        <div class="d-flex justify-content-between mt-2"><strong>Total</strong><strong id="grandTotal" style="color:var(--brand-dark)">₹0.00</strong></div>
+
+        <div class="mt-3">
+          <label class="form-label small">Payment</label>
+          <div class="btn-group w-100" role="group">
+            <input type="radio" class="btn-check" name="pay" id="payCash" value="cash" checked>
+            <label class="btn btn-outline-primary btn-sm" for="payCash">Cash</label>
+            <input type="radio" class="btn-check" name="pay" id="payCard" value="card">
+            <label class="btn btn-outline-primary btn-sm" for="payCard">Card</label>
+            <input type="radio" class="btn-check" name="pay" id="payUpi" value="upi">
+            <label class="btn btn-outline-primary btn-sm" for="payUpi">UPI</label>
+          </div>
+        </div>
+
+        <button id="checkoutBtn" class="btn btn-brand w-100 mt-3"><i class="bi bi-check-circle"></i> Checkout</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="https://unpkg.com/html5-qrcode@2.3.10/html5-qrcode.min.js"></script>
+<script>
+const cart = new Map();
+let currentCustomerId = null;
+
+function fmt(n){ return '₹' + Number(n).toFixed(2); }
+
+function renderCart(){
+  const body = document.getElementById('cartBody');
+  body.innerHTML = '';
+  let subtotal = 0, tax = 0;
+  if (cart.size === 0){
+    body.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Cart empty</td></tr>';
+  } else {
+    cart.forEach((it, id) => {
+      const line = it.qty * it.price;
+      const t = line * it.gst / 100;
+      subtotal += line; tax += t;
+      body.insertAdjacentHTML('beforeend', `
+        <tr>
+          <td>${it.name}<br><small class="text-muted">${fmt(it.price)} × ${it.gst}%</small></td>
+          <td><input type="number" min="0.01" step="0.01" value="${it.qty}" class="form-control form-control-sm qty-input" data-id="${id}"></td>
+          <td class="text-end">${fmt(line + t)}</td>
+          <td><button class="btn btn-sm btn-outline-danger remove-btn" data-id="${id}"><i class="bi bi-x"></i></button></td>
+        </tr>`);
+    });
+  }
+  const discount = Math.min(parseFloat(document.getElementById('discount').value) || 0, subtotal);
+  const preLoyalty = Math.max(0, subtotal - discount + tax);
+  const requested = parseFloat(document.getElementById('redeemPoints').value) || 0;
+  const available = window._custPoints || 0;
+  const redeem = Math.min(requested, available, preLoyalty);
+  document.getElementById('subtotal').innerText = fmt(subtotal);
+  document.getElementById('tax').innerText = fmt(tax);
+  document.getElementById('grandTotal').innerText = fmt(preLoyalty - redeem);
+
+  // loyalty helper
+  const help = document.getElementById('ptsHelp');
+  const useAll = document.getElementById('useAllPts');
+  if (window._custPoints > 0){
+    help.innerHTML = `Available: <strong>${Math.round(available)} pts</strong> (₹${available.toFixed(0)} off) —
+      ${redeem>0 ? `applying <strong>${Math.round(redeem)} pt</strong> = ₹${redeem.toFixed(2)} off` : 'not redeeming'}`;
+    useAll.style.display = '';
+  } else {
+    help.innerText = 'Attach a customer to redeem points.';
+    useAll.style.display = 'none';
+  }
+
+  document.querySelectorAll('.qty-input').forEach(i => i.oninput = e => {
+    const id = e.target.dataset.id; const q = parseFloat(e.target.value) || 0;
+    if (q <= 0) cart.delete(id); else cart.get(id).qty = q;
+    renderCart();
+  });
+  document.querySelectorAll('.remove-btn').forEach(b => b.onclick = e => {
+    cart.delete(e.currentTarget.dataset.id); renderCart();
+  });
+}
+
+function addProduct(p){
+  const id = String(p.id);
+  const stock = parseFloat(p.stock);
+  if (!(stock > 0)){ alert(`"${p.name}" is out of stock.`); return; }
+  if (cart.has(id)){
+    if (cart.get(id).qty + 1 > stock){ alert('Insufficient stock'); return; }
+    cart.get(id).qty += 1;
+  } else {
+    cart.set(id, {
+      name: p.name, price: parseFloat(p.price),
+      gst: parseFloat(p.gst), qty: 1, stock
+    });
+  }
+  renderCart();
+}
+
+function addToCart(el){
+  addProduct({
+    id: el.dataset.id, name: el.dataset.name, price: el.dataset.price,
+    gst: el.dataset.gst, stock: el.dataset.stock
+  });
+}
+
+document.querySelectorAll('.pos-product').forEach(p => p.onclick = () => addToCart(p));
+
+let scanTimer = null;
+let lastServerLookup = null;   // avoid firing the same server lookup twice
+
+// Resolve a scanned/typed code to a product and add it to the cart.
+// Fast path: an item already on the grid (in-stock products at page load).
+// Fallback: ask the server so ANY active product resolves — including ones
+// saved after this page loaded, or not shown in the grid (e.g. out of stock).
+// `alertOnMiss` is true for deliberate actions (Enter); the silent auto-add
+// path passes false so partial typing doesn't pop alerts.
+async function resolveAndAdd(code, alertOnMiss){
+  code = (code || '').trim();
+  if (!code) return false;
+
+  const el = document.querySelector(`.pos-product[data-sku="${code}"]`)
+;
+  if (el){ addToCart(el); resetScan(); return true; }
+
+  try {
+    // ?code= rather than a path segment: a warehouse QR payload can contain '/'
+    // and '|', which a path segment mangles before the route ever sees it.
+    const r = await fetch(`${SHOP_ROOT}/pos/api/product?code=${encodeURIComponent(code)}`);
+    if (r.ok){ addProduct(await r.json()); resetScan(); return true; }
+    if (alertOnMiss){ alert('No product found for "' + code + '"'); }
+  } catch (err){
+    if (alertOnMiss){ alert('Lookup failed: ' + err); }
+  }
+  return false;
+}
+
+document.getElementById('productSearch').oninput = e => {
+  const box = e.target;
+  const q = box.value.trim().toLowerCase();
+  document.querySelectorAll('.pos-product').forEach(el => {
+    const match = el.dataset.name.toLowerCase().includes(q) || el.dataset.sku.toLowerCase().includes(q)
+;
+    el.style.display = match ? '' : 'none';
+  });
+  // Auto-add: when scanning/typing settles on an EXACT sku, add
+  // it to the cart automatically — no Enter, no click.
+  clearTimeout(scanTimer);
+  scanTimer = setTimeout(() => {
+    const code = box.value.trim();
+    if (!code) return;
+    // Grid hit? add immediately.
+    const el = document.querySelector(`.pos-product[data-sku="${code}"]`);
+    if (el){ addToCart(el); resetScan(); return; }
+    // No grid hit. If the value looks like a scanned code, silently ask the
+    // server so just-saved products still resolve even when the scanner doesn't
+    // send an Enter keystroke. A warehouse QR is a scan however it looks — its
+    // payload carries the description, so it fails the "no spaces" test that
+    // tells typing from scanning everywhere else.
+    const isWarehouseQr = /^EU?1\|/.test(code);
+    if ((isWarehouseQr || (code.length >= 4 && !/\s/.test(code))) && code !== lastServerLookup){
+      lastServerLookup = code;
+      resolveAndAdd(code, false);
+    }
+  }, 150);
+};
+
+function resetScan(){
+  const box = document.getElementById('productSearch');
+  box.value = '';
+  lastServerLookup = null;
+  document.querySelectorAll('.pos-product').forEach(el => el.style.display = '');
+  box.focus();
+}
+
+// Scan-mode: press Enter after typing/scanning a SKU or QR
+document.getElementById('productSearch').addEventListener('keydown', async e => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  clearTimeout(scanTimer);            // cancel the auto-add timer; we handle it now
+  await resolveAndAdd(e.target.value, true);
+});
+
+document.getElementById('discount').oninput = renderCart;
+document.getElementById('redeemPoints').oninput = renderCart;
+
+// ---- Customer lookup (mobile / invoice # / camera barcode) ----
+function paintCustomer(c){
+  const card = document.getElementById('custCard');
+  const walkin = document.getElementById('custWalkin');
+  if (c){
+    currentCustomerId = c.id;
+    window._custPoints = Number(c.loyalty_points || 0);
+    document.getElementById('custName').innerText = c.name;
+    document.getElementById('custPhone').innerText = c.phone || '(no phone)';
+    document.getElementById('custPoints').innerText = Math.round(c.loyalty_points || 0) + ' pts';
+    document.getElementById('custStats').innerText =
+      `· ${c.invoice_count || 0} invoices · spent ₹${Number(c.total_spent || 0).toFixed(2)}`;
+    card.classList.remove('d-none'); walkin.classList.add('d-none');
+  } else {
+    currentCustomerId = null;
+    window._custPoints = 0;
+    document.getElementById('redeemPoints').value = 0;
+    card.classList.add('d-none'); walkin.classList.remove('d-none');
+  }
+  renderCart();
+}
+
+// "Use all" points button
+document.getElementById('useAllPts').onclick = () => {
+  document.getElementById('redeemPoints').value = Math.floor(window._custPoints || 0);
+  renderCart();
+};
+
+async function lookupCustomer(q){
+  q = (q || '').trim(); if (!q) return;
+  const r = await fetch(`${SHOP_ROOT}/floor/api/customer-lookup?q=${encodeURIComponent(q)}`);
+  const j = await r.json();
+  if (j.error){ alert(j.error); return; }
+  paintCustomer(j);
+  document.getElementById('custLookup').value = '';
+}
+document.getElementById('custLookupBtn').onclick = () =>
+  lookupCustomer(document.getElementById('custLookup').value);
+document.getElementById('custLookup').addEventListener('keydown', e => {
+  if (e.key === 'Enter'){ e.preventDefault(); lookupCustomer(e.target.value); }
+});
+// Hands-free: a scanned membership card (e.g. "CUST000042") auto-attaches
+// the customer even if the scanner doesn't send an Enter keystroke.
+let custScanTimer = null;
+document.getElementById('custLookup').addEventListener('input', e => {
+  const v = e.target.value.trim();
+  clearTimeout(custScanTimer);
+  if (/^CUST\d{3,}$/i.test(v)){
+    custScanTimer = setTimeout(() => lookupCustomer(v), 150);
+  }
+});
+document.getElementById('custClear').onclick = () => paintCustomer(null);
+
+let custQr = null;
+document.getElementById('custScanBtn').onclick = async () => {
+  document.getElementById('custScannerBox').style.display = 'block';
+  if (custQr) return;
+  custQr = new Html5Qrcode("custReader");
+  try {
+    await custQr.start({ facingMode: "environment" },
+      { fps: 12, qrbox: { width: 240, height: 140 } },
+      async (decoded) => {
+        try { await custQr.stop(); custQr.clear(); } catch(e){}
+        custQr = null;
+        document.getElementById('custScannerBox').style.display = 'none';
+        lookupCustomer(decoded);
+      }, () => {});
+  } catch (err){ alert('Camera error: ' + err); }
+};
+document.getElementById('custStopScan').onclick = async () => {
+  if (custQr){ try { await custQr.stop(); custQr.clear(); } catch(e){} custQr = null; }
+  document.getElementById('custScannerBox').style.display = 'none';
+};
+
+// Quick-add new customer
+document.getElementById('ncSave').onclick = async () => {
+  const name = document.getElementById('ncName').value.trim();
+  if (!name){ alert('Name required'); return; }
+  const r = await fetch(`${SHOP_ROOT}/floor/api/customer/new`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      name,
+      phone: document.getElementById('ncPhone').value.trim(),
+      email: document.getElementById('ncEmail').value.trim(),
+      state_code: document.getElementById('ncState').value.trim() || '33',
+    })
+  });
+  const j = await r.json();
+  if (j.error){ alert(j.error); return; }
+  paintCustomer(j);
+  bootstrap.Modal.getInstance(document.getElementById('newCustModal')).hide();
+  ['ncName','ncPhone','ncEmail'].forEach(id => document.getElementById(id).value = '');
+};
+
+// ---- Hands-free scanning: keep the scan box focused ----
+// A barcode reader types the code then sends Enter into whatever field is
+// focused, so we keep focus on the scan box unless the user is typing
+// somewhere else (qty, customer, discount, etc.).
+const scanBox = document.getElementById('productSearch');
+function focusScan(){ scanBox.focus(); }
+focusScan();
+document.addEventListener('click', (e) => {
+  if (e.target.closest('input, textarea, select, button, a, .modal, .pos-product')) return;
+  focusScan();
+});
+
+// ---- Who is serving -------------------------------------------------------
+// The sale is credited to this person, so the till will not take a checkout
+// without one. Resolved server-side rather than trusted from the page: the code
+// may be typed, picked, or read off an ID card, and only the server knows
+// whether that person is still active staff.
+let servingStaffId = null;
+
+function paintStaff(s){
+  servingStaffId = s ? s.id : null;
+  const chosen = document.getElementById('staffChosen');
+  document.getElementById('staffMsg').textContent = '';
+  if (s){
+    document.getElementById('staffName').textContent = s.name;
+    document.getElementById('staffCodeShown').textContent = ' · ' + s.code;
+    chosen.classList.remove('d-none');
+    document.getElementById('staffCode').value = '';
+    document.getElementById('staffPick').value = '';
+  } else {
+    chosen.classList.add('d-none');
+  }
+  updateCheckoutGate();
+}
+
+function updateCheckoutGate(){
+  const btn = document.getElementById('checkoutBtn');
+  btn.disabled = !servingStaffId;
+  btn.title = servingStaffId ? '' : 'Identify the staff member first';
+}
+
+async function setStaff(code){
+  code = (code || '').trim();
+  if (!code) return;
+  try {
+    const r = await fetch(`${SHOP_ROOT}/pos/api/staff?code=${encodeURIComponent(code)}`);
+    if (!r.ok){
+      const j = await r.json().catch(() => ({}));
+      document.getElementById('staffMsg').textContent = j.error || 'No staff member for that code';
+      return;
+    }
+    paintStaff(await r.json());
+  } catch (e){
+    document.getElementById('staffMsg').textContent = 'Lookup failed: ' + e;
+  }
+}
+
+document.getElementById('staffGo').onclick = () => setStaff(document.getElementById('staffCode').value);
+document.getElementById('staffCode').addEventListener('keydown', e => {
+  // An ID-card reader types the code then sends Enter, same as a keyboard.
+  if (e.key === 'Enter'){ e.preventDefault(); setStaff(e.target.value); }
+});
+document.getElementById('staffPick').onchange = e => { if (e.target.value) setStaff(e.target.value); };
+document.getElementById('staffClear').onclick = () => {
+  paintStaff(null);
+  document.getElementById('staffCode').focus();
+};
+
+// Camera scan of the ID card, reusing the same library as the customer card.
+let staffCam = null;
+document.getElementById('staffScanBtn').onclick = async () => {
+  document.getElementById('staffScanBox').style.display = 'block';
+  if (staffCam) return;
+  staffCam = new Html5Qrcode('staffReader');
+  try {
+    await staffCam.start({ facingMode: 'environment' }, { fps: 10, qrbox: 220 },
+      async (text) => { await stopStaffScan(); setStaff(text); }, () => {});
+  } catch (err){
+    document.getElementById('staffMsg').textContent = 'Camera error: ' + err;
+  }
+};
+async function stopStaffScan(){
+  if (staffCam){ try { await staffCam.stop(); staffCam.clear(); } catch(e){} staffCam = null; }
+  document.getElementById('staffScanBox').style.display = 'none';
+}
+document.getElementById('staffStopScan').onclick = stopStaffScan;
+
+updateCheckoutGate();
+
+document.getElementById('checkoutBtn').onclick = async () => {
+  if (!servingStaffId){
+    alert('Identify the staff member serving this customer first.');
+    document.getElementById('staffCode').focus();
+    return;
+  }
+  if (cart.size === 0){ alert('Cart is empty'); return; }
+  const payload = {
+    staff_id: servingStaffId,
+    customer_id: currentCustomerId,
+    payment_method: document.querySelector('input[name=pay]:checked').value,
+    discount: parseFloat(document.getElementById('discount').value) || 0,
+    redeem_points: parseFloat(document.getElementById('redeemPoints').value) || 0,
+    items: [...cart.entries()].map(([id, it]) => ({product_id: id, quantity: it.qty, unit_price: it.price}))
+  };
+  const r = await fetch("{{ url_for('pos.checkout') }}", {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const j = await r.json();
+  if (j.error){ alert('Error: ' + j.error); return; }
+  window.location = `${SHOP_ROOT}/pos/invoice/${j.invoice_id}/print`;
+};
+</script>
+{% endblock %}

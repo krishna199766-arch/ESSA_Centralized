@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The warehouse server runs on the shop's own network over plain HTTP, and phones
+  reach it by whatever LAN address the PC has that day. Android has blocked
+  cleartext by default since Android 9, so it has to be permitted here or every
+  request fails with a bare "Cleartext HTTP traffic not permitted".
+
+  It is permitted for everything rather than for the private ranges only, because
+  `<domain>` matches hostnames and IP literals — it does not accept CIDR, so
+  there is no way to write "192.168.0.0/16" and have it mean anything. Scoping it
+  would need the server address baked in at build time, which is exactly what the
+  setup screen exists to avoid.
+
+  This is a LAN tool on a private network. If it is ever put on the open internet,
+  give the server a certificate and delete this file: the app will then refuse
+  cleartext on its own.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

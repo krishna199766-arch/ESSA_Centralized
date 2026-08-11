@@ -17,12 +17,20 @@ export const api = {
   verifyToken: (token) => fetch('/api/auth/verify?token=' + encodeURIComponent(token || '')).then(J),
 
   status: () => fetch('/api/status').then(J),
+  // Aggregated series behind the graphical dashboard, in one call. `status` is
+  // kept on the error for the same reason as askReport: a 404/405 here is a
+  // server still running from before this endpoint existed, which is a restart
+  // rather than a fault, and the screen can say which.
+  dashboardCharts: (months) => fetch('/api/dashboard/charts' + (months ? `?months=${months}` : ''))
+    .then(r => { if (!r.ok) throw Object.assign(new Error(String(r.status)), { status: r.status }); return r.json() }),
   listDocuments: () => fetch('/api/documents').then(J),
   getDocument: (id) => fetch(`/api/documents/${id}`).then(J),
   deleteDocument: (id) => fetch(`/api/documents/${id}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('del'), { detail: j.detail }); return j }),
   clearAllDocuments: (wipeMasters) => fetch('/api/documents/clear-all' + (wipeMasters ? '?wipe_masters=true' : ''), { method: 'DELETE' }).then(J),
-  imageUrl: (id) => `/api/documents/${id}/image`,
+  // `v` is the document's content hash — see _doc_out. Without it the URL names
+  // a recycled row id and the browser can serve the previous occupant's invoice.
+  imageUrl: (id, v) => `/api/documents/${id}/image` + (v ? `?v=${v}` : ''),
   upload: (file) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -232,6 +240,19 @@ export const api = {
   reportGroups: () => fetch('/api/reports/groups').then(J),
   runReport: (key, params) => fetch(`/api/reports/${key}${qs(params)}`).then(J),
   reportCsvUrl: (key, params) => `/api/reports/${key}/csv${qs(params)}`,
+  // Ask a question instead of picking a report and setting filters. POST because
+  // the question is free text in any script — Tamil in a query string is a
+  // percent-encoding problem nobody needs.
+  askReport: (q) => fetch('/api/reports/ask', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q }) })
+    .then(async r => { const j = await r.json().catch(() => ({}))
+      // `status` is kept because 404/405 here means something specific and
+      // fixable — a server still running from before this endpoint existed,
+      // serving the new UI off disk — and the screen can say so.
+      if (!r.ok) throw Object.assign(new Error('ask'), { status: r.status, detail: j.detail })
+      return j }),
+  reportAskExamples: () => fetch('/api/reports/ask-examples').then(J),
 
   // settings / vision
   getSettings: () => fetch('/api/settings').then(J),

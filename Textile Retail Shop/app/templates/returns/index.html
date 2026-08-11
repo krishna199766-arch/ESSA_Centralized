@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4><i class="bi bi-arrow-return-left"></i> Customer return</h4>
+  {% if current_user.is_manager %}
+  <a href="{{ url_for('returns.list_notes') }}" class="btn btn-outline-secondary btn-sm">All credit notes</a>
+  {% endif %}
+</div>
+
+<form class="row g-2 mb-3">
+  <div class="col-md-6">
+    <input class="form-control" name="q" value="{{ q }}" autofocus
+           placeholder="Invoice number from the customer's bill — e.g. INV-000003">
+  </div>
+  <div class="col-md-2"><button class="btn btn-brand w-100">Find bill</button></div>
+</form>
+
+{% if invoice %}
+{% set anything_left = invoice.items | selectattr('returnable_qty', 'gt', 0) | list %}
+<div class="card p-3 mb-3">
+  <div class="d-flex justify-content-between flex-wrap">
+    <div>
+      <h5 class="mb-1">{{ invoice.invoice_number }}</h5>
+      <div class="text-muted small">
+        {{ invoice.invoice_date.strftime('%d %b %Y, %H:%M') }} ·
+        {{ invoice.customer.name if invoice.customer else 'Walk-in customer' }}
+        {% if invoice.staff %} · sold by {{ invoice.staff.full_name }}{% endif %}
+      </div>
+    </div>
+    <div class="text-end">
+      <div class="text-muted small">Bill total</div>
+      <div class="fs-5 fw-bold">{{ invoice.total|inr }}</div>
+    </div>
+  </div>
+</div>
+
+{% if invoice.credit_notes %}
+<div class="alert alert-info py-2">
+  Already returned against this bill:
+  {% for n in invoice.credit_notes %}
+  <a href="{{ url_for('returns.view_note', nid=n.id) }}">{{ n.number }}</a> ({{ n.total|inr }}){% if not loop.last %}, {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if not anything_left %}
+<div class="alert alert-warning">Every line on this bill has already been returned.</div>
+{% else %}
+<form method="post" action="{{ url_for('returns.create') }}">
+  <input type="hidden" name="invoice_id" value="{{ invoice.id }}">
+
+  <div class="card mb-3">
+    <div class="table-responsive">
+      <table class="table mb-0 align-middle">
+        <thead><tr>
+          <th>Item</th><th class="text-end">Price</th>
+          <th class="text-end">Sold</th><th class="text-end">Already back</th>
+          <th style="width:130px">Return qty</th><th style="width:190px">Condition</th>
+        </tr></thead>
+        <tbody>
+          {% for it in invoice.items %}
+          <tr {% if it.returnable_qty <= 0 %}class="text-muted"{% endif %}>
+            <td>{{ it.product.name }}<br><small class="text-muted">{{ it.product.sku }}</small></td>
+            <td class="text-end">{{ it.unit_price|inr }}</td>
+            <td class="text-end">{{ it.quantity }}</td>
+            <td class="text-end">{{ it.returned_qty or '—' }}</td>
+            <td>
+              {% if it.returnable_qty > 0 %}
+              <input class="form-control form-control-sm" type="number" name="qty_{{ it.id }}"
+                     min="0" max="{{ it.returnable_qty }}" step="0.01" value="0">
+              {% else %}<span class="small">nothing left</span>{% endif %}
+            </td>
+            <td>
+              {% if it.returnable_qty > 0 %}
+              <select class="form-select form-select-sm" name="cond_{{ it.id }}">
+                <option value="resellable">Resellable — back on the shelf</option>
+                <option value="damaged">Damaged — write off</option>
+              </select>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card p-3">
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label">Staff handling this return *</label>
+        <input class="form-control" name="staff_code" required autocomplete="off"
+               placeholder="Scan ID card or type STF000003">
+        <div class="form-text">The commission comes off whoever made the original sale, not this person.</div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Refund by</label>
+        <select class="form-select" name="refund_method">
+          <option value="cash">Cash</option>
+          <option value="card">Card</option>
+          <option value="upi">UPI</option>
+          <option value="store_credit">Store credit</option>
+        </select>
+      </div>
+      <div class="col-md-5">
+        <label class="form-label">Reason</label>
+        <input class="form-control" name="reason" placeholder="Size didn't fit, defect, changed mind…">
+      </div>
+    </div>
+    <div class="mt-3">
+      <button class="btn btn-brand"><i class="bi bi-arrow-return-left"></i> Record return</button>
+      <span class="text-muted small ms-2">Stock, GST and loyalty are reversed for the lines above.</span>
+    </div>
+  </div>
+</form>
+{% endif %}
+{% endif %}
+
+{% if recent and not invoice %}
+<h6 class="text-muted mt-4">Recent returns</h6>
+<div class="card">
+  <table class="table table-sm mb-0">
+    <thead><tr><th>Credit note</th><th>Against</th><th>When</th><th class="text-end">Refunded</th></tr></thead>
+    <tbody>
+      {% for n in recent %}
+      <tr>
+        <td><a href="{{ url_for('returns.view_note', nid=n.id) }}">{{ n.number }}</a></td>
+        <td>{{ n.invoice.invoice_number }}</td>
+        <td>{{ n.created_at.strftime('%d %b %Y, %H:%M') }}</td>
+        <td class="text-end">{{ n.total|inr }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-center text-muted p-3">No returns yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

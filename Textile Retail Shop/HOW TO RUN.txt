@@ -1,0 +1,121 @@
+========================================================
+  TAQUA SILKS — Textile Retail Shop
+  HOW TO RUN
+========================================================
+
+This is a Flask (Python) web app. It runs on your own
+computer and opens in a web browser. No internet needed
+after setup.
+
+--------------------------------------------------------
+BEFORE YOU START
+--------------------------------------------------------
+You need Python 3.10 or newer installed.
+
+To check, open a terminal and type:
+    python --version
+
+If you don't have it, download from https://www.python.org
+and during install TICK the box "Add Python to PATH".
+
+
+========================================================
+  EASIEST WAY (WINDOWS)
+========================================================
+1. Double-click:  start.bat
+
+That's it. It will install what it needs, start the app,
+and open your browser automatically at:
+    http://localhost:8000
+
+To stop the app: close the black terminal window, or
+press Ctrl+C inside it.
+
+
+========================================================
+  EASIEST WAY (MAC)
+========================================================
+1. Double-click:  "Start Textile Shop.command"
+   (If it won't open, right-click it > Open, the first time.)
+
+Or in a terminal, run:
+    ./start.sh
+
+
+========================================================
+  MANUAL WAY (ANY COMPUTER)
+========================================================
+Open a terminal / command prompt in this folder, then:
+
+1. Install the requirements (only needed once):
+       pip install -r requirements.txt
+
+2. Set up the database with sample data (only once):
+       python run.py init
+
+3. Start the app:
+       python run.py
+
+4. Open your browser and go to:
+       http://localhost:8000
+
+To stop: press Ctrl+C in the terminal.
+
+
+========================================================
+  LOGGING IN
+========================================================
+Use one of these accounts:
+
+    Username    Password      Role
+    --------    --------      ----
+    admin       admin123      admin
+    manager     manager123    manager
+    ravi        cashier123    cashier
+    meena       cashier123    cashier
+
+(Change the admin password after first login.)
+
+
+========================================================
+  USING IT ON A PHONE OR TABLET (same shop Wi-Fi)
+========================================================
+1. Make sure the phone/tablet is on the SAME Wi-Fi as
+   the computer running the app.
+2. Find the computer's IP address:
+       Windows: type  ipconfig  (look for IPv4 Address)
+       Mac:     type  ipconfig getifaddr en0
+3. On the phone's browser go to:
+       http://THAT-IP-ADDRESS:8000
+   Example:  http://192.168.1.5:8000
+4. You can "Add to Home Screen" for an app-like icon.
+
+
+========================================================
+  COMMON PROBLEMS
+========================================================
+- "python is not recognized"
+    Python isn't installed or not on PATH. Reinstall
+    Python and tick "Add Python to PATH".
+
+- "port 8000 already in use"
+    Something else is using the port. Start on another
+    port:
+        Windows:  set PORT=8080 && python run.py
+        Mac:      PORT=8080 python run.py
+    Then open  http://localhost:8080
+
+- Page won't load / forgot admin password
+    Run:  python reset_admin.py
+    Or reset everything (WARNING: erases all data):
+        python run.py init
+
+
+========================================================
+  WHERE IS MY DATA?
+========================================================
+All data is stored in the file:  textile_shop.db
+Back up this one file to keep your records safe.
+Do NOT run "python run.py init" again unless you want to
+wipe everything and start fresh.
+========================================================

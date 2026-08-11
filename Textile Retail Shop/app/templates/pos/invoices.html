@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4><i class="bi bi-receipt"></i> Invoices</h4>
+  <div>
+    <a href="{{ url_for('pos.invoice_list') }}" class="btn btn-outline-secondary btn-sm">Clear filters</a>
+    <a href="{{ url_for('pos.counter') }}" class="btn btn-brand btn-sm"><i class="bi bi-plus"></i> New sale</a>
+  </div>
+</div>
+
+<form class="card p-3 mb-3" method="get">
+  <div class="row g-2">
+    <div class="col-md-4 col-lg-3">
+      <label class="form-label small mb-1">Search</label>
+      <input class="form-control form-control-sm" name="q" value="{{ q }}" placeholder="Invoice #, customer, phone">
+    </div>
+    <div class="col-6 col-md-2 col-lg-2">
+      <label class="form-label small mb-1">From date</label>
+      <input class="form-control form-control-sm" type="date" name="from" value="{{ date_from }}">
+    </div>
+    <div class="col-6 col-md-2 col-lg-2">
+      <label class="form-label small mb-1">To date</label>
+      <input class="form-control form-control-sm" type="date" name="to" value="{{ date_to }}">
+    </div>
+    <div class="col-6 col-md-3 col-lg-2">
+      <label class="form-label small mb-1">Cashier</label>
+      <select class="form-select form-select-sm" name="cashier">
+        <option value="">All</option>
+        {% for c in cashiers %}
+        <option value="{{ c.id }}" {% if cashier_id==c.id %}selected{% endif %}>{{ c.full_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-6 col-md-3 col-lg-2">
+      <label class="form-label small mb-1">Payment</label>
+      <select class="form-select form-select-sm" name="payment">
+        <option value="">All</option>
+        {% for m in ['cash','card','upi'] %}
+        <option value="{{ m }}" {% if payment==m %}selected{% endif %}>{{ m|upper }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-6 col-md-2 col-lg-1">
+      <label class="form-label small mb-1">Min ₹</label>
+      <input class="form-control form-control-sm" type="number" step="0.01" name="min" value="{{ min_amt }}">
+    </div>
+    <div class="col-6 col-md-2 col-lg-1">
+      <label class="form-label small mb-1">Max ₹</label>
+      <input class="form-control form-control-sm" type="number" step="0.01" name="max" value="{{ max_amt }}">
+    </div>
+    <div class="col-md-2 col-lg-1 d-flex align-items-end">
+      <button class="btn btn-brand btn-sm w-100"><i class="bi bi-funnel"></i> Filter</button>
+    </div>
+  </div>
+</form>
+
+<div class="row g-3 mb-3">
+  <div class="col-6 col-md-4"><div class="stat-card card p-3"><div class="label">Matching invoices</div><div class="value">{{ summary.count }}</div></div></div>
+  <div class="col-6 col-md-4"><div class="stat-card card p-3"><div class="label">Total value</div><div class="value">{{ summary.total|inr }}</div></div></div>
+  <div class="col-12 col-md-4"><div class="stat-card card p-3"><div class="label">GST collected</div><div class="value">{{ summary.tax|inr }}</div></div></div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover mb-0 align-middle">
+      <thead>
+        <tr>
+          <th>#</th><th>Date</th><th>Customer</th><th>Cashier</th>
+          <th>Payment</th><th class="text-end">Total</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in invoices %}
+        <tr>
+          <td>{{ i.invoice_number }}</td>
+          <td>{{ i.invoice_date.strftime('%d %b %Y %H:%M') }}</td>
+          <td>
+            {% if i.customer %}{{ i.customer.name }}<br><small class="text-muted">{{ i.customer.phone or '' }}</small>
+            {% else %}Walk-in{% endif %}
+          </td>
+          <td>{{ (i.staff.full_name if i.staff else i.cashier.full_name) }}</td>
+          <td><span class="badge bg-secondary">{{ i.payment_method }}</span></td>
+          <td class="text-end fw-bold">{{ i.total|inr }}</td>
+          <td>
+            <a href="{{ url_for('pos.view_invoice', iid=i.id) }}" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye"></i></a>
+            <a href="{{ url_for('pos.print_invoice', iid=i.id) }}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-printer"></i></a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="text-center text-muted p-4">No invoices match your filters.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -2,9 +2,11 @@ import io
 import csv
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..services import reports as svc
+from ..services import nlq as nlq_svc
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -20,6 +22,35 @@ def catalogue():
 def groups():
     """Group keys and their headings, in the order they are meant to be shown."""
     return svc.group_headings()
+
+
+class Question(BaseModel):
+    q: str
+
+
+#: Registered above "/{key}", or a GET to /api/reports/ask-examples is read as a
+#: report named "ask-examples". `/ask` itself is a POST — the question is free
+#: text in any script and belongs in a body, not a URL.
+@router.get("/ask-examples")
+def ask_examples():
+    """Questions that work, and whether a model is answering them.
+
+    `engine` is here so the screen can say which of the two is running rather
+    than presenting a keyword match as if it had read the sentence."""
+    return {"engine": "model" if nlq_svc.available() else "keywords",
+            "examples": nlq_svc.examples()}
+
+
+@router.post("/ask")
+def ask(body: Question, db: Session = Depends(get_db)):
+    """Answer a natural-language question with one of the catalogue's reports.
+
+    Returns the report in the same shape as `/{key}` plus an `interpretation`
+    describing how the question was read, which filters the report actually ran
+    with, and anything it could not honour. The screen shows that reading — a
+    misroute the person can see and correct is a different thing from a wrong
+    table presented as their answer."""
+    return nlq_svc.ask(db, body.q)
 
 
 #: Every filter any report takes. `svc.run` drops the ones a given report doesn't

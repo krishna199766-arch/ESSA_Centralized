@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h4>Attendance (last 30 days)</h4>
+<div class="card">
+  <table class="table mb-0">
+    <thead><tr><th>Staff</th><th>Check in</th><th>Check out</th><th>Duration</th></tr></thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td>{{ r.user.full_name }}</td>
+        <td>{{ r.check_in.strftime('%d %b %H:%M') }}</td>
+        <td>{{ r.check_out.strftime('%d %b %H:%M') if r.check_out else '—' }}</td>
+        <td>{% if r.check_out %}{{ '%.1f' % ((r.check_out - r.check_in).total_seconds()/3600) }} hrs{% else %}<span class="badge bg-success">active</span>{% endif %}</td>
+      </tr>
+      {% else %}<tr><td colspan="4" class="text-center text-muted">No records.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

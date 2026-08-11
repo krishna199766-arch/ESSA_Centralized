@@ -1,0 +1,11 @@
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
+Flask-WTF==1.2.1
+WTForms==3.1.2
+email-validator==2.2.0
+python-dotenv==1.0.1
+Werkzeug==3.0.3
+# Renders the warehouse's QR onto the shop's labels (app/utils.py:qr_svg).
+# Optional at runtime — without it a label still prints its barcode and SKU.
+segno==1.6.1
