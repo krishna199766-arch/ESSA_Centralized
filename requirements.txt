@@ -23,6 +23,13 @@ python-barcode==0.15.1
 segno==1.6.1
 
 # Postgres. SQLite is a file, and this runtime has nowhere to keep one.
+#
+# The Python version is pinned to 3.12 in .python-version, and this package is
+# why. Left to pick its own, the builder chose 3.14, which is new enough that
+# none of psycopg2, pillow, pydantic-core or rapidfuzz publish wheels for it —
+# so all four were compiled from source, and psycopg2 got as far as needing the
+# Postgres C headers (`pg_config`), which no build image carries. The error
+# reads as a psycopg2 problem and is a Python-version problem.
 psycopg2-binary==2.9.10
 
 # The retail shop, mounted at /pos by backend/app/pos_mount.py.
