@@ -23,6 +23,7 @@ swap is over.
 """
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -46,6 +47,48 @@ def _seed_if_empty(pkg) -> None:
     seed_all()
 
 
+POS_SCHEMA = "shop"
+
+
+def _isolate_shop_schema() -> None:
+    """Keep the shop's tables out of the warehouse's, on Postgres.
+
+    The two codebases were written against separate SQLite FILES, and four of
+    their table names are the same: categories, products, stock_movements and
+    users. A file each made that harmless. One Postgres database does not —
+    whichever app runs `create_all` first wins the name, and the other then
+    queries a table with its own name and the wrong columns. The symptom is a
+    column that "does not exist" on a table that plainly does.
+
+    `users` is the one that matters most: the shop's logins and the warehouse's
+    accounts are different tables with the same name, and merging them would be
+    a security problem rather than an error message.
+
+    A Postgres schema per app is the standard separation and needs no change to
+    either set of models — the shop is simply pointed at `shop` and creates its
+    tables there. On SQLite nothing happens, because two files were never the
+    problem.
+    """
+    url = os.environ.get("DATABASE_URL", "")
+    if not url.startswith(("postgres://", "postgresql://")) or "search_path" in url:
+        return
+
+    from sqlalchemy import create_engine, text
+    engine = create_engine(url.replace("postgres://", "postgresql://", 1))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{POS_SCHEMA}"'))
+    finally:
+        engine.dispose()
+
+    # `options=-csearch_path=shop` makes every unqualified name in the shop's
+    # SQL resolve there. Appended to the URL rather than set on the connection,
+    # because the shop builds its own engine from this string and never sees
+    # anything we pass here by another route.
+    sep = "&" if "?" in url else "?"
+    os.environ["DATABASE_URL"] = f"{url}{sep}options=-csearch_path%3D{POS_SCHEMA}"
+
+
 def load_pos_app():
     """Import and return the shop's Flask application, or raise.
 
@@ -56,6 +99,8 @@ def load_pos_app():
     """
     if not POS_DIR.is_dir():
         raise FileNotFoundError(f"POS module not found at {POS_DIR}")
+
+    _isolate_shop_schema()
 
     ours = {k: v for k, v in sys.modules.items() if _is_ours(k)}
     for name in ours:
