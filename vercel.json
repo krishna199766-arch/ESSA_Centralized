@@ -6,7 +6,8 @@
   "functions": {
     "api/index.py": {
       "memory": 1024,
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "{backend/**,Textile Retail Shop/**}"
     }
   },
   "rewrites": [

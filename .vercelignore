@@ -1,19 +1,38 @@
-# Vercel builds the desktop UI and nothing else — the server it proxies to lives
-# on a host with a disk (see docs/DEPLOYMENT.md). None of the following is used
-# by that build, and the two virtualenvs are tens of thousands of files.
+# What NOT to upload to Vercel.
 #
-# Deploying through the Git integration only ever sees tracked files, so this
-# matters mainly to `vercel` run from the command line, which uploads the
-# working directory as it finds it — venvs, databases and all.
-backend/
-Textile Retail Shop/
+# Read this before adding anything: the server runs here now, as the function in
+# api/index.py, and that function imports `backend/app` and mounts the shop from
+# "Textile Retail Shop". Excluding either of those does not make a smaller
+# deployment — it makes one that builds cleanly and then 500s on every request,
+# which is a far more expensive mistake than a few uploaded megabytes. That is
+# exactly what an earlier version of this file did.
+#
+# So this lists only things nothing at runtime opens.
+
+# The phone's native shell and its build. The PWA the shell wraps is served by
+# the function from backend/app/mobile, which stays.
 android/
 mobile-app/
-docs/
 
+# Documentation and screenshots.
+docs/
+*.md
+
+# Virtualenvs — host-specific, and "Textile Retail Shop/.venv-win" alone is
+# 55 MB of vendored packages. Vercel installs from requirements.txt instead.
 **/.venv
 **/.venv-win
 **/__pycache__
 **/*.pyc
+
+# Local state. The deployment keeps none of this on disk: the database is
+# Postgres and uploaded invoices are in Blob storage. A database copied up here
+# would be read by nobody and would ship this laptop's data to a public host.
 *.db
 *.db.bak*
+backend/data/uploads/
+backend/data/settings.json
+
+.git/
+.github/
+.env
