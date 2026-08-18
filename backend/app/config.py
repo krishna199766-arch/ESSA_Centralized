@@ -28,7 +28,33 @@ UPLOAD_DIR = os.environ.get("ESSA_UPLOAD_DIR", os.path.join(STATE_DIR, "uploads"
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample_images")
 GROUND_TRUTH_DIR = os.path.join(DATA_DIR, "ground_truth")
 
-DATABASE_URL = os.environ.get("ESSA_DATABASE_URL", f"sqlite:///{os.path.join(STATE_DIR, 'essa.db')}")
+def _database_url() -> str:
+    """Where the warehouse database is.
+
+    ESSA_DATABASE_URL first, because that is this app's own variable and an
+    explicit answer should win. After it come the names a hosting provider sets
+    BY ITSELF when a Postgres is attached to the project — Vercel and Supabase
+    both write POSTGRES_URL, and the pooled spelling is the one serverless
+    wants. Reading them means a database attached in the dashboard simply works,
+    with nothing copied by hand.
+
+    That matters more than it looks: the alternative is pasting a connection
+    string containing a password into two variables, and the failure when it is
+    pasted wrong is a 500 with no clue in it. The provider already knows the
+    right value; ask it rather than the person.
+    """
+    for name in ("ESSA_DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL",
+                 "DATABASE_URL", "POSTGRES_URL_NON_POOLING"):
+        url = (os.environ.get(name) or "").strip()
+        # A half-filled template is worse than nothing: it parses, connects to
+        # nowhere, and reports a fault that looks like the database being down.
+        # The angle brackets are what the providers' own examples use.
+        if url and "<" not in url and ">" not in url:
+            return url
+    return f"sqlite:///{os.path.join(STATE_DIR, 'essa.db')}"
+
+
+DATABASE_URL = _database_url()
 
 # Which extraction provider to prefer. "auto" = vision model if a key is present,
 # else tesseract. The seeded provider is always consulted first for known samples.
