@@ -95,6 +95,11 @@ export const api = {
   // Read an already-uploaded document again — for one whose reading ran out of
   // time and left it with no extraction attached.
   reExtract: (id) => fetch(`/api/documents/${id}/extract`, { method: 'POST' }).then(J),
+  // Fold another document's pages into this one — for an invoice whose pages
+  // were uploaded separately and became two half-invoices.
+  mergeDocuments: (id, from_id) => fetch(`/api/documents/${id}/merge`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from_id }) }).then(J),
   deleteDocument: (id) => fetch(`/api/documents/${id}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('del'), { detail: j.detail }); return j }),
   clearAllDocuments: (wipeMasters) => fetch('/api/documents/clear-all' + (wipeMasters ? '?wipe_masters=true' : ''), { method: 'DELETE' }).then(J),

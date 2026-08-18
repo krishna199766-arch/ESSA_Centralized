@@ -911,6 +911,50 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
     })
   }, [docId])
 
+  // Two documents with the same invoice number are one bill uploaded a page at
+  // a time — the ordinary result of not knowing the upload takes both at once.
+  // Neither half reconciles, because the totals are printed on the last page
+  // and belong to lines the other document holds. Worth spotting for them
+  // rather than leaving two plausible-looking invoices in the list.
+  const [twin, setTwin] = useState(null)
+  const [merging, setMerging] = useState(false)
+  const invNo = data?.invoice?.number
+  useEffect(() => {
+    if (!docId || !invNo) { setTwin(null); return }
+    let live = true
+    api.listDocuments().then((all) => {
+      if (!live) return
+      const norm = (v) => String(v || '').replace(/\s+/g, '').toUpperCase()
+      setTwin(all.find((d) => d.id !== docId && d.status !== 'posted'
+        && norm(d.invoice_number) === norm(invNo)) || null)
+    }).catch(() => {})
+    return () => { live = false }
+  }, [docId, invNo])
+
+  const mergeTwin = async () => {
+    if (!twin) return
+    if (!window.confirm(
+      `Fold "${twin.filename}" into this document?
+
+`
+      + 'Its pages are added here in page order and the whole invoice is read '
+      + 'again. That document is then deleted, along with any draft GRN built '
+      + 'from it.')) return
+    setMerging(true)
+    try {
+      const d = await api.mergeDocuments(docId, twin.id)
+      setDoc(d.document); setUnread(false); setTwin(null)
+      setData(structuredClone(d.extraction?.data || {}))
+      setFlags(d.extraction?.field_flags || {})
+      setWarnings(d.extraction?.warnings || [])
+      onSaved && onSaved()
+      toast(`Merged — ${d.merged?.pages} pages, ${d.extraction?.data?.line_items?.length || 0} lines`, 'ok')
+    } catch (e) {
+      toast(e.detail || 'Could not merge them', 'err')
+    }
+    setMerging(false)
+  }
+
   const readAgain = async () => {
     setReading(true)
     try {
@@ -1085,6 +1129,22 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
       </div>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div className="editor">
+          {twin && (
+            <div className="warnbox" style={{ marginBottom: 20 }}>
+              <h4>Another document carries this invoice number</h4>
+              <div className="small" style={{ lineHeight: 1.7 }}>
+                <b>{twin.filename}</b> is also <b>#{twin.invoice_number}</b>
+                {twin.grand_total != null && <> at ₹ {money(twin.grand_total)}</>}.
+                A bill printed on more than one page uploaded a page at a time
+                gives two documents like this, and neither adds up on its own —
+                the totals are on the last page.
+                <div style={{ marginTop: 10 }}>
+                  <button className="btn primary" disabled={merging} onClick={mergeTwin}>
+                    {merging ? 'Merging and re-reading…' : 'Merge them into one invoice'}</button>
+                </div>
+              </div>
+            </div>
+          )}
           <div className={'warnbox ' + (warnings.filter((w)=>!w.includes('OCR')&&!w.includes('vision')&&!w.includes('sample')).length ? '' : 'clean')} style={{ marginBottom: 20 }}>
             <h4>{warnings.length ? `${warnings.length} check(s)` : 'All internal checks passed'}
               {doc && <span className="small" style={{ float: 'right' }}>via {doc && data.template_key ? '' : ''}extraction · confidence <b className={'conf ' + confClass(doc?.confidence)}>{doc ? Math.round(doc.confidence * 100) + '%' : '—'}</b></span>}

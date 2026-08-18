@@ -5,6 +5,7 @@ import datetime as dt
 from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -225,6 +226,69 @@ async def upload_and_extract(file: List[UploadFile] = File(...),
     db.refresh(doc)
 
     return _extract_into(doc, db)
+
+
+class MergeIn(BaseModel):
+    """The other half of this invoice — the document to fold in and remove."""
+    from_id: int
+
+
+@router.post("/{doc_id}/merge")
+def merge_documents(doc_id: int, body: MergeIn, db: Session = Depends(get_db)):
+    """Fold another document's pages into this one and read the whole thing.
+
+    For an invoice whose pages were uploaded one at a time — which is what
+    everybody does until they know the upload takes both. What is left is two
+    documents of the same bill: one with the first half of the lines, and one
+    with the rest and the totals. Neither reconciles, because the totals belong
+    to lines the other document holds.
+
+    The pages are appended in DOCUMENT-ID order rather than in the order the two
+    were named. Page 2 uploaded before page 1 is an ordinary mistake, and the
+    reading depends on the order — the header is taken from the first page and
+    the totals from the last.
+
+    The absorbed document is deleted, not left as a duplicate: the whole point
+    is to stop two half-invoices sitting in the list. Its GRN goes with it, and
+    a posted one blocks the merge — a receipt already booked against half a bill
+    has to be dealt with deliberately, not silently rewritten.
+    """
+    if body.from_id == doc_id:
+        raise HTTPException(400, "That is the same document")
+    target = db.get(models.Document, doc_id)
+    other = db.get(models.Document, body.from_id)
+    if not target or not other:
+        raise HTTPException(404, "document not found")
+
+    for d in (target, other):
+        if d.status == "posted":
+            raise HTTPException(400, f"'{d.filename}' is already posted to inventory. "
+                                     "Un-post or clear it before merging.")
+
+    first, second = (target, other) if target.id < other.id else (other, target)
+    pages = list(first.pages or [first.stored_path]) + list(second.pages or [second.stored_path])
+    # The same photograph added twice adds nothing and costs a page of reading.
+    seen, ordered = set(), []
+    for ref in pages:
+        if ref not in seen:
+            seen.add(ref)
+            ordered.append(ref)
+
+    target.pages = ordered
+    target.stored_path = ordered[0]
+    target.filename = first.filename
+    target.status = "uploaded"
+    for ex in list(target.extractions):
+        db.delete(ex)                       # the old reading was of half a bill
+    for p in db.query(models.Purchase).filter(models.Purchase.document_id == other.id).all():
+        db.delete(p)
+    db.delete(other)
+    db.commit()
+    db.refresh(target)
+
+    out = _extract_into(target, db)
+    out["merged"] = {"pages": len(ordered), "absorbed": body.from_id}
+    return out
 
 
 @router.post("/{doc_id}/extract")
