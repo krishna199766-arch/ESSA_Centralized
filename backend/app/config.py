@@ -43,8 +43,7 @@ def _database_url() -> str:
     pasted wrong is a 500 with no clue in it. The provider already knows the
     right value; ask it rather than the person.
     """
-    for name in ("ESSA_DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL",
-                 "DATABASE_URL", "POSTGRES_URL_NON_POOLING"):
+    for name in DB_URL_CANDIDATES:
         url = (os.environ.get(name) or "").strip()
         # A half-filled template is worse than nothing: it parses, connects to
         # nowhere, and reports a fault that looks like the database being down.
@@ -52,6 +51,38 @@ def _database_url() -> str:
         if url and "<" not in url and ">" not in url:
             return url
     return f"sqlite:///{os.path.join(STATE_DIR, 'essa.db')}"
+
+
+DB_URL_CANDIDATES = ("ESSA_DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL",
+                     "DATABASE_URL", "POSTGRES_URL_NON_POOLING")
+
+
+def database_url_report() -> list:
+    """Which of the candidate variables exist, and why each was or wasn't used.
+
+    Reported by /api/status because the alternative is guessing across a
+    dashboard nobody else can see. "No usable connection string" has three quite
+    different causes — the variable is absent, or it is set to a template, or it
+    is set on the wrong environment and is therefore absent HERE — and they lead
+    to three different fixes.
+
+    Names and verdicts only. The values are passwords.
+    """
+    out = []
+    for name in DB_URL_CANDIDATES:
+        raw = os.environ.get(name)
+        if raw is None:
+            verdict = "not set"
+        elif not raw.strip():
+            verdict = "set but empty"
+        elif "<" in raw or ">" in raw:
+            verdict = "IGNORED — still a template, contains < or >"
+        elif not raw.strip().startswith(("postgres://", "postgresql://")):
+            verdict = f"IGNORED — not a postgres URL (starts '{raw.strip()[:12]}…')"
+        else:
+            verdict = "usable"
+        out.append({"name": name, "status": verdict})
+    return out
 
 
 DATABASE_URL = _database_url()

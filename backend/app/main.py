@@ -59,6 +59,7 @@ def _database_status(url: str) -> dict:
                    "EVERYTHING when the instance recycles. Set ESSA_DATABASE_URL "
                    "to a real Postgres URL — a value still containing < or > is a "
                    "template and is ignored.")
+    from .config import database_url_report
     return {
         "ok": STARTUP_ERROR is None and not ephemeral,
         # The driver and host, never the password — see _scrub.
@@ -67,6 +68,9 @@ def _database_status(url: str) -> dict:
         "persistent": not ephemeral,
         "error": STARTUP_ERROR,
         "warning": warning,
+        # Only shown when there is a problem: when it is working, the list of
+        # variables that were not needed is noise on an endpoint the app polls.
+        "checked": None if not ephemeral else database_url_report(),
     }
 
 
