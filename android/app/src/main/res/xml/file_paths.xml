@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Where the camera app is allowed to write the photo it takes.
+     The app's own cache, not external storage: the file is handed straight to
+     the page's file input and uploaded, and nothing needs it afterwards. -->
+<paths>
+    <cache-path name="captures" path="captures/" />
+</paths>

@@ -1,11 +1,17 @@
 package com.essa.warehouse;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceError;
@@ -14,8 +20,13 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
+
+import java.io.File;
 
 import com.journeyapps.barcodescanner.ScanContract;
 import com.journeyapps.barcodescanner.ScanOptions;
@@ -43,6 +54,16 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView web;
     private ActivityResultLauncher<ScanOptions> scanLauncher;
+
+    // The page's file input, held between opening the chooser and the result
+    // coming back. Exactly one call to it per chooser — see fileChooserLauncher.
+    private ValueCallback<Uri[]> fileCallback;
+    private ActivityResultLauncher<Intent> fileChooserLauncher;
+    // Where the camera app was told to write the photo. The camera returns an
+    // empty result on success, so this is the only record of where it went.
+    private Uri cameraOutput;
+    private ActivityResultLauncher<String> cameraPermissionLauncher;
+    private PermissionRequest pendingPagePermission;
 
     /**
      * Replaces the page's camera scanner with the native one.
@@ -87,6 +108,50 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         web = findViewById(R.id.web);
 
+        // The other half of onShowFileChooser: whatever the picker or the camera
+        // returns is handed back to the page's file input here. Every path out of
+        // this — a file, several files, a photo just taken, or a cancel — must
+        // call the callback exactly once, because a WebView whose chooser never
+        // answers will not open another one for the rest of the session.
+        fileChooserLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(), result -> {
+                ValueCallback<Uri[]> cb = fileCallback;
+                fileCallback = null;
+                if (cb == null) return;
+
+                Uri[] out = null;
+                Intent data = result.getData();
+                if (result.getResultCode() == RESULT_OK) {
+                    if (data == null || (data.getData() == null && data.getClipData() == null)) {
+                        // The camera app returns no data on success — the photo
+                        // is at the URI we told it to write to.
+                        if (cameraOutput != null) out = new Uri[]{cameraOutput};
+                    } else if (data.getClipData() != null) {
+                        int n = data.getClipData().getItemCount();
+                        out = new Uri[n];
+                        for (int i = 0; i < n; i++) {
+                            out[i] = data.getClipData().getItemAt(i).getUri();
+                        }
+                    } else {
+                        out = new Uri[]{data.getData()};
+                    }
+                }
+                cameraOutput = null;
+                cb.onReceiveValue(out);
+            });
+
+        // Android's own camera permission, asked for only when something actually
+        // wants the camera rather than on first launch — a permission dialog
+        // before the app has done anything is the one people refuse.
+        cameraPermissionLauncher = registerForActivityResult(
+            new ActivityResultContracts.RequestPermission(), granted -> {
+                PermissionRequest req = pendingPagePermission;
+                pendingPagePermission = null;
+                if (req == null) return;
+                if (granted) req.grant(req.getResources());
+                else req.deny();
+            });
+
         scanLauncher = registerForActivityResult(new ScanContract(), result -> {
             String code = result == null ? null : result.getContents();
             if (code == null) return;                       // cancelled
@@ -104,7 +169,62 @@ public class MainActivity extends AppCompatActivity {
 
         web.addJavascriptInterface(new Bridge(), "AndroidHost");
 
-        web.setWebChromeClient(new WebChromeClient());
+        // A bare WebChromeClient is what made "Take a photo" and "Choose a photo"
+        // do nothing at all, with no error — the page opens a file input, and a
+        // WebView that has not implemented onShowFileChooser simply drops it on
+        // the floor. In a browser the same page works, which is why this looked
+        // like a fault in the page.
+        web.setWebChromeClient(new WebChromeClient() {
+
+            @Override
+            public boolean onShowFileChooser(WebView view,
+                                             ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (fileCallback != null) {                 // a chooser is already open
+                    fileCallback.onReceiveValue(null);
+                }
+                fileCallback = callback;
+                try {
+                    fileChooserLauncher.launch(buildChooser(params));
+                } catch (Exception e) {
+                    fileCallback = null;
+                    return false;                           // let the WebView give up quietly
+                }
+                return true;
+            }
+
+            /**
+             * The page asking for the camera itself (getUserMedia), which is how
+             * the live barcode scanner and the in-app capture work.
+             *
+             * Chromium only offers those on a secure origin, so on the warehouse
+             * LAN over plain http this never fires and the native scanner is the
+             * only route. Against the deployed https server it does fire, and
+             * without this it is denied by default — the page then reports a
+             * camera that is present, permitted by Android, and refused by the
+             * shell.
+             */
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                runOnUiThread(() -> {
+                    for (String r : request.getResources()) {
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) {
+                            if (ContextCompat.checkSelfPermission(MainActivity.this,
+                                    Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                // Ask Android first; the page can ask again once
+                                // the user has answered.
+                                pendingPagePermission = request;
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+                                return;
+                            }
+                            request.grant(request.getResources());
+                            return;
+                        }
+                    }
+                    request.deny();
+                });
+            }
+        });
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
@@ -121,6 +241,68 @@ public class MainActivity extends AppCompatActivity {
         });
 
         web.loadUrl(base + "/m");
+    }
+
+    /**
+     * The chooser the page's file input opens: the camera and the file picker
+     * in one dialog.
+     *
+     * Both, because the page offers both and means different things by them —
+     * "Take a photo" is the docket in someone's hand on the dock, "Choose a
+     * photo or PDF" is the copy already on the phone or emailed over. The page's
+     * `accept` attribute decides what the picker will show, so a PDF is
+     * offered where the page allows one and not where it does not.
+     */
+    private Intent buildChooser(WebChromeClient.FileChooserParams params) {
+        String[] accept = params == null ? null : params.getAcceptTypes();
+        boolean wantsPdf = false;
+        for (String a : accept == null ? new String[0] : accept) {
+            if (a != null && a.toLowerCase().contains("pdf")) wantsPdf = true;
+        }
+
+        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType(wantsPdf ? "*/*" : "image/*");
+        if (wantsPdf) {
+            pick.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "application/pdf"});
+        }
+        if (params != null && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+            pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+
+        Intent chooser = Intent.createChooser(pick, getString(R.string.pick_a_file));
+
+        Intent camera = cameraIntent();
+        if (camera != null) {
+            chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{camera});
+        }
+        return chooser;
+    }
+
+    /**
+     * The camera app, told where to put the photo.
+     *
+     * A FileProvider URI rather than the thumbnail the camera returns inline:
+     * the inline one is a few hundred pixels wide and an invoice read from it is
+     * unreadable. Null when there is no camera app to answer, in which case the
+     * chooser is the picker alone rather than a dialog with a dead entry in it.
+     */
+    private Intent cameraIntent() {
+        Intent take = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (take.resolveActivity(getPackageManager()) == null) return null;
+        try {
+            File dir = new File(getCacheDir(), "captures");
+            if (!dir.exists() && !dir.mkdirs()) return null;
+            File photo = File.createTempFile("essa-", ".jpg", dir);
+            cameraOutput = FileProvider.getUriForFile(
+                this, getPackageName() + ".fileprovider", photo);
+            take.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutput);
+            take.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            return take;
+        } catch (Exception e) {
+            cameraOutput = null;
+            return null;
+        }
     }
 
     /** Exposed to the page as `AndroidHost`. */

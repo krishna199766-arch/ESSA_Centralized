@@ -30,5 +30,19 @@
             android:name=".SetupActivity"
             android:exported="false"
             android:label="@string/setup_title" />
+
+        <!-- Lets the camera app write into this app's cache and hand the photo
+             back. Without it, MediaStore.EXTRA_OUTPUT can only point at a file
+             the camera has no permission to open, and "Take a photo" fails
+             after the shutter rather than before it. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

@@ -20,4 +20,5 @@
     <string name="unreachable_body">Couldn\'t load %1$s. The server may be off, or the phone may be on a different network.</string>
     <string name="retry">Retry</string>
     <string name="change_server">Change server</string>
+    <string name="pick_a_file">Photo or PDF</string>
 </resources>

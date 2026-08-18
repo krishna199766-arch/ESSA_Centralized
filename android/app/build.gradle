@@ -31,6 +31,11 @@ android {
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
+    // FileProvider and ContextCompat, for handing a camera photo back to the
+    // page's file input. AppCompat already pulls this in transitively; named
+    // here because MainActivity imports from it directly, and a dependency you
+    // rely on by accident is one a version bump elsewhere can take away.
+    implementation 'androidx.core:core:1.13.1'
     // The scanner. The web app's own camera path cannot run here — see
     // MainActivity — so scanning is native and handed back to the page.
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
