@@ -3,6 +3,20 @@ same code runs on a laptop (SQLite, Tesseract) or in production (Postgres,
 vision model) with no edits."""
 import os
 
+
+def _env(name: str, default: str) -> str:
+    """An environment variable, treating blank as absent.
+
+    `os.environ.get` does not: a variable set to "" is present and returns "",
+    which is how a hosting dashboard that prompts for a value and is given none
+    ends up seeding an account with an EMPTY password. That fails open — anyone
+    signs in with no password at all, while the documented default is refused,
+    so it reads as a broken deployment rather than an unlocked one. Blank here
+    means "not configured", which is what whoever left the box empty meant.
+    """
+    return (os.environ.get(name) or "").strip() or default
+
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/
 
 # Two directories, because `backend/data` holds two different kinds of thing and
@@ -27,6 +41,7 @@ STATE_DIR = os.environ.get("ESSA_STATE_DIR", DATA_DIR)
 UPLOAD_DIR = os.environ.get("ESSA_UPLOAD_DIR", os.path.join(STATE_DIR, "uploads"))
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample_images")
 GROUND_TRUTH_DIR = os.path.join(DATA_DIR, "ground_truth")
+
 
 def _database_url() -> str:
     """Where the warehouse database is.
@@ -94,8 +109,12 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 VISION_MODEL = os.environ.get("ESSA_VISION_MODEL", "claude-3-5-sonnet-20241022")
 
 # The company this deployment belongs to (the "buyer" on every purchase invoice).
-COMPANY_GSTIN = os.environ.get("ESSA_COMPANY_GSTIN", "33AADCE6591N1Z7")
-COMPANY_NAME = os.environ.get("ESSA_COMPANY_NAME", "Essa Garments Private Limited")
+# Through _env, so a variable set to an empty string falls back to the name
+# below rather than printing a blank company on every document — the same trap
+# the account passwords hit, and worse here because nothing errors: the invoice
+# is simply issued by nobody.
+COMPANY_GSTIN = _env("ESSA_COMPANY_GSTIN", "33AADCE6591N1Z7")
+COMPANY_NAME = _env("ESSA_COMPANY_NAME", "Essa Garments Private Limited")
 
 # --- Login ---
 # Accounts live in the database (see models.User and services/users), not here.
@@ -108,19 +127,6 @@ COMPANY_NAME = os.environ.get("ESSA_COMPANY_NAME", "Essa Garments Private Limite
 # creates a missing row, so a password changed in the app is not reverted to the
 # value below on the next restart.
 AUTH_SECRET = os.environ.get("ESSA_AUTH_SECRET", "essa-local-secret-change-me")
-
-
-def _env(name: str, default: str) -> str:
-    """An environment variable, treating blank as absent.
-
-    `os.environ.get` does not: a variable set to "" is present and returns "",
-    which is how a hosting dashboard that prompts for a value and is given none
-    ends up seeding an account with an EMPTY password. That fails open — anyone
-    signs in with no password at all, while the documented default is refused,
-    so it reads as a broken deployment rather than an unlocked one. Blank here
-    means "not configured", which is what whoever left the box empty meant.
-    """
-    return (os.environ.get(name) or "").strip() or default
 
 
 SEED_ACCOUNTS = {
