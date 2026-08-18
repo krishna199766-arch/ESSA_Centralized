@@ -44,6 +44,14 @@ BLOB_API = "https://blob.vercel-storage.com"
 # number is the first thing to check.
 BLOB_API_VERSION = "10"
 
+# Every upload states the access level, and the API rejects the request if it
+# disagrees with how the store was created ("Cannot use public access on a
+# private store"). Private is the default here because that is what a store
+# created today is, and because a supplier invoice should not be readable by
+# anyone holding a URL — reads are proxied through the API precisely so it is
+# not. Overridable for a store deliberately made public.
+BLOB_ACCESS = os.environ.get("BLOB_ACCESS", "private")
+
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
@@ -111,6 +119,10 @@ def save(raw: bytes, name: str) -> str:
                 "authorization": f"Bearer {BLOB_TOKEN}",
                 "x-api-version": BLOB_API_VERSION,
                 "x-content-type": _mime_for(name),
+                # The name is x-vercel-blob-access, not the x-access an
+                # educated guess produces — taken from the official SDK's own
+                # dist, which is the only place it is written down.
+                "x-vercel-blob-access": BLOB_ACCESS,
                 "x-allow-overwrite": "1",
                 "x-cache-control-max-age": "31536000",
             },

@@ -977,7 +977,7 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
       toast(res.trained_profile ? '✓ Saved & supplier format trained' : '✓ Saved', 'ok')
       onSaved()
       const d = await api.getDocument(docId); setDoc(d.document)
-    } catch (e) { toast('Save failed: ' + e.message, 'err') }
+    } catch (e) { toast('Save failed: ' + (e.detail || e.message), 'err') }
     setSaving(false)
   }
 
@@ -993,7 +993,7 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
       const grn = await api.buildGrn(docId)
       toast(`GRN draft created · ${grn.new_products} new product(s)`, 'ok')
       onCreateGrn(grn.id)
-    } catch (e) { toast('Could not create GRN: ' + e.message, 'err') }
+    } catch (e) { toast('Could not create GRN: ' + (e.detail || e.message), 'err') }
     setSaving(false)
   }
 
@@ -4119,7 +4119,7 @@ function VisionSettings({ onClose, onChanged, toast }) {
       if (r.models) setModels(r.models)
       toast(r.verified ? '👁 Vision on · ' + (r.chosen_model || '') : '👁 Vision on (' + r.message + ')', 'ok')
       setKey(''); setSt(r); onChanged && onChanged()
-    } catch (e) { toast('Failed: ' + e.message, 'err') }
+    } catch (e) { toast('Failed: ' + (e.detail || e.message), 'err') }
     setBusy(false)
   }
   const changeModel = async (m) => {
@@ -4642,7 +4642,7 @@ function LREntryView({ toast }) {
       const upd = await api.lrUpdate(r.id, { [k]: val })
       setSaved((list) => list.map((x) => (x.id === upd.id ? upd : x)))
       drop(key)
-    } catch (err) { toast('Could not save: ' + err.message, 'err'); drop(key) }
+    } catch (err) { toast('Could not save: ' + (err.detail || err.message), 'err'); drop(key) }
   }
 
   const toSave = rows.filter(r => !isExact(r))
@@ -9197,7 +9197,7 @@ export default function App() {
         const conflicts = res.lr_filled.reduce((n, x) => n + ((x.mismatches && x.mismatches.length) || 0), 0)
         if (conflicts) toast(`⚠ ${conflicts} value(s) disagree with the register — see LR Entry (conflict flag)`, 'err')
       }
-    } catch (err) { toast('Upload failed: ' + err.message, 'err') }
+    } catch (err) { toast('Upload failed: ' + (err.detail || err.message), 'err') }
     finally {
       setScanning(null)
       if (url) URL.revokeObjectURL(url)
