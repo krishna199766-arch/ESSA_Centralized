@@ -106,8 +106,31 @@ the Dockerfile's `CMD` already reads it.
 | `ANTHROPIC_API_KEY` | your key | Optional — can also be typed into the settings screen instead |
 | `ESSA_COMPANY_NAME` / `ESSA_COMPANY_GSTIN` | yours | Appears on the invoices |
 
-The three accounts are seeded on first boot and **only if missing**, so changing
-a password in the app is never reverted by a redeploy.
+**There is no `.env` file.** This backend reads real environment variables only
+— nothing calls `load_dotenv`, so a `.env` dropped beside the code is read by
+nobody and the defaults stay in force. Set them in the host's dashboard.
+
+### Set the passwords BEFORE the first deploy
+
+The three accounts are seeded on first boot and **only if missing**. That is
+what stops a redeploy reverting a password someone changed in the app — but it
+cuts both ways:
+
+```
+deploy → boot with defaults → set ESSA_ADMIN_PASSWORD → redeploy
+                                                    ↳ no effect, still essa@123
+```
+
+Once the row exists the environment variable is never consulted again. If the
+server has already booted once, the password has to be changed from the **Users
+& Access** screen (or `POST /api/users/{id}/password`) instead. Setting these
+before the very first boot is the only way the variables do anything.
+
+`ESSA_AUTH_SECRET` is different — it is read on every request, so it takes
+effect the moment the server restarts. The cost is that every token signed with
+the old secret stops verifying, which signs everyone out of both apps. That is
+an acceptable one-off, and a good reason to set it before people start using
+the deployment rather than after.
 
 ### Check it before wiring Vercel up
 
