@@ -42,8 +42,23 @@ os.environ.setdefault("ESSA_STATE_DIR", "/tmp/essa")
 sys.path.insert(0, str(ROOT / "backend"))
 from app.config import DATABASE_URL as _WAREHOUSE_DB  # noqa: E402
 
-if not (os.environ.get("DATABASE_URL") or "").strip() and not _WAREHOUSE_DB.startswith("sqlite"):
-    os.environ["DATABASE_URL"] = _WAREHOUSE_DB
+_pos_db = (os.environ.get("DATABASE_URL") or "").strip()
+# A template is not a connection string. The shop reads this variable through
+# its own config and has no idea the angle brackets are placeholders, so it
+# tries to resolve a host literally called "aws-0-<region>.pooler.supabase.com"
+# and reports a DNS failure — which reads as a network fault rather than as a
+# value nobody filled in.
+if "<" in _pos_db or ">" in _pos_db:
+    _pos_db = ""
+
+if not _pos_db:
+    # Same database as the warehouse when there is a real one; otherwise the
+    # shop gets its own scratch file rather than failing to start. /pos then
+    # works and forgets, exactly as the warehouse does, and /api/status is the
+    # one place that says the whole deployment is running on scratch storage.
+    _pos_db = (_WAREHOUSE_DB if not _WAREHOUSE_DB.startswith("sqlite")
+               else "sqlite:////tmp/essa/textile_shop.db")
+os.environ["DATABASE_URL"] = _pos_db
 
 from app.main import app  # noqa: E402  (path must be set first)
 

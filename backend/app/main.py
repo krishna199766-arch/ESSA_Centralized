@@ -39,6 +39,37 @@ def _scrub(text: str) -> str:
     return re.sub(r"://([^:/@\s]+):([^@/\s]+)@", r"://\1:***@", str(text))
 
 
+def _database_status(url: str) -> dict:
+    """What /api/status says about the database.
+
+    `ok` is not simply "did it start". A serverless deployment that falls back
+    to SQLite starts perfectly, answers every request, and writes to /tmp —
+    which is wiped between invocations. Every GRN posted against it is lost, and
+    nothing anywhere says so. That is a worse failure than not starting, because
+    the warehouse would find out days later, so it is reported as NOT ok with
+    the reason spelled out.
+    """
+    dialect = url.split("://")[0] if "://" in url else "?"
+    host = _scrub(url).split("@")[-1].split("/")[0] if "@" in url else "local file"
+    ephemeral = dialect.startswith("sqlite") and os.environ.get("VERCEL")
+    warning = None
+    if ephemeral:
+        warning = ("Running on a temporary SQLite file, because no usable Postgres "
+                   "connection string was found. This works, and then LOSES "
+                   "EVERYTHING when the instance recycles. Set ESSA_DATABASE_URL "
+                   "to a real Postgres URL — a value still containing < or > is a "
+                   "template and is ignored.")
+    return {
+        "ok": STARTUP_ERROR is None and not ephemeral,
+        # The driver and host, never the password — see _scrub.
+        "dialect": dialect,
+        "host": host,
+        "persistent": not ephemeral,
+        "error": STARTUP_ERROR,
+        "warning": warning,
+    }
+
+
 def _record_startup_failure(exc: BaseException, during: str) -> None:
     global STARTUP_ERROR
     if STARTUP_ERROR is None:
@@ -357,13 +388,7 @@ def status():
         "provider_preference": runtime.get("provider_preference"),
         "providers": provider_status(),
         "pos": {"available": _pos_app is not None, "error": _pos_error},
-        "database": {
-            "ok": STARTUP_ERROR is None,
-            # The driver and host, never the password — see _scrub.
-            "dialect": DB_URL.split("://")[0] if "://" in DB_URL else "?",
-            "host": _scrub(DB_URL).split("@")[-1].split("/")[0] if "@" in DB_URL else "local file",
-            "error": STARTUP_ERROR,
-        },
+        "database": _database_status(DB_URL),
         "storage": storage_svc.backend_name(),
     }
 
