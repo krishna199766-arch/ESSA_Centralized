@@ -1,0 +1,26 @@
+# The image is the server only — Vercel builds and serves the frontend.
+frontend/
+android/
+mobile-app/
+docs/
+*.md
+
+# Virtualenvs: host-specific, and "Textile Retail Shop/.venv-win" alone is 55 MB
+# of vendored packages that would be copied in and then never used.
+**/.venv
+**/.venv-win
+**/__pycache__
+**/*.pyc
+
+# Local state. These belong on the mounted disk at /data, not baked into the
+# image — a database copied in here would be replaced on every deploy, and would
+# ship this laptop's data to the server.
+backend/data/essa.db
+backend/data/settings.json
+backend/data/uploads/
+Textile Retail Shop/textile_shop.db
+*.db.bak*
+
+.git/
+.github/
+.env

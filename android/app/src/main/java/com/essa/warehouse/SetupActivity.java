@@ -53,7 +53,8 @@ public class SetupActivity extends AppCompatActivity {
 
     /**
      * "192.168.1.5", "192.168.1.5:8000/m", "http://192.168.1.5/m/" all become
-     * "http://192.168.1.5:8000".
+     * "http://192.168.1.5:8000", and "https://essa.example.com/m" becomes
+     * "https://essa.example.com".
      *
      * People type what they read off a screen, which is an address and rarely a
      * URL — and if they have seen the app in a browser they will include the
@@ -61,13 +62,22 @@ public class SetupActivity extends AppCompatActivity {
      * request to the wrong place: the check would ask for `/m/api/status`, get a
      * 404, and report a working server as unreachable. Only the host and port
      * mean anything here, so everything after them is dropped.
+     *
+     * The default port follows the scheme, and that distinction is the whole
+     * difference between the two ways this app is run. On the warehouse LAN the
+     * address is a bare IP and the server listens on 8000, so a bare host means
+     * :8000. A deployed server is https and answers on 443, so appending 8000
+     * there would point the app at a port nothing is listening on and report a
+     * perfectly good server as unreachable — which is exactly what happened
+     * before this distinction existed.
      */
     static String normalise(String raw) {
         String t = raw == null ? "" : raw.trim();
         if (t.isEmpty()) return "";
 
-        String scheme = "http://";
+        String scheme = "";                      // "" = not stated, decide below
         if (t.startsWith("http://")) {
+            scheme = "http://";
             t = t.substring(7);
         } else if (t.startsWith("https://")) {
             scheme = "https://";
@@ -83,9 +93,35 @@ public class SetupActivity extends AppCompatActivity {
         t = t.substring(0, cut).trim();
         if (t.isEmpty()) return "";
 
-        // A bare host gets the port the warehouse actually listens on.
-        if (!t.contains(":")) t = t + ":8000";
+        // Nobody types a scheme. What they type is either the LAN address of the
+        // PC in the office — an IP, or a machine name — or the address of a
+        // deployed server, which is a domain. Guessing from that is the whole
+        // job here, because the two want opposite defaults and getting it wrong
+        // reports a working server as unreachable.
+        String host = t.contains(":") ? t.substring(0, t.indexOf(':')) : t;
+        if (scheme.isEmpty()) scheme = isLanHost(host) ? "http://" : "https://";
+
+        // Default port follows the scheme: 8000 is what the warehouse server
+        // listens on, while https answers on 443 and so needs nothing added.
+        if (!t.contains(":") && scheme.equals("http://")) t = t + ":8000";
         return scheme + t;
+    }
+
+    /**
+     * Is this the PC in the office rather than a server on the internet?
+     *
+     * An IPv4 address or a bare machine name is the LAN; anything with a dot and
+     * a non-numeric tail is a domain. It is a guess, but a recoverable one —
+     * both forms are checked against /api/status before being saved, so a wrong
+     * guess shows "not reachable" on this screen rather than failing later, and
+     * typing the scheme explicitly always overrides it.
+     */
+    static boolean isLanHost(String host) {
+        if (host.isEmpty()) return true;
+        if (host.equals("localhost")) return true;
+        if (!host.contains(".")) return true;             // a bare machine name
+        // A dotted-quad IP is the office; a domain name is not.
+        return host.matches("\\d{1,3}(\\.\\d{1,3}){3}");
     }
 
     private void check(String base) {

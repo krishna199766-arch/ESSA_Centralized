@@ -10,7 +10,11 @@ import os
 import json
 from . import config
 
-SETTINGS_PATH = os.path.join(config.DATA_DIR, "settings.json")
+# STATE_DIR, not DATA_DIR: this file is written at runtime and holds the vision
+# key somebody typed into the settings screen. On a deployment DATA_DIR is
+# rebuilt with the code on every push, which would throw the key away and turn
+# vision extraction off behind their back.
+SETTINGS_PATH = os.path.join(config.STATE_DIR, "settings.json")
 
 _state = {
     "anthropic_api_key": config.ANTHROPIC_API_KEY,

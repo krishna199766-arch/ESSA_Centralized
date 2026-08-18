@@ -4,12 +4,31 @@ vision model) with no edits."""
 import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # backend/
+
+# Two directories, because `backend/data` holds two different kinds of thing and
+# a deployment has to treat them oppositely.
+#
+# DATA_DIR is SHIPPED data, read-only at runtime and versioned in git: the
+# category master, the LR sample, the ground-truth fixtures and sample images.
+# It travels with the code and belongs wherever the code is unpacked.
+#
+# STATE_DIR is what the warehouse PRODUCES and must not lose across a restart:
+# the database, the uploaded invoice images, and the vision key saved from the
+# settings screen. On a host that rebuilds the code directory on every deploy,
+# this is the path a persistent disk gets mounted at.
+#
+# They default to the same folder, so a laptop sees exactly the behaviour it saw
+# before this split existed. Only a deployment sets them apart — and if the two
+# were left as one, pointing it at a mounted disk would take the 686-row
+# category master away with it and seed an empty warehouse.
 DATA_DIR = os.path.join(BASE_DIR, "data")
-UPLOAD_DIR = os.environ.get("ESSA_UPLOAD_DIR", os.path.join(DATA_DIR, "uploads"))
+STATE_DIR = os.environ.get("ESSA_STATE_DIR", DATA_DIR)
+
+UPLOAD_DIR = os.environ.get("ESSA_UPLOAD_DIR", os.path.join(STATE_DIR, "uploads"))
 SAMPLE_DIR = os.path.join(DATA_DIR, "sample_images")
 GROUND_TRUTH_DIR = os.path.join(DATA_DIR, "ground_truth")
 
-DATABASE_URL = os.environ.get("ESSA_DATABASE_URL", f"sqlite:///{os.path.join(DATA_DIR, 'essa.db')}")
+DATABASE_URL = os.environ.get("ESSA_DATABASE_URL", f"sqlite:///{os.path.join(STATE_DIR, 'essa.db')}")
 
 # Which extraction provider to prefer. "auto" = vision model if a key is present,
 # else tesseract. The seeded provider is always consulted first for known samples.
@@ -45,3 +64,6 @@ SEED_ACCOUNTS = {
 }
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+# On a fresh disk this is the directory the database is about to be created in,
+# so it has to exist before SQLAlchemy opens the file rather than after.
+os.makedirs(STATE_DIR, exist_ok=True)
