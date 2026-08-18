@@ -405,6 +405,15 @@ def status():
         "pos": {"available": _pos_app is not None, "error": _pos_error},
         "database": _database_status(DB_URL),
         "storage": storage_svc.backend_name(),
+        # Enough to tell which build is actually serving. Three fixes in a row
+        # here were tested against a deployment that had not finished replacing
+        # the previous one, and an unchanged error looks identical to a fix that
+        # did not work — so the running code states its own version.
+        "storage_detail": {
+            "backend": storage_svc.backend_name(),
+            "blob_api_version": storage_svc.BLOB_API_VERSION,
+            "blob_access": storage_svc.BLOB_ACCESS,
+        },
     }
 
 
