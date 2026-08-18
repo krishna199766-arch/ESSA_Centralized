@@ -9,18 +9,19 @@ database keeps the URL.
 
 Two things this deliberately does NOT do:
 
-*Serve the blob URL to the browser.* Vercel Blob URLs are public — anyone
-holding one can read the invoice without signing in, and they do not expire.
-Every read here is proxied back through `/api/documents/{id}/image`, which is
-policed like every other route, so an invoice scan stays behind the login it was
-behind before. The cost is that the bytes travel twice on a cache miss, which is
-the right way round for a supplier invoice.
+*Serve the blob URL to the browser.* Every read is proxied back through
+`/api/documents/{id}/image`, which is policed like every other route, so an
+invoice scan stays behind the login it was behind before. The store is private,
+so its URLs would not work in a browser anyway — but the proxy is what makes
+that a design decision rather than a dependency on a dashboard setting nobody
+would think to check before flipping.
 
 *Change how extraction works.* The engine takes a filesystem path and opens it
 (`engine.run_extraction`, `lr_svc.extract_lr`). Rather than rewrite that to take
 bytes, `materialise` puts the bytes somewhere real for the length of one request
 — which is exactly what `/tmp` is for, and is the only thing it is reliable for.
 """
+import mimetypes
 import os
 import tempfile
 
@@ -34,7 +35,14 @@ BLOB_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "")
 BLOB_API = "https://blob.vercel-storage.com"
 # Pinned: the header is required, and a floating version would let a change at
 # the other end alter what `put` returns without anything here being edited.
-BLOB_API_VERSION = "7"
+#
+# 10, not the 7 this was first written with — 7 was a guess and the API answered
+# every upload with a 400. The REST interface behind the official SDK is not
+# published; this value and the header names below are taken from a working
+# client (github.com/SuryaSekhar14/vercel_blob), which is the nearest thing to a
+# specification there is. If uploads start failing after a platform change, this
+# number is the first thing to check.
+BLOB_API_VERSION = "10"
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -87,9 +95,14 @@ def save(raw: bytes, name: str) -> str:
             os.chmod(stored, 0o644)
         return stored
 
-    # `addRandomSuffix=0` keeps the content hash the caller chose as the whole
-    # name, so re-uploading the same invoice overwrites one object instead of
-    # growing the store a copy at a time.
+    # No x-add-random-suffix: it defaults to off, which is what keeps the
+    # content hash the caller chose as the whole name.
+    #
+    # x-allow-overwrite IS needed, and its absence was the second bug here. The
+    # names are content hashes, so uploading the same invoice twice targets the
+    # same object — and without this the API rejects that as a collision rather
+    # than treating it as the no-op it is. Identical bytes under an identical
+    # name is exactly the case worth allowing.
     try:
         r = httpx.put(
             f"{BLOB_API}/{name}",
@@ -97,8 +110,9 @@ def save(raw: bytes, name: str) -> str:
             headers={
                 "authorization": f"Bearer {BLOB_TOKEN}",
                 "x-api-version": BLOB_API_VERSION,
-                "x-content-type": "application/octet-stream",
-                "x-add-random-suffix": "0",
+                "x-content-type": _mime_for(name),
+                "x-allow-overwrite": "1",
+                "x-cache-control-max-age": "31536000",
             },
             timeout=_TIMEOUT,
         )
@@ -197,3 +211,13 @@ def delete(ref: str) -> None:
 
 def _is_remote(ref: str) -> bool:
     return ref.startswith("http://") or ref.startswith("https://")
+
+
+def _mime_for(name: str) -> str:
+    """The stored object's content type, from its extension.
+
+    Worth getting right rather than sending octet-stream for everything: it is
+    what comes back on the GET, and the invoice viewer decides whether it has an
+    image or a PDF from that.
+    """
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"

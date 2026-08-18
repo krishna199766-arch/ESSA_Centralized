@@ -4603,7 +4603,11 @@ function LREntryView({ toast }) {
         toast(`Read ${d.total} rows · ${d.duplicates} duplicate, ${d.doubtful} doubtful`, 'ok')
       else
         toast(`Read ${r.rows?.length || 0} rows (${r.provider})`, 'ok')
-    } catch (err) { toast('Extract failed: ' + err.message, 'err'); setNote('') }
+    // err.detail is the sentence the server sent ("File storage: blob storage
+    // refused the upload: HTTP 400 — …"); err.message is only the status code.
+    // Showing the code alone turned every distinct failure into "Extract failed:
+    // 500", which is the same toast whatever went wrong.
+    } catch (err) { toast('Extract failed: ' + (err.detail || err.message), 'err'); setNote('') }
     setBusy(false); e.target.value = ''
   }
   const isExact = (r) => r._status === 'duplicate'         // excluded from save
