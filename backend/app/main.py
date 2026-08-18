@@ -1,4 +1,5 @@
 import os
+import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -14,8 +15,40 @@ from .extraction.engine import provider_status
 from .security import auth_middleware
 from .config import COMPANY_NAME, COMPANY_GSTIN
 from . import runtime
+from .services import storage as storage_svc
 
-Base.metadata.create_all(bind=engine)
+# Why the schema build is allowed to fail here
+# ---------------------------------------------
+# On the warehouse PC this is a SQLite file that is always reachable, and a
+# failure means something is badly wrong and crashing is the honest response.
+# Deployed, the database is across a network and behind a connection string
+# somebody typed. A raise at import time there does not produce a message
+# anybody sees — the whole module fails to import, and the platform answers
+# every request with an opaque FUNCTION_INVOCATION_FAILED. The reason is in a
+# log the person debugging has to know to go and find.
+#
+# So the failure is recorded instead of raised, and /api/status reports it. The
+# deployment is just as unusable either way; the difference is that this one
+# says what is wrong with it.
+STARTUP_ERROR = None
+
+
+def _scrub(text: str) -> str:
+    """Connection errors quote the URL back, and the URL carries the password.
+    /api/status is reachable by anyone, so the credentials come out first."""
+    return re.sub(r"://([^:/@\s]+):([^@/\s]+)@", r"://\1:***@", str(text))
+
+
+def _record_startup_failure(exc: BaseException, during: str) -> None:
+    global STARTUP_ERROR
+    if STARTUP_ERROR is None:
+        STARTUP_ERROR = f"{during}: {type(exc).__name__}: {_scrub(exc)}"
+
+
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as exc:                       # noqa: BLE001 — reported, not raised
+    _record_startup_failure(exc, "creating the schema")
 
 
 def _migrate():
@@ -187,21 +220,32 @@ def _migrate():
                         f"ALTER TABLE purchase_return_lines ADD COLUMN {name} {typ}"))
 
 
-_migrate()
+try:
+    _migrate()
+except Exception as exc:                       # noqa: BLE001 — reported, not raised
+    _record_startup_failure(exc, "migrating the schema")
 
 # ---- accounts ----
-# Deliberately NOT inside the try/except below. Every other seed there is a
-# convenience, and an install that starts without its category list is merely
-# inconvenient; an install that starts with an empty users table cannot be
-# signed into at all, and swallowing that would present it as a login screen
-# that rejects every correct password. If this fails, the server should fail.
+# Held apart from the convenience seeds below. Those are conveniences: an
+# install that starts without its category list is merely inconvenient. An
+# install that starts with an empty users table cannot be signed into at all,
+# and presenting that as a login screen which rejects every correct password is
+# the worst outcome available.
+#
+# So it is still not swallowed — it is reported, and /api/status names it. The
+# reason it is no longer raised is the one at the top of this file: a raise here
+# is invisible on a serverless deployment, and "cannot sign in, no reason given"
+# is exactly what it produces.
 from .database import SessionLocal as _Session
 from .services import users as _users
-_udb = _Session()
 try:
-    _users.seed(_udb)
-finally:
-    _udb.close()
+    _udb = _Session()
+    try:
+        _users.seed(_udb)
+    finally:
+        _udb.close()
+except Exception as exc:                       # noqa: BLE001 — reported, not raised
+    _record_startup_failure(exc, "seeding the accounts")
 
 # load the product-category master (from the GRN Excel) on first run, and heal
 # any LR row that was linked to an invoice before the cross-fill was symmetric
@@ -304,11 +348,23 @@ else:
 
 @app.get("/api/status")
 def status():
+    """Also the deployment's own diagnostic. `database` is the part worth
+    reading first: if the server came up without one, every other answer here
+    is beside the point, and this is the only place that says so in words."""
+    from .database import DB_URL
     return {
         "company": {"name": COMPANY_NAME, "gstin": COMPANY_GSTIN},
         "provider_preference": runtime.get("provider_preference"),
         "providers": provider_status(),
         "pos": {"available": _pos_app is not None, "error": _pos_error},
+        "database": {
+            "ok": STARTUP_ERROR is None,
+            # The driver and host, never the password — see _scrub.
+            "dialect": DB_URL.split("://")[0] if "://" in DB_URL else "?",
+            "host": _scrub(DB_URL).split("@")[-1].split("/")[0] if "@" in DB_URL else "local file",
+            "error": STARTUP_ERROR,
+        },
+        "storage": storage_svc.backend_name(),
     }
 
 
