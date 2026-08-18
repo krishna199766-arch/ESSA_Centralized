@@ -12,25 +12,36 @@
 # Dropping tesseract means there is no offline OCR fallback: a deployment with
 # no ANTHROPIC_API_KEY cannot read an invoice at all. Everything else — GRN,
 # inventory, labels, dispatch, the phone app, the shop — works regardless.
+#
+# ---------------------------------------------------------------------------
+#  Why these four are pinned NEWER than the warehouse PC runs
+# ---------------------------------------------------------------------------
+#  pillow, rapidfuzz, pydantic-core and psycopg2-binary are the only compiled
+#  packages here; everything else is pure Python and installs anywhere.
+#
+#  The builder selects CPython 3.14 and ignores .python-version, pyproject.toml
+#  and Pipfile.lock alike — a known platform bug, not something this repo can
+#  configure its way out of. At 3.14 the late-2024 versions of these four have
+#  no wheels, so uv compiled all four from source, and psycopg2 got as far as
+#  needing the Postgres C headers (`pg_config`) that no build image carries.
+#
+#  Fighting for an older interpreter was the wrong direction. Every one of the
+#  four publishes cp314 wheels at the versions below, so the build downloads
+#  them instead of compiling, and stays correct whichever interpreter the
+#  platform picks next. .python-version is kept as well: harmless if ignored,
+#  and it puts the build back on the tested 3.12 if the bug is fixed.
 fastapi==0.115.5
 sqlalchemy==2.0.36
-pydantic==2.10.3
+pydantic==2.13.4
 python-multipart==0.0.19
-pillow==11.0.0
-rapidfuzz==3.10.1
+pillow==12.3.0
+rapidfuzz==3.14.5
 anthropic==0.40.0
 python-barcode==0.15.1
 segno==1.6.1
 
 # Postgres. SQLite is a file, and this runtime has nowhere to keep one.
-#
-# The Python version is pinned to 3.12 in .python-version, and this package is
-# why. Left to pick its own, the builder chose 3.14, which is new enough that
-# none of psycopg2, pillow, pydantic-core or rapidfuzz publish wheels for it —
-# so all four were compiled from source, and psycopg2 got as far as needing the
-# Postgres C headers (`pg_config`), which no build image carries. The error
-# reads as a psycopg2 problem and is a Python-version problem.
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.12
 
 # The retail shop, mounted at /pos by backend/app/pos_mount.py.
 Flask==3.0.3
