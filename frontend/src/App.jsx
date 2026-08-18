@@ -943,12 +943,20 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
     setMerging(true)
     try {
       const d = await api.mergeDocuments(docId, twin.id)
-      setDoc(d.document); setUnread(false); setTwin(null)
+      setDoc(d.document); setTwin(null)
+      // The pages are joined whether or not the re-read finished. When it did
+      // not, this drops into the same "uploaded but never read" screen, which
+      // already offers to read it — rather than reporting a failure for work
+      // that actually succeeded.
+      setUnread(!d.extraction)
       setData(structuredClone(d.extraction?.data || {}))
       setFlags(d.extraction?.field_flags || {})
       setWarnings(d.extraction?.warnings || [])
       onSaved && onSaved()
-      toast(`Merged — ${d.merged?.pages} pages, ${d.extraction?.data?.line_items?.length || 0} lines`, 'ok')
+      toast(d.extraction
+        ? `Merged — ${d.merged?.pages} pages, ${d.extraction?.data?.line_items?.length || 0} lines`
+        : `Merged ${d.merged?.pages} pages — reading timed out, press “Read it now”`,
+        d.extraction ? 'ok' : 'err')
     } catch (e) {
       toast(e.detail || 'Could not merge them', 'err')
     }

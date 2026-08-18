@@ -283,10 +283,27 @@ def merge_documents(doc_id: int, body: MergeIn, db: Session = Depends(get_db)):
     for p in db.query(models.Purchase).filter(models.Purchase.document_id == other.id).all():
         db.delete(p)
     db.delete(other)
-    db.commit()
+    db.commit()                             # the merge itself is now permanent
     db.refresh(target)
 
-    out = _extract_into(target, db)
+    # Re-reading is the slow part — a two-page bill of sixty lines is minutes of
+    # vision — and it is also the part that can run out of time. Committed
+    # separately above so a slow read cannot undo the merge: the pages are
+    # joined either way, and a failure leaves one document to be read rather
+    # than two halves to be merged again.
+    try:
+        out = _extract_into(target, db)
+    except Exception as exc:                # noqa: BLE001 — reported, not raised
+        db.rollback()
+        target = db.get(models.Document, doc_id)
+        target.status = "uploaded"
+        db.commit()
+        return {
+            "document": _doc_out(target),
+            "extraction": None,
+            "merged": {"pages": len(ordered), "absorbed": body.from_id},
+            "read_failed": f"{type(exc).__name__}: {exc}"[:300],
+        }
     out["merged"] = {"pages": len(ordered), "absorbed": body.from_id}
     return out
 

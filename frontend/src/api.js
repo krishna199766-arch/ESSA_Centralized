@@ -42,10 +42,25 @@ const fetch = (url, opts = {}) => {
 // The message the server sent, not "Error: 403" — the API answers a refused
 // call with a sentence worth showing ("This needs admin access — you are signed
 // in as user.").
+// What the status means when the body carries no message of its own. A failure
+// that answers with HTML — a gateway timeout, a crashed function — leaves
+// `detail` undefined, and every screen then falls back to its own generic
+// sentence ("Could not merge them"), which says nothing about what happened.
+const STATUS_HINT = {
+  401: 'not signed in',
+  403: 'not allowed for this account',
+  404: 'not found',
+  413: 'the file is too large',
+  502: 'the server could not reach something it depends on',
+  504: 'timed out — a long invoice can take minutes; try again, or read it from the document',
+}
+
 const J = async (r) => {
   if (!r.ok) {
     const j = await r.json().catch(() => ({}))
-    throw Object.assign(new Error(String(r.status)), { status: r.status, detail: j.detail })
+    const detail = j.detail
+      || `HTTP ${r.status}${STATUS_HINT[r.status] ? ' — ' + STATUS_HINT[r.status] : ''}`
+    throw Object.assign(new Error(String(r.status)), { status: r.status, detail })
   }
   return r.json()
 }
