@@ -31,16 +31,22 @@ services:
       - key: ESSA_AUTH_SECRET
         generateValue: true
 
-      # sync: false means Render asks for these in the dashboard instead of
-      # reading them here — a password committed to a public repo is not a
-      # password. Set all three BEFORE the first deploy: the accounts are
-      # seeded only when missing, so setting them afterwards does nothing.
-      - key: ESSA_SUPERADMIN_PASSWORD
-        sync: false
-      - key: ESSA_ADMIN_PASSWORD
-        sync: false
-      - key: ESSA_USER_PASSWORD
-        sync: false
+      # The three account passwords are deliberately NOT listed.
+      #
+      # They seed the defaults in backend/app/config.py, which are published in
+      # this repo — so the deployment starts with credentials anyone can read,
+      # and they are meant to be changed from the Users & Access screen at first
+      # sign-in. That screen is the only way to change them later anyway: the
+      # accounts are seeded only when missing, so an ESSA_*_PASSWORD variable
+      # added after the first boot is read by nobody.
+      #
+      # Listing them here with `sync: false` was worse than leaving them out.
+      # Render prompts for a value, and a prompt left empty sets the variable to
+      # "" — which used to seed an account with an EMPTY password: open to
+      # anyone, while the documented default was refused, so it read as a broken
+      # deployment rather than an unlocked one. config._env now treats blank as
+      # absent and the seeder refuses an empty password outright, but the
+      # simplest fix is not to ask a question nobody needs to answer.
 
       # Optional — vision extraction can also be switched on from the settings
       # screen, which stores the key on the disk above.

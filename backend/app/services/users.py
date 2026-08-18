@@ -156,6 +156,15 @@ def seed(db: Session) -> None:
     for username, spec in SEED_ACCOUNTS.items():
         if not username or username in existing:
             continue
+        # A blank password would hash and store like any other, and then let
+        # anyone in as that account with nothing typed. config._env already
+        # turns an empty variable back into the default; this is the second
+        # lock, because seeding is the one path that does not go through
+        # password_problem and an account nobody can lock is worth two.
+        if not (spec.get("password") or "").strip():
+            raise RuntimeError(
+                f"Refusing to seed '{username}' with an empty password — "
+                f"unset its ESSA_*_PASSWORD variable to use the default.")
         create_user(db, username, spec["password"], spec["role"],
                     full_name=spec.get("full_name", ""), created_by="system")
 

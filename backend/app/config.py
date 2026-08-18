@@ -51,15 +51,30 @@ COMPANY_NAME = os.environ.get("ESSA_COMPANY_NAME", "Essa Garments Private Limite
 # creates a missing row, so a password changed in the app is not reverted to the
 # value below on the next restart.
 AUTH_SECRET = os.environ.get("ESSA_AUTH_SECRET", "essa-local-secret-change-me")
+
+
+def _env(name: str, default: str) -> str:
+    """An environment variable, treating blank as absent.
+
+    `os.environ.get` does not: a variable set to "" is present and returns "",
+    which is how a hosting dashboard that prompts for a value and is given none
+    ends up seeding an account with an EMPTY password. That fails open — anyone
+    signs in with no password at all, while the documented default is refused,
+    so it reads as a broken deployment rather than an unlocked one. Blank here
+    means "not configured", which is what whoever left the box empty meant.
+    """
+    return (os.environ.get(name) or "").strip() or default
+
+
 SEED_ACCOUNTS = {
-    os.environ.get("ESSA_SUPERADMIN_USER", "superadmin"): {
-        "password": os.environ.get("ESSA_SUPERADMIN_PASSWORD", "super@123"),
+    _env("ESSA_SUPERADMIN_USER", "superadmin"): {
+        "password": _env("ESSA_SUPERADMIN_PASSWORD", "super@123"),
         "role": "superadmin", "full_name": "Super Admin"},
-    os.environ.get("ESSA_ADMIN_USER", "admin"): {
-        "password": os.environ.get("ESSA_ADMIN_PASSWORD", os.environ.get("ESSA_PASSWORD", "essa@123")),
+    _env("ESSA_ADMIN_USER", "admin"): {
+        "password": _env("ESSA_ADMIN_PASSWORD", _env("ESSA_PASSWORD", "essa@123")),
         "role": "admin", "full_name": "Administrator"},
-    os.environ.get("ESSA_USER_USER", "user"): {
-        "password": os.environ.get("ESSA_USER_PASSWORD", "user@123"),
+    _env("ESSA_USER_USER", "user"): {
+        "password": _env("ESSA_USER_PASSWORD", "user@123"),
         "role": "user", "full_name": "Warehouse User"},
 }
 
