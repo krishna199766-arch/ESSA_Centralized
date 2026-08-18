@@ -36,13 +36,13 @@ BLOB_API = "https://blob.vercel-storage.com"
 # Pinned: the header is required, and a floating version would let a change at
 # the other end alter what `put` returns without anything here being edited.
 #
-# 10, not the 7 this was first written with — 7 was a guess and the API answered
-# every upload with a 400. The REST interface behind the official SDK is not
-# published; this value and the header names below are taken from a working
-# client (github.com/SuryaSekhar14/vercel_blob), which is the nearest thing to a
-# specification there is. If uploads start failing after a platform change, this
-# number is the first thing to check.
-BLOB_API_VERSION = "10"
+# The REST interface behind the official SDK is not published, so this and the
+# header names below are read out of @vercel/blob's own published bundle, where
+# the constant is `BLOB_API_VERSION = 12`. Two earlier values here were guesses
+# and both were rejected. If uploads start failing after a platform change, this
+# number is the first thing to check — against that bundle, not against
+# intuition.
+BLOB_API_VERSION = "12"
 
 # Every upload states the access level, and the API rejects the request if it
 # disagrees with how the store was created ("Cannot use public access on a
@@ -111,9 +111,16 @@ def save(raw: bytes, name: str) -> str:
     # same object — and without this the API rejects that as a collision rather
     # than treating it as the no-op it is. Identical bytes under an identical
     # name is exactly the case worth allowing.
+    # The name goes in the QUERY STRING, not in the path. `PUT /{name}` looks
+    # like the obvious REST shape and is what this did first; the API answers it
+    # with "Invalid pathname", because it reads the name from ?pathname= and
+    # there was none. The SDK builds exactly this:
+    #     const params = new URLSearchParams({ pathname });
+    #     requestApi(`/?${params.toString()}`, { method: 'PUT', body, headers })
     try:
         r = httpx.put(
-            f"{BLOB_API}/{name}",
+            f"{BLOB_API}/",
+            params={"pathname": name},
             content=raw,
             headers={
                 "authorization": f"Bearer {BLOB_TOKEN}",
@@ -209,12 +216,15 @@ def delete(ref: str) -> None:
         except OSError:
             pass
         return
+    # POST, not DELETE — the endpoint is /delete and it takes a list, so the
+    # verb is the SDK's and not the one the name suggests.
     try:
-        httpx.request(
-            "DELETE", f"{BLOB_API}/delete",
+        httpx.post(
+            f"{BLOB_API}/delete",
             json={"urls": [ref]},
             headers={"authorization": f"Bearer {BLOB_TOKEN}",
-                     "x-api-version": BLOB_API_VERSION},
+                     "x-api-version": BLOB_API_VERSION,
+                     "content-type": "application/json"},
             timeout=_TIMEOUT,
         )
     except httpx.HTTPError:
