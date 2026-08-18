@@ -1,0 +1,19 @@
+# Vercel builds the desktop UI and nothing else — the server it proxies to lives
+# on a host with a disk (see docs/DEPLOYMENT.md). None of the following is used
+# by that build, and the two virtualenvs are tens of thousands of files.
+#
+# Deploying through the Git integration only ever sees tracked files, so this
+# matters mainly to `vercel` run from the command line, which uploads the
+# working directory as it finds it — venvs, databases and all.
+backend/
+Textile Retail Shop/
+android/
+mobile-app/
+docs/
+
+**/.venv
+**/.venv-win
+**/__pycache__
+**/*.pyc
+*.db
+*.db.bak*
