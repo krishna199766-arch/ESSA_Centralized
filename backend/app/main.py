@@ -320,6 +320,17 @@ app = FastAPI(title="Essa Document Intake", version="0.1.0",
 # carries no token to pass.
 app.middleware("http")(auth_middleware)
 
+
+@app.exception_handler(storage_svc.StorageError)
+def _storage_error(request, exc):
+    """A file that could not be stored or read back is not an unexplained
+    fault, and answering with a bare 500 makes it look like one — "Extract
+    failed: 500" is what the screen shows, and it names neither the step nor
+    the reason. 502 with the message says which of the two halves failed, and
+    the message came from the storage service itself."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": f"File storage: {exc}"}, status_code=502)
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
 

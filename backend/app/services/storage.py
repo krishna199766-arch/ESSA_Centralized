@@ -39,6 +39,12 @@ BLOB_API_VERSION = "7"
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
+class StorageError(RuntimeError):
+    """Something went wrong storing or fetching a file, with the reason in the
+    message. A distinct type so the routers can turn it into an answer that
+    names the storage rather than a bare 500 that names nothing."""
+
+
 def using_blob() -> bool:
     return bool(BLOB_TOKEN)
 
@@ -84,19 +90,32 @@ def save(raw: bytes, name: str) -> str:
     # `addRandomSuffix=0` keeps the content hash the caller chose as the whole
     # name, so re-uploading the same invoice overwrites one object instead of
     # growing the store a copy at a time.
-    r = httpx.put(
-        f"{BLOB_API}/{name}",
-        content=raw,
-        headers={
-            "authorization": f"Bearer {BLOB_TOKEN}",
-            "x-api-version": BLOB_API_VERSION,
-            "x-content-type": "application/octet-stream",
-            "x-add-random-suffix": "0",
-        },
-        timeout=_TIMEOUT,
-    )
-    r.raise_for_status()
-    return r.json()["url"]
+    try:
+        r = httpx.put(
+            f"{BLOB_API}/{name}",
+            content=raw,
+            headers={
+                "authorization": f"Bearer {BLOB_TOKEN}",
+                "x-api-version": BLOB_API_VERSION,
+                "x-content-type": "application/octet-stream",
+                "x-add-random-suffix": "0",
+            },
+            timeout=_TIMEOUT,
+        )
+    except httpx.HTTPError as exc:
+        raise StorageError(f"could not reach blob storage: {type(exc).__name__}: {exc}") from exc
+
+    # raise_for_status alone gives "Client error '400 Bad Request' for url …",
+    # which names neither the objection nor the field it was about. The body
+    # does, and without it the only way to find out is another deploy.
+    if r.status_code >= 400:
+        raise StorageError(
+            f"blob storage refused the upload: HTTP {r.status_code} — {r.text[:400]}")
+    try:
+        return r.json()["url"]
+    except (ValueError, KeyError) as exc:
+        raise StorageError(
+            f"blob storage returned no url: HTTP {r.status_code} — {r.text[:400]}") from exc
 
 
 # ---------------------------------------------------------------------------
