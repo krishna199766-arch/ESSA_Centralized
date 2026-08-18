@@ -84,6 +84,15 @@ class Document(Base):
     id = Column(Integer, primary_key=True)
     filename = Column(String, nullable=False)
     stored_path = Column(String, nullable=False)
+    # Every page of this document, first included, when it was photographed as
+    # more than one — a sixty-line bill prints as "Tax Invoice" and "Tax
+    # Invoice(Page 2)", and only the last page carries the totals.
+    #
+    # stored_path stays the FIRST page rather than becoming a list: it is read
+    # in a dozen places that want "the image of this document", and the answer
+    # to that is still page one. NULL on every row that predates this, which is
+    # why the readers below treat empty as "just stored_path".
+    pages = Column(JSON)
     content_hash = Column(String, index=True)
     mime = Column(String)
     document_type = Column(String, default="invoice")   # invoice | lr_register | purchase_order

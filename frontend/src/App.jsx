@@ -711,10 +711,26 @@ const ITEM_CALC = new Set(['rate', 'discount_pct', 'buffer_pct', 'mrp', 'amount'
   'taxable_value', 'sale_discount_pct', 'sale_price'])
 
 function LineItems({ items, setItems }) {
+  // A two-page invoice runs to sixty lines and more, and the whole set in one
+  // table means scrolling past forty rows to reach the totals under it. Paged at
+  // 25 — the same control the document list uses, so it is not a second idea
+  // about what paging looks like.
+  //
+  // The row's index in the WHOLE list is what upd and delRow take: page 2 row 1
+  // is item 25, and passing the position on the page would silently edit the
+  // first row of the invoice instead. `from` is 1-based, hence the −1.
+  const page = usePaged(items, 25)
   // the edited field is the input; recalcLine moves only what depends on it
   const upd = (i, k, v) => setItems(items.map((x, j) =>
     (j === i ? recalcLine({ ...x, [k]: num(v) }, k, x) : { ...x })))
-  const addRow = () => setItems([...items, { description: '', qty: null, rate: null, amount: null, uom: 'PCS' }])
+  // The new row goes on the end, which on a paged table is not the page being
+  // looked at — pressing "add line" on page 1 of 3 otherwise appears to do
+  // nothing at all. Follow it.
+  const addRow = () => {
+    const next = [...items, { description: '', qty: null, rate: null, amount: null, uom: 'PCS' }]
+    setItems(next)
+    if (page.size) page.setPage(Math.ceil(next.length / page.size))
+  }
   // A line read off an invoice arrives with an MRP and a Rate and no buffer —
   // the bill states a discount, never a markup. The buffer is that same gap
   // read the other way, so it is shown from the two prices rather than left
@@ -727,6 +743,7 @@ function LineItems({ items, setItems }) {
     return it[k] ?? ''
   }
   const delRow = (i) => setItems(items.filter((_, j) => j !== i))
+
   const qtySum = items.reduce((s, x) => s + (+x.qty || 0), 0)
   const amtSum = items.reduce((s, x) => s + (+(x.taxable_value ?? x.amount) || 0), 0)
   // The per-piece gap between MRP and cost, taken out to the line — the one
@@ -741,24 +758,33 @@ function LineItems({ items, setItems }) {
     <div>
       <div className="tablewrap">
       <table className="items" style={{ minWidth: 1310 }}>
-        <thead><tr>{ITEM_COLS.map(([k, l, , w, tip]) =>
+        {/* The line number is the column that makes a paged table usable: it is
+            how a row on screen is matched to the numbered row on the paper,
+            which is the whole job when checking a 59-line bill against it. */}
+        <thead><tr><th style={{ minWidth: 34 }} title="Line number on the invoice">#</th>
+          {ITEM_COLS.map(([k, l, , w, tip]) =>
           <th key={k} style={{ minWidth: w }} title={tip}
             className={ITEM_CALC.has(k) ? 'calc' : undefined}>{l}{tip ? ' ƒ' : ''}</th>)}<th></th></tr></thead>
         <tbody>
-          {items.map((it, i) => (
-            <tr key={i}>
-              {ITEM_COLS.map(([k, , isNum, , tip]) => (
-                <td key={k} className={(isNum ? 'num' : '') + (ITEM_CALC.has(k) ? ' calc' : '')}
-                  title={tip}>
-                  <input value={cell(it, k)} onChange={(e) => upd(i, k, e.target.value)} />
-                </td>
-              ))}
-              <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => delRow(i)}>×</button></td>
-            </tr>
-          ))}
+          {page.slice.map((it, j) => {
+            const i = page.from - 1 + j          // its index in the whole invoice
+            return (
+              <tr key={i}>
+                <td className="rowno" title="Line number on the invoice">{i + 1}</td>
+                {ITEM_COLS.map(([k, , isNum, , tip]) => (
+                  <td key={k} className={(isNum ? 'num' : '') + (ITEM_CALC.has(k) ? ' calc' : '')}
+                    title={tip}>
+                    <input value={cell(it, k)} onChange={(e) => upd(i, k, e.target.value)} />
+                  </td>
+                ))}
+                <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => delRow(i)}>×</button></td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
       </div>
+      <Pager {...page} noun="line" />
       <div className="items-foot">
         <span>{items.length} lines</span>
         <span>Σ qty <b>{qtySum.toLocaleString('en-IN')}</b></span>
@@ -9180,13 +9206,18 @@ export default function App() {
   const gotoPurchase = (id) => { setSelPurchase(id); setTab('purchases') }
 
   const onUpload = async (e) => {
-    const file = e.target.files[0]; if (!file) return
-    // show the image being "scanned" while the backend extracts
+    // Several pages of ONE invoice, in the order they were picked. A bill of
+    // sixty lines prints as two pages and only the last carries the totals, so
+    // uploading them separately produced two half-documents and left the second
+    // to be keyed into the first by hand.
+    const files = Array.from(e.target.files || []); if (!files.length) return
+    const file = files[0]
+    // show the first page being "scanned" while the backend extracts
     const url = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
-    setScanning({ url, name: file.name })
+    setScanning({ url, name: files.length > 1 ? `${files.length} pages` : file.name })
     setTab('documents')
     try {
-      const res = await api.upload(file)
+      const res = await api.upload(files)
       await refresh()
       setSel(res.document.id)
       toast(res.supplier_recognised
@@ -9265,7 +9296,9 @@ export default function App() {
         )}
         <span className={'pill ' + (providers.tesseract ? 'on' : 'off')}>OCR {providers.tesseract ? 'on' : 'off'}</span>
         <NotificationBell onOpen={() => setNotifsOpen(true)} tick={notifTick} />
-        <label className="btn primary uploadbtn">Upload invoice<input type="file" accept="image/*,.pdf" onChange={onUpload} /></label>
+        <label className="btn primary uploadbtn"
+          title="One invoice. Pick both pages together if it is printed on more than one.">
+          Upload invoice<input type="file" accept="image/*,.pdf" multiple onChange={onUpload} /></label>
         {/* Who you are signed in as, and at what level. On a shared warehouse
             terminal the second half is the load-bearing one: it is the answer
             to "why can I not see Reports today", visible without asking. */}

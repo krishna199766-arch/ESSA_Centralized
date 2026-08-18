@@ -1351,3 +1351,12 @@ table.items tbody tr.sel { background: var(--brand-100); }
 .infobox { background: var(--info-bg); border: 1px solid var(--info-line);
   border-radius: var(--radius); padding: var(--sp-3) var(--sp-4);
   font-size: var(--fs-sm); color: var(--text-2); line-height: var(--lh); }
+
+/* The line number on a paged invoice table. Muted and narrow: it is a landmark
+   for matching a row against the numbered row on the paper, not data to read
+   down the column. Tabular figures so 9 and 10 line up at the decimal. */
+.items td.rowno {
+  color: var(--muted); font-size: var(--fs-xs); text-align: right;
+  padding-right: 6px; font-variant-numeric: tabular-nums;
+  background: var(--panel-2); user-select: none;
+}

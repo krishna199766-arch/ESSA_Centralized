@@ -98,9 +98,12 @@ export const api = {
   // `v` is the document's content hash — see _doc_out. Without it the URL names
   // a recycled row id and the browser can serve the previous occupant's invoice.
   imageUrl: (id, v) => `/api/documents/${id}/image` + (v ? `?v=${v}` : ''),
-  upload: (file) => {
+  // One invoice, however many pages it was photographed as. The field is
+  // repeated rather than renamed, so the server sees a list either way and a
+  // single page behaves exactly as it always did.
+  upload: (files) => {
     const fd = new FormData()
-    fd.append('file', file)
+    for (const f of (files.length === undefined ? [files] : files)) fd.append('file', f)
     return fetch('/api/documents/upload', { method: 'POST', body: fd }).then(J)
   },
   confirm: (id, data, train) =>

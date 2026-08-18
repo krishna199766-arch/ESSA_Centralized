@@ -137,6 +137,11 @@ def _migrate():
         if "document_type" not in dcols:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE documents ADD COLUMN document_type VARCHAR"))
+        # every page of a multi-page invoice; NULL on rows that predate it, which
+        # the readers treat as "just stored_path"
+        if "pages" not in dcols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE documents ADD COLUMN pages JSON"))
     # lr_entries: invoice linkage columns (cross-fill from invoice), then the
     # full Transport Entry field set (company, routing, packages, charges, …)
     if "lr_entries" in insp.get_table_names():

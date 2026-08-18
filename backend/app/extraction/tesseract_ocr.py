@@ -40,13 +40,32 @@ def _to_iso(d: str) -> str:
 class TesseractProvider(ExtractionProvider):
     name = "tesseract"
 
+    _have = None          # asked once per process; see below
+
     def available(self) -> bool:
-        try:
-            import pytesseract  # noqa
-            from PIL import Image  # noqa
-            return True
-        except Exception:
-            return False
+        """Whether OCR can actually run, not whether the wrapper imports.
+
+        pytesseract is a wrapper around a `tesseract` EXECUTABLE, and having the
+        package proves nothing about the program. Answering on the import alone
+        claimed OCR was available on any machine that had run `pip install`, and
+        the truth arrived later as a TesseractNotFoundError from inside an
+        extraction — reported as a failed upload rather than as a missing
+        program, which is a long way from the fix.
+
+        The version call is what settles it, and it costs a subprocess, so the
+        answer is kept: this is asked on every upload and the program does not
+        appear halfway through a shift.
+        """
+        if TesseractProvider._have is None:
+            try:
+                import pytesseract
+                from PIL import Image  # noqa: F401
+                _configure_tesseract()
+                pytesseract.get_tesseract_version()
+                TesseractProvider._have = True
+            except Exception:
+                TesseractProvider._have = False
+        return TesseractProvider._have
 
     def _ocr(self, image_path: str) -> str:
         import pytesseract

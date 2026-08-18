@@ -2,7 +2,7 @@ import os
 import copy
 import hashlib
 import datetime as dt
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
@@ -119,26 +119,44 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/upload")
-async def upload_and_extract(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    raw = await file.read()
-    content_hash = hashlib.sha256(raw).hexdigest()
-    ext = os.path.splitext(file.filename)[1] or ".bin"
-    # The name is the content hash, so the same invoice uploaded twice is one
-    # stored object rather than two. `storage` decides where that object lives —
-    # a file under data/uploads on a laptop, Vercel Blob on a deployment.
-    stored = storage.save(raw, f"{content_hash[:16]}{ext}")
+async def upload_and_extract(file: List[UploadFile] = File(...),
+                             db: Session = Depends(get_db)):
+    """One invoice, one or more pages.
 
-    doc = models.Document(filename=file.filename, stored_path=stored,
-                          content_hash=content_hash, mime=file.content_type,
+    `file` is repeated rather than a second `files` field, so the same endpoint
+    serves a single photograph and a two-page bill and nothing had to be
+    versioned. A supplier's sixty-line invoice prints as "Tax Invoice" and "Tax
+    Invoice(Page 2)"; uploaded separately they became two documents, each with
+    half the lines and one of them with no totals at all, and the operator was
+    left to key the second half into the first by hand.
+    """
+    if not file:
+        raise HTTPException(400, "no file uploaded")
+
+    raws = [await f.read() for f in file]
+    # Hashed over every page together: the same two-page invoice uploaded twice
+    # is one document, and page 1 alone is a different document from page 1 + 2.
+    content_hash = hashlib.sha256(b"".join(raws)).hexdigest()
+
+    refs = []
+    for i, (f, raw) in enumerate(zip(file, raws)):
+        ext = os.path.splitext(f.filename or "")[1] or ".bin"
+        page_hash = hashlib.sha256(raw).hexdigest()
+        refs.append(storage.save(raw, f"{page_hash[:16]}{ext}"))
+
+    doc = models.Document(filename=file[0].filename,
+                          stored_path=refs[0], pages=refs,
+                          content_hash=content_hash, mime=file[0].content_type,
                           status="uploaded")
     db.add(doc)
     db.commit()
     db.refresh(doc)
 
-    # The extraction engine opens a path, so give it one. On a laptop that is
-    # the stored file itself; where storage is remote this is a scratch copy
-    # that lives as long as this request and no longer.
-    local = storage.materialise(stored) or stored
+    # The extraction engine opens paths, so give it real ones. On a laptop those
+    # are the stored files themselves; where storage is remote these are scratch
+    # copies that live as long as this request and no longer.
+    locals_ = [storage.materialise(r) or r for r in refs]
+    local = locals_[0]
 
     # detect supplier via OCR header, load its learned profile
     ocr_text = engine._ocr_text(local)
@@ -149,7 +167,8 @@ async def upload_and_extract(file: UploadFile = File(...), db: Session = Depends
         doc.supplier_id = supplier.id
         profile = _profile_dict(supplier.active_profile)
 
-    result = engine.run_extraction(local, profile=profile, ocr_text=ocr_text)
+    # Every page to the extractor — the totals are only on the last one.
+    result = engine.run_extraction(locals_, profile=profile, ocr_text=ocr_text)
 
     # Back-fill the consignment fields (LR no & date, transporter, booking city)
     # from the matching LR register row BEFORE the extraction is stored, so the

@@ -121,15 +121,41 @@ class ClaudeVisionProvider(ExtractionProvider):
         return {"type": "image",
                 "source": {"type": "base64", "media_type": media, "data": b64}}
 
-    def extract(self, image_path: str, profile: Optional[Dict[str, Any]] = None,
+    def extract(self, image_path, profile: Optional[Dict[str, Any]] = None,
                 ocr_text: Optional[str] = None) -> ProviderResult:
+        """`image_path` is one path, or several for one invoice printed across
+        several pages — a bill of sixty lines arrives as "Tax Invoice" and "Tax
+        Invoice(Page 2)", and only the last page carries the totals.
+
+        The pages go into ONE request rather than one request each. Sent
+        separately they would come back as two invoices to be stitched together
+        afterwards, and the stitching is the part that needs the whole document:
+        page 2 repeats the header, continues the line numbering, and is the only
+        page with a grand total on it. The model can see all of that at once.
+        """
         import anthropic
         model = runtime.get("vision_model") or "claude-3-5-sonnet-20241022"
         client = anthropic.Anthropic(api_key=runtime.get("anthropic_api_key"))
-        with open(image_path, "rb") as f:
-            b64 = base64.standard_b64encode(f.read()).decode()
+
+        paths = [image_path] if isinstance(image_path, str) else list(image_path)
+        pages = []
+        for p in paths:
+            with open(p, "rb") as f:
+                pages.append((p, base64.standard_b64encode(f.read()).decode()))
 
         guidance = f"Canonical schema to fill:\n{SCHEMA_HINT}"
+        if len(pages) > 1:
+            guidance += (
+                f"\n\nThis is ONE invoice photographed as {len(pages)} pages, in order. "
+                "Return ONE invoice, not one per page:\n"
+                "- `line_items` is every row from every page, in the order they are "
+                "printed. A page-2 row numbered 35 follows the page-1 row numbered 34.\n"
+                "- The header (supplier, buyer, invoice number, date) is repeated on "
+                "each page. Read it once; do not duplicate it.\n"
+                "- The totals, tax lines and amount in words appear only on the last "
+                "page. Take them from there, and do not invent per-page subtotals.\n"
+                "- A row continued across the page break is one row, not two."
+            )
         if profile and profile.get("reference_example"):
             guidance += ("\n\nThis supplier's format has been learned before. Here is a "
                          "previously CONFIRMED extraction from them — match its field "
@@ -150,7 +176,14 @@ class ClaudeVisionProvider(ExtractionProvider):
             max_tokens=32000,
             system=SYSTEM,
             messages=[{"role": "user", "content": [
-                self._source_block(image_path, b64),
+                # Each page labelled, so "the totals are on the last page" and
+                # "page 2 continues the numbering" refer to something the model
+                # can actually identify rather than to an unlabelled sequence.
+                *[block for i, (p, b64) in enumerate(pages, 1) for block in (
+                    *([{"type": "text", "text": f"--- page {i} of {len(pages)} ---"}]
+                      if len(pages) > 1 else []),
+                    self._source_block(p, b64),
+                )],
                 {"type": "text", "text": guidance + "\n\nReturn the JSON now."},
             ]}],
         ) as stream:

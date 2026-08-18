@@ -74,13 +74,19 @@ def detect_supplier(ocr_text: str, suppliers: List[Any]) -> Tuple[Optional[Any],
     return None, list(gstins)
 
 
-def run_extraction(image_path: str, profile: Optional[Dict[str, Any]] = None,
+def run_extraction(image_path, profile: Optional[Dict[str, Any]] = None,
                    ocr_text: Optional[str] = None) -> Dict[str, Any]:
+    """`image_path` is one path, or a list of them for one invoice spread over
+    several pages. Only the vision provider reads more than the first: the
+    seeded provider matches a single known sample, and OCR of page two on its
+    own produces text with no invoice around it."""
+    paths = [image_path] if isinstance(image_path, str) else list(image_path)
+    first = paths[0]
     if ocr_text is None:
-        ocr_text = _ocr_text(image_path)
+        ocr_text = "\n".join(t for t in (_ocr_text(p) for p in paths) if t)
 
     # 1. bundled sample? return verified truth.
-    seeded = _seeded.extract(image_path, profile, ocr_text)
+    seeded = _seeded.extract(first, profile, ocr_text)
     if seeded.confidence > 0:
         result = seeded
     else:
@@ -95,13 +101,13 @@ def run_extraction(image_path: str, profile: Optional[Dict[str, Any]] = None,
             pdata = dict(profile or {})
             pdata["_company_gstin"] = COMPANY_GSTIN
             try:
-                result = prov.extract(image_path, pdata, ocr_text)
+                result = prov.extract(paths if len(paths) > 1 else first, pdata, ocr_text)
             except Exception as e:
                 # a vision/API failure must never 500 the upload — fall back to
                 # offline OCR (or an empty shell) and flag it for review.
                 note = f"{prov.name} failed ({type(e).__name__}); fell back to OCR"
                 if prov is not _tesseract and _tesseract.available():
-                    result = _tesseract.extract(image_path, pdata, ocr_text)
+                    result = _tesseract.extract(first, pdata, ocr_text)
                     result.notes.append(note)
                 else:
                     from .base import empty_invoice
