@@ -43,6 +43,18 @@ def using_blob() -> bool:
     return bool(BLOB_TOKEN)
 
 
+def _read_headers() -> dict:
+    """Reads carry the token too.
+
+    A Blob store created today is PRIVATE, and a private object refuses an
+    unauthenticated GET — so a read without this returns 403 and an invoice
+    appears to have vanished. The header is harmless on a public store, which
+    is why it is sent unconditionally rather than switched on a setting that
+    would have to be kept in step with the dashboard.
+    """
+    return {"authorization": f"Bearer {BLOB_TOKEN}"} if BLOB_TOKEN else {}
+
+
 def backend_name() -> str:
     return "vercel-blob" if using_blob() else "local-disk"
 
@@ -101,7 +113,7 @@ def read(ref: str) -> bytes | None:
         with open(ref, "rb") as f:
             return f.read()
     try:
-        r = httpx.get(ref, timeout=_TIMEOUT)
+        r = httpx.get(ref, headers=_read_headers(), timeout=_TIMEOUT)
         r.raise_for_status()
         return r.content
     except httpx.HTTPError:
@@ -135,7 +147,7 @@ def exists(ref: str) -> bool:
     if not _is_remote(ref):
         return os.path.exists(ref)
     try:
-        return httpx.head(ref, timeout=_TIMEOUT).status_code < 400
+        return httpx.head(ref, headers=_read_headers(), timeout=_TIMEOUT).status_code < 400
     except httpx.HTTPError:
         return False
 
