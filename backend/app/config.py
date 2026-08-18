@@ -21,19 +21,27 @@ VISION_MODEL = os.environ.get("ESSA_VISION_MODEL", "claude-3-5-sonnet-20241022")
 COMPANY_GSTIN = os.environ.get("ESSA_COMPANY_GSTIN", "33AADCE6591N1Z7")
 COMPANY_NAME = os.environ.get("ESSA_COMPANY_NAME", "Essa Garments Private Limited")
 
-# --- Login (UI gate, credentials validated server-side) ---
-# Two roles: admin (controls masters + master-entry-by-image) and user (processing).
+# --- Login ---
+# Accounts live in the database (see models.User and services/users), not here.
+# Three ranked roles: user (the floor), admin (setup + money), superadmin (also
+# accounts and server settings).
+#
+# What is left here is the signing key and the accounts used to SEED an empty
+# database — a fresh install, or an existing one upgrading from the two
+# hard-coded accounts these variables used to be the whole of. Seeding only ever
+# creates a missing row, so a password changed in the app is not reverted to the
+# value below on the next restart.
 AUTH_SECRET = os.environ.get("ESSA_AUTH_SECRET", "essa-local-secret-change-me")
-AUTH_USERS = {
+SEED_ACCOUNTS = {
+    os.environ.get("ESSA_SUPERADMIN_USER", "superadmin"): {
+        "password": os.environ.get("ESSA_SUPERADMIN_PASSWORD", "super@123"),
+        "role": "superadmin", "full_name": "Super Admin"},
     os.environ.get("ESSA_ADMIN_USER", "admin"): {
         "password": os.environ.get("ESSA_ADMIN_PASSWORD", os.environ.get("ESSA_PASSWORD", "essa@123")),
-        "role": "admin"},
+        "role": "admin", "full_name": "Administrator"},
     os.environ.get("ESSA_USER_USER", "user"): {
         "password": os.environ.get("ESSA_USER_PASSWORD", "user@123"),
-        "role": "user"},
+        "role": "user", "full_name": "Warehouse User"},
 }
-# backwards-compat single-user vars
-AUTH_USER = os.environ.get("ESSA_USER", "admin")
-AUTH_PASSWORD = os.environ.get("ESSA_PASSWORD", "essa@123")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)

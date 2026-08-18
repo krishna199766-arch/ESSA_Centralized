@@ -29,7 +29,14 @@ def _norm(s):
 # The attributes that make a breakdown row a distinct stock item. Same list the
 # phone detail form and the QR payload carry, so a variant created at GRN is
 # already the record the warehouse and the label expect.
-SPLIT_ATTRS = ("size", "color", "material", "pattern", "fit", "product_type", "design_no")
+#
+# All ten of the stock master's attribute columns (Attributes Reference.xlsx)
+# except PRODUCT, which is the category and is carried separately. Every one of
+# them is part of IDENTITY: an ESSA t-shirt and a YUVA t-shirt in the same size
+# and colour are two stock items, not one, and folding them together would put
+# two suppliers' goods behind a single weighted-average cost.
+SPLIT_ATTRS = ("size", "color", "material", "pattern", "fit", "product_type",
+               "design_no", "brand", "style", "sleeve")
 # per-variant money fields — these describe price, never identity
 SPLIT_PRICES = ("rate", "mrp", "sale_price", "sale_discount_pct")
 
@@ -107,7 +114,15 @@ def build_grn_from_document(db, doc):
             barcode=it.get("barcode"), description=it.get("description"),
             hsn=it.get("hsn"), qty=it.get("qty"), uom=it.get("uom") or "PCS",
             rate=it.get("rate"),
+            # the size cell verbatim — a size run like "30:2, 32:4" is the
+            # breakdown the supplier already counted, and size_split reads it
+            size=it.get("size"),
             amount=it.get("amount") if it.get("amount") is not None else it.get("taxable_value"),
+            # retail: the MRP the supplier printed, and the shelf price someone
+            # set on the review screen. Carried through so the product this line
+            # creates is priced from the moment it exists.
+            mrp=it.get("mrp"), sale_price=it.get("sale_price"),
+            sale_discount_pct=it.get("sale_discount_pct"),
             is_new_product=match is None,
         ))
     db.flush()
@@ -183,6 +198,9 @@ def set_line_splits(db, line, rows):
             raise ValueError(f"“{label}”: quantity must be greater than zero")
         clean.append(dict(qty=qty, code=(r.get("code") or None),
                           category=(str(r.get("category") or "").strip() or None),
+                          # blank inherits the line's unit at post — a variant is
+                          # the same kind of article as the bundle it came out of
+                          unit_type=(str(r.get("unit_type") or "").strip().upper() or None),
                           **attrs, **prices))
 
     line.splits.clear()          # delete-orphan drops the previous breakup
@@ -241,27 +259,38 @@ def apply_category(db, product, name):
     return True
 
 
-def _create_product(db, purchase, line, split=None, mint_codes=False):
+def _create_product(db, purchase, line, split=None, mint_codes=False, unit=None):
     """Create the inventory master row for a received line (or one of its variants).
 
     `mint_codes` assigns the SKU *and* an internal EAN-13 straight away, which is
     what variants need: the supplier never printed a code for "L / Red" alone, so
-    the label has to be ours before the goods can be scanned or dispatched."""
+    the label has to be ours before the goods can be scanned or dispatched.
+
+    `unit` is (code, pieces_per_unit) — what this product is COUNTED in, which is
+    not necessarily what the supplier billed. A dozen pillow covers is six pairs,
+    and the product born here is a PAIR with six of it, not a DOZ with one. Frozen
+    on the row at creation; see services/unit_types.py."""
+    from . import unit_types as ut
+    code, per = unit or (ut.default_code(db, line.uom), 1.0)
     product = models.Product(
         # a variant carries no supplier barcode — the bundle's code covered the
         # whole bundle — so it gets one of ours below instead
         sku=None if mint_codes else _next_sku(db),
         barcode=None if split else line.barcode,
         description=line.description or "(unnamed)", hsn=line.hsn,
-        uom=line.uom or "PCS", primary_supplier_id=purchase.supplier_id,
+        uom=code, unit_type=code, pieces_per_unit=per,
+        primary_supplier_id=purchase.supplier_id,
         stock_qty=0.0, avg_cost=0.0,
     )
     if split is not None:
         for a in SPLIT_ATTRS:
             setattr(product, a, getattr(split, a, None))
-        product.mrp = split.mrp
-        product.sale_price = split.sale_price
-        product.sale_discount_pct = split.sale_discount_pct
+    # Retail pricing: the variant's own where it has any, otherwise the line's.
+    # A breakdown that only names sizes should not throw away a price set for the
+    # whole bundle on the review screen — the sizes are the same goods.
+    for fld in ("mrp", "sale_price", "sale_discount_pct"):
+        v = getattr(split, fld, None) if split is not None else None
+        setattr(product, fld, v if v is not None else getattr(line, fld, None))
     db.add(product)
     db.flush()
     if mint_codes:
@@ -278,8 +307,48 @@ def _create_product(db, purchase, line, split=None, mint_codes=False):
     return product
 
 
+def line_unit_type(db, line, split=None, product=None):
+    """(code, pieces_per_unit) — the unit this row's goods are counted in.
+
+    Three cases, and the order between them is the whole of the rule:
+
+      1. **A product that already carries a unit keeps it.** Re-buying pillow
+         covers has to land on the same stock record, counted the same way. A GRN
+         line that says otherwise is a line to correct, never a reason to restate
+         what is already on the shelf.
+      2. **A product that predates unit types keeps counting the way it has** —
+         its own UOM, matched into the master. Applying today's rule to it would
+         silently re-read a stock of 12 pieces as 12 pairs.
+      3. **A new product** takes what the GRN line says, or what the master's
+         rules read off its description, or the default piece.
+    """
+    from . import unit_types as ut
+    if product is not None and product.unit_type:
+        return product.unit_type, float(product.pieces_per_unit or 1.0) or 1.0
+    if product is not None:
+        t = ut.match_uom(db, product.uom)
+        code = t.code if t else ut.DEFAULT_CODE
+        per = t.pieces_per if t else 1.0
+        ut.apply_to_product(db, product, code, per)     # frozen from here on
+        return code, per
+    code, per, _ = ut.resolve(
+        db, explicit=(getattr(split, "unit_type", None) if split is not None else None)
+                     or line.unit_type,
+        description=line.description,
+        category=(getattr(split, "category", None) if split is not None else None)
+                 or line.category,
+        uom=line.uom)
+    return code, per
+
+
 def post_grn(db, purchase):
-    """Commit a draft GRN to inventory. Returns a summary dict."""
+    """Commit a draft GRN to inventory. Returns a summary dict.
+
+    This is where a billed dozen becomes twelve handkerchiefs or six pairs of
+    pillow covers: `qty` and `uom` on the line stay the supplier's own figures,
+    and the conversion into the product's unit happens once, here, at the moment
+    the goods become stock. The rate converts with it, so ₹600 a dozen is ₹100 a
+    pair and the valuation still adds up to what was paid."""
     if purchase.status == "posted":
         return {"ok": False, "error": "already posted", "purchase_id": purchase.id}
 
@@ -296,17 +365,27 @@ def post_grn(db, purchase):
                     "error": f"“{(l.description or '')[:32]}”: more recorded short "
                              f"than was billed ({float(l.qty or 0):g})"}
         if l.is_split and not st["balanced"]:
-            off.append(f"“{(l.description or ('line ' + str(l.id)))[:32]}”: rows total "
-                       f"{l.split_qty:g} of {st['received_qty']:g} received"
-                       + (f" ({float(l.qty or 0):g} billed, {st['short_qty']:g} short)"
-                          if st["has_shortage"] else ""))
+            gap = round(st["received_qty"] - l.split_qty, 3)
+            off.append(
+                f"“{(l.description or ('line ' + str(l.id)))[:32]}”: "
+                + (f"{gap:g} piece(s) remaining" if gap > 0
+                   else f"{-gap:g} piece(s) over")
+                + f" — the size breakdown totals {l.split_qty:g} of "
+                  f"{st['received_qty']:g} received"
+                + (f" ({float(l.qty or 0):g} billed, {st['short_qty']:g} short)"
+                   if st["has_shortage"] else ""))
     if off:
+        # the breakdown is the source of truth for what exists, so it has to
+        # account for every piece before any of them gets a SKU and a QR
         return {"ok": False, "purchase_id": purchase.id,
-                "error": "breakdown doesn't add up — " + "; ".join(off)}
+                "error": "; ".join(off) + ". Please complete the size breakdown "
+                                          "before posting to inventory."}
 
     from . import units as unit_svc
+    from . import unit_types as ut
     created, updated, split_rows, pieces = 0, 0, 0, 0
     short_qty, short_value, nothing_arrived = 0.0, 0.0, 0
+    converted = []                      # rows where the billed unit wasn't the stock one
     # one identity per physical piece, under the SKU that receives it — the stock
     # figure stays at SKU level, this is the layer a garment tag hangs off
     def _serialise(product, qty):
@@ -339,7 +418,8 @@ def post_grn(db, purchase):
                                             purchase.supplier_id, attrs=attrs)
                 if not product:
                     product = _create_product(db, purchase, line, split=sp,
-                                              mint_codes=True)
+                                              mint_codes=True,
+                                              unit=line_unit_type(db, line, sp))
                     sp.is_new_product = True
                     created += 1
                 else:
@@ -348,8 +428,10 @@ def post_grn(db, purchase):
                     # an existing variant can still pick up prices set on this GRN,
                     # and any attribute it was missing (e.g. matched by scanned QR)
                     for f in ("mrp", "sale_price", "sale_discount_pct"):
-                        if getattr(sp, f) is not None:
-                            setattr(product, f, getattr(sp, f))
+                        v = getattr(sp, f)
+                        v = v if v is not None else getattr(line, f, None)
+                        if v is not None:
+                            setattr(product, f, v)
                     for a in SPLIT_ATTRS:
                         if getattr(sp, a) and not getattr(product, a):
                             setattr(product, a, getattr(sp, a))
@@ -358,15 +440,30 @@ def post_grn(db, purchase):
                 sp.product_id = product.id
                 if line.hsn and not product.hsn:
                     product.hsn = line.hsn
-                _receive_into_stock(db, product, sp.qty, sp.effective_rate,
-                                    purchase, note=sp.variant_label or None)
-                _serialise(product, sp.qty)
+                # the billed unit is the supplier's; the stock unit is this
+                # product's, and a breakdown row of "1 DOZ" of pillow covers
+                # becomes six pairs here and nowhere else
+                code, _ = line_unit_type(db, line, sp, product)
+                conv = ut.convert(db, sp.qty, line.uom, code, sp.effective_rate)
+                if not conv["whole"]:
+                    ok, why = ut.check_line(db, f"{line.description} · {sp.variant_label}",
+                                            sp.qty, line.uom, code)
+                    return {"ok": False, "purchase_id": purchase.id, "error": why}
+                note = " · ".join(x for x in (sp.variant_label or None,
+                                              conv["explain"] if conv["converted"] else None) if x)
+                _receive_into_stock(db, product, conv["units"], conv["rate_per_unit"],
+                                    purchase, note=note or None)
+                _serialise(product, conv["units"])
+                if conv["converted"]:
+                    converted.append(conv["explain"])
                 split_rows += 1
             continue
 
         product = db.get(models.Product, line.product_id) if line.product_id else None
         if not product:
-            product = _create_product(db, purchase, line)      # whole line, no variants
+            # whole line, no variants
+            product = _create_product(db, purchase, line,
+                                      unit=line_unit_type(db, line))
             line.product_id = product.id
             line.is_new_product = True
             created += 1
@@ -374,14 +471,29 @@ def post_grn(db, purchase):
             updated += 1
             if not product.category:
                 apply_category(db, product, line.category)
+            # a re-buy picks up whatever pricing this GRN states, the same way a
+            # variant does — a repriced line is the point of typing it
+            for fld in ("mrp", "sale_price", "sale_discount_pct"):
+                if getattr(line, fld, None) is not None:
+                    setattr(product, fld, getattr(line, fld))
         if line.hsn and not product.hsn:
             product.hsn = line.hsn
         # what arrived, not what was billed — the difference is the shortage
         recv = st["received_qty"]
-        note = (f"received {recv:g} of {float(line.qty or 0):g} billed"
-                if st["has_shortage"] else None)
-        _receive_into_stock(db, product, recv, line.rate, purchase, note=note)
-        _serialise(product, recv)
+        code, _ = line_unit_type(db, line, None, product)
+        conv = ut.convert(db, recv, line.uom, code, line.rate)
+        if not conv["whole"]:
+            ok, why = ut.check_line(db, line.description, recv, line.uom, code)
+            return {"ok": False, "purchase_id": purchase.id, "error": why}
+        note = " · ".join(x for x in (
+            (f"received {recv:g} of {float(line.qty or 0):g} billed"
+             if st["has_shortage"] else None),
+            conv["explain"] if conv["converted"] else None) if x)
+        _receive_into_stock(db, product, conv["units"], conv["rate_per_unit"],
+                            purchase, note=note or None)
+        _serialise(product, conv["units"])
+        if conv["converted"]:
+            converted.append(conv["explain"])
 
     purchase.status = "posted"
     purchase.posted_at = dt.datetime.utcnow()
@@ -396,6 +508,10 @@ def post_grn(db, purchase):
             "products_created": created, "products_updated": updated,
             "lines": len(purchase.lines), "size_rows": split_rows,
             "bundles": [b.code for b in made], "pieces": pieces,
+            # every row whose billed unit was not its stock unit, spelled out —
+            # a receipt that turned 2 DOZ into 12 pairs has to say so, or the
+            # stock figure looks like it lost ten of something
+            "converted": converted,
             # what the supplier billed and never delivered. Reported at post
             # because this is the moment it stops being a note on a screen and
             # becomes a claim: the stock figure is now final and does not include it.

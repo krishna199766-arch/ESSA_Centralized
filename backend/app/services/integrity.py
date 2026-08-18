@@ -214,7 +214,7 @@ def product_report(db, product, ctx=None):
     orphaned = [u for u in rows if ctx.unit_state(u) == ORPHAN]
     stock = _round(product.stock_qty)
     expected = ctx.received.get(product.id, 0.0)
-    serialisable, why = unit_svc.can_serialise(product.uom, expected or stock)
+    serialisable, why = unit_svc.can_serialise(product.uom, expected or stock, db)
 
     d = {
         "product_id": product.id, "sku": product.sku,

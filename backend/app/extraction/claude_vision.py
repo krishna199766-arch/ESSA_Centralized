@@ -14,6 +14,7 @@ import base64
 from typing import Optional, Dict, Any
 from .base import ExtractionProvider, ProviderResult, empty_invoice
 from .. import runtime
+from ..services import translate
 
 # A COMPLETE schema example so the model knows every field to fill. extra="allow"
 # on the Pydantic side means anything additional also survives.
@@ -66,7 +67,12 @@ stamps, or handwriting):
   number, LR number & date, transporter/courier, destination, delivery note,
   transport/EWB tran-id, broker, payment terms, agent.
 - EVERY line item with: serial no, barcode, description, brand, design, size, HSN,
-  qty, unit (UOM), MRP, rate, discount % and amount, taxable value, line amount.
+  qty, unit (UOM), MRP, rate, discount, taxable value, line amount.
+  MRP, rate and discount are PER PIECE; taxable value and line amount are line
+  totals. `discount_amount` is the per-piece discount (MRP − rate) — if the bill
+  prints a discount for the whole line, divide it by the quantity. Where the bill
+  states no discount at all, leave both discount fields null rather than working
+  one out from the MRP.
 - Taxes: CGST/SGST rates+amounts OR IGST rate+amount, TDS (even handwritten),
   other charges, freight, special discount, round off.
 - Totals: total quantity, sub total, taxable total, tax total, grand total, and
@@ -76,7 +82,8 @@ stamps, or handwriting):
 Rules: Use CGST+SGST when supplier and buyer GSTINs start with the same 2 digits
 (same state), otherwise IGST. Dates in ISO YYYY-MM-DD. Numbers as numbers, not
 strings. Do not invent data; use null for anything genuinely absent. Return ONLY
-the JSON object, no prose."""
+the JSON object, no prose.
+""" + translate.VISION_LANGUAGE_RULES
 
 
 class ClaudeVisionProvider(ExtractionProvider):
@@ -145,8 +152,24 @@ class ClaudeVisionProvider(ExtractionProvider):
                 note = "model did not return valid JSON"
             return ProviderResult(data=empty_invoice(), provider=self.name,
                                   confidence=0.0, raw_text=text, notes=[note])
+        notes = ["vision extraction"]
+        # A bill written in Tamil is read in Tamil and handed on in English. The
+        # prompt above asks for that; this is the sweep over whatever came back
+        # untranslated anyway, and it is what makes the outcome dependable rather
+        # than usual. Words only — every figure on the invoice is the supplier's
+        # own, and the arithmetic in validate.py checks it as such.
+        page_lang = (data.pop("source_language", None) or "").strip() or None
+        swept = translate.sweep(data)
+        if swept["originals"]:
+            meta = data.setdefault("meta", {})
+            meta.setdefault("original_values", {}).update(swept["originals"])
+        lang = page_lang if (page_lang or "").lower() != "english" else None
+        lang = lang or (swept["languages"][0] if swept["languages"] else None)
+        if lang:
+            data.setdefault("meta", {})["source_language"] = lang
+            notes.append(swept["note"] or f"read in {lang} and translated to English")
         return ProviderResult(data=data, provider=self.name, confidence=0.9,
-                              raw_text=text, notes=["vision extraction"])
+                              raw_text=text, notes=notes)
 
     @staticmethod
     def _parse_json(text: str) -> Optional[Dict[str, Any]]:

@@ -256,7 +256,9 @@ a { color: var(--brand); text-underline-offset: 2px; }
   width: 360px; max-height: min(78vh, 660px); overflow-y: auto; padding: var(--sp-2);
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); box-shadow: var(--shadow-3); }
-.navmenu-item { display: flex; align-items: flex-start; gap: var(--sp-3); width: 100%;
+/* centred, not top-aligned: the row is one line of text against a 22px glyph, so
+   flex-start left the label riding above the middle of its own icon */
+.navmenu-item { display: flex; align-items: center; gap: var(--sp-3); width: 100%;
   text-align: left; background: transparent; border: none; padding: 9px 10px;
   border-radius: var(--radius-sm); color: var(--text); white-space: normal; }
 .navmenu-item:hover { background: var(--brand-50); }
@@ -325,10 +327,13 @@ a { color: var(--brand); text-underline-offset: 2px; }
 
 .modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: var(--sp-3); }
+/* the label sits against the middle of its disc, not against the disc's top:
+   the card is one line of text and a 34px mark, and `start` hung the two off
+   different baselines */
 .modcard { display: grid; grid-template-columns: 34px 1fr; grid-template-rows: auto auto;
   gap: 0 var(--sp-3); text-align: left; background: var(--panel);
   border: 1px solid var(--line); border-radius: var(--radius-lg);
-  padding: var(--sp-3) var(--sp-4); color: var(--text); align-items: start;
+  padding: var(--sp-3) var(--sp-4); color: var(--text); align-items: center;
   transition: border-color .12s, background .12s, box-shadow .14s, transform .14s; }
 .modcard:hover { border-color: var(--gold-line); background: var(--brand-50);
   box-shadow: var(--shadow-2); transform: translateY(-2px); }
@@ -353,6 +358,8 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .seg + .seg { border-left: 1px solid var(--line-strong); }
 .seg:hover:not(.on) { background: var(--brand-50); color: var(--brand); }
 .seg.on { background: var(--brand); color: #fff; }
+/* nothing left to undo — greyed rather than hidden, so the pair keeps its place */
+.seg:disabled { color: var(--muted); opacity: .45; background: var(--panel); }
 
 /* ---------- charts ----------
    The data is the only thing allowed to be loud: hairline grid, muted axis ink,
@@ -499,15 +506,34 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .badge.confirmed { background: var(--ok-bg); color: var(--ok); }
 .badge.uploaded, .badge.draft { background: var(--panel-3); color: var(--text-2); }
 .badge.posted { background: var(--info-bg); color: var(--info); }
+/* The three access levels, ranked by weight rather than by hue: a super admin
+   badge should read as "more" than an admin one at a glance, which a second
+   arbitrary colour would not. */
+.badge.role-user { background: var(--panel-3); color: var(--text-2); }
+.badge.role-admin { background: var(--info-bg); color: var(--info); }
+.badge.role-superadmin { background: var(--brand-50, var(--warn-bg)); color: var(--brand, var(--warn));
+  box-shadow: inset 0 0 0 1px currentColor; }
 .conf { font-variant-numeric: tabular-nums; }
 .conf.hi { color: var(--ok); } .conf.mid { color: var(--warn); } .conf.lo { color: var(--danger); }
 
 /* ---------- main review ---------- */
 .main { flex: 1; display: flex; min-height: 0; }
-.viewer { width: 42%; border-right: 1px solid var(--line); background: var(--panel-3);
-  overflow: auto; display: flex; align-items: flex-start; justify-content: center;
-  padding: var(--sp-4); }
+/* The invoice photograph, and the fold that gets it out of the way. It folds to
+   the same 36px rail the lists do, and for the same reason: the way back has to
+   be visible from where the thing went, so the rail carries its own label and
+   the whole strip is the button.
+
+   The scrolling lives in .viewerscroll rather than on .viewer itself — the hide
+   control is pinned to the pane, and pinning it to a scroller would have carried
+   it off the top the moment anyone looked at the bottom of a tall bill. */
+.viewer { width: 42%; flex: 0 0 auto; border-right: 1px solid var(--line);
+  background: var(--panel-3); position: relative; overflow: hidden;
+  display: flex; transition: width .18s ease; }
+.viewer.collapsed { width: 36px; }
+.viewerscroll { flex: 1; min-width: 0; overflow: auto; display: flex;
+  align-items: flex-start; justify-content: center; padding: var(--sp-4); }
 .viewer img { max-width: 100%; border-radius: var(--radius-sm); box-shadow: var(--shadow-2); }
+@media (prefers-reduced-motion: reduce) { .viewer { transition: none; } }
 .editor { flex: 1; overflow-y: auto; padding: var(--sp-5); background: var(--bg); }
 
 /* ---------- panels ---------- */
@@ -542,6 +568,141 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .section h4 .h4btn { float: right; text-transform: none; letter-spacing: 0; font-size: var(--fs-xs);
   color: var(--brand); background: none; border: none; cursor: pointer; padding: 0; font-weight: 600; }
 .section h4 .h4btn:disabled { color: var(--muted); cursor: default; }
+
+/* ---------- pagination ----------
+   One bar, the same everywhere: what you are looking at ("1–50 of 686"), how
+   many at a time, and the way through. It sits BELOW its list rather than above,
+   because the moment you want it is the moment you reach the end of the rows. */
+.pager { display: flex; align-items: center; gap: var(--sp-3) var(--sp-4);
+  flex-wrap: wrap; margin-top: var(--sp-3); padding-top: var(--sp-3);
+  border-top: 1px solid var(--line); font-size: var(--fs-sm); color: var(--muted); }
+.pager-count { font-variant-numeric: tabular-nums; }
+.pager-count b { color: var(--text); }
+.pager-size { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.pager-size select { background: var(--panel); color: var(--text);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  padding: 4px 6px; font-family: inherit; font-size: var(--fs-sm); }
+.pager-nav { display: inline-flex; align-items: center; gap: var(--sp-2);
+  margin-left: auto; }
+.pager-nav .btn { padding: 4px 11px; }
+.pager-nav .btn:disabled { opacity: .45; cursor: default; }
+.pager-page { font-variant-numeric: tabular-nums; white-space: nowrap;
+  padding: 0 var(--sp-2); }
+/* inside a sidebar the bar has no room for the nav row beside the count */
+.sidebar .pager { flex-direction: column; align-items: stretch; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3); margin-top: 0; }
+.sidebar .pager-nav { margin-left: 0; justify-content: space-between; }
+.sidebar .pager-size { display: none; }
+
+/* ---------- master forms ----------
+   A two-column grid across a 1500px panel gives two 700px text boxes for a
+   pincode, and a section reads as two sparse columns with the eye travelling a
+   long way between a label and the next one. These wrap instead: as many
+   columns as fit at a sane field width, which is what makes a dense ERP form
+   scannable and what keeps every section on the same alignment. */
+.mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--sp-3) var(--sp-4); align-items: start; }
+.mgrid .field textarea { width: 100%; background: var(--panel);
+  border: 1px solid var(--line-strong); color: var(--text); padding: 8px 10px;
+  border-radius: var(--radius-sm); font-family: inherit; font-size: var(--fs-base); }
+
+/* the ticks, in one row under a rule — see MasterCheck */
+.mchecks { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4);
+  margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.mchecks.bare { margin-top: 0; padding-top: 0; border-top: none; }
+.mcheck { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  font-size: var(--fs-sm); color: var(--text-2); padding: 5px 9px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
+  transition: border-color .12s, color .12s; }
+.mcheck:hover { border-color: var(--brand-300); color: var(--text); }
+.mcheck input { accent-color: var(--brand); width: auto; margin: 0; }
+.mcheck:has(input:checked) { border-color: var(--brand); color: var(--brand);
+  background: var(--brand-50); font-weight: 600; }
+
+/* ---------- the masters hub ----------
+   Seventeen cards, each saying what it holds before it is opened: how many
+   fields, how many of them mandatory, whether it carries a child grid. A tile
+   that is only a name makes someone open all seventeen to find the one they
+   want. The ⚠ marks a master whose fields were inferred rather than seen. */
+.mastercard { display: flex; align-items: center; gap: var(--sp-3); text-align: left;
+  padding: 13px 14px; background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--brand-300); border-radius: var(--radius);
+  cursor: pointer; font-family: inherit; color: var(--text); position: relative;
+  transition: border-color .12s, box-shadow .12s, transform .12s; }
+.mastercard:hover { border-color: var(--brand); border-left-color: var(--brand);
+  box-shadow: var(--shadow-1); transform: translateY(-1px); }
+.mastercard:focus-visible { outline: none; box-shadow: var(--focus); }
+.mc-icon { flex: 0 0 auto; font-size: var(--fs-lg); color: var(--brand-500); width: 22px;
+  text-align: center; }
+.mc-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.mc-body b { font-size: var(--fs-base); }
+.mc-sub { font-size: var(--fs-xs); color: var(--muted); }
+.mc-meta { font-size: var(--fs-xs); color: var(--brand-500); margin-top: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc-n { flex: 0 0 auto; min-width: 22px; height: 22px; border-radius: 999px;
+  background: var(--brand-100); color: var(--brand); font-size: var(--fs-xs);
+  font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 6px; }
+.mc-flag { position: absolute; top: 4px; right: 4px; font-size: var(--fs-xs); color: var(--warn); }
+/* the two groups the hub is split into — reference data, then what is running */
+.masterhead { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .6px;
+  color: var(--brand); font-weight: 700; margin: var(--sp-5) 0 var(--sp-3);
+  padding-bottom: var(--sp-2); border-bottom: 1px solid var(--line); }
+.masterhead span { text-transform: none; letter-spacing: 0; color: var(--muted);
+  font-weight: 400; }
+
+/* ---------- review tabs ----------
+   The invoice review as four horizontal tabs rather than seven stacked panels.
+   The point is the image: every field on this screen is checked against the
+   photograph beside it, and a page that scrolls takes the photograph with it.
+   One tab open at a time keeps both on screen together.
+
+   A tab holding flagged fields says so on its face — the whole hazard of hiding
+   panels is a warning nobody can see, so the count is not decoration. */
+.revtabs { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-4); }
+.revtab { display: inline-flex; align-items: center; gap: var(--sp-2);
+  padding: 9px 16px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--panel); color: var(--text-2); font-family: inherit;
+  font-size: var(--fs-sm); font-weight: 600; cursor: pointer; white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s; }
+.revtab:hover { border-color: var(--brand-300); color: var(--text); }
+.revtab:focus-visible { outline: none; box-shadow: var(--focus); }
+.revtab.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.revtab.flagged { border-color: var(--warn); }
+.revtab-n { font-size: var(--fs-xs); font-weight: 700; color: var(--warn);
+  background: var(--warn-bg); border-radius: 999px; padding: 1px 7px; }
+.revtab.on .revtab-n { background: #fff; }
+
+/* ---------- the money panel: lines, taxes and totals as one calculation ----------
+   They were three collapsed accordions, which hid the only thing that matters
+   about them — that they are one sum. A rate typed at the top has to be visibly
+   reaching the grand total at the bottom, so they share a panel and the derived
+   figures are tinted rather than left looking like something someone typed. */
+.section h5 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .5px;
+  color: var(--muted); margin: var(--sp-4) 0 var(--sp-2); font-weight: 700; }
+.section h5:first-of-type { margin-top: 0; }
+.section.money .calcbase { float: right; margin-left: var(--sp-3); text-transform: none;
+  letter-spacing: 0; font-size: var(--fs-xs); color: var(--muted); font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+.calchint { font-size: var(--fs-xs); color: var(--muted); line-height: var(--lh);
+  margin: 0 0 var(--sp-3); }
+.calchint b { color: var(--text-2); }
+/* two columns where the panel is wide enough to hold them, one where it is not —
+   the taxes and the totals they feed sit side by side so the arithmetic is one
+   glance rather than a scroll */
+.moneysplit { display: grid; grid-template-columns: 1fr; gap: 0 var(--sp-5); }
+@media (min-width: 1100px) { .moneysplit { grid-template-columns: 1fr 1fr; } }
+
+/* A derived figure, marked so nobody wonders where a number they did not type
+   came from. Still editable — typing into one makes IT the input and moves its
+   counterpart instead — so the tint is an explanation, never a lock. */
+.field.calc label { color: var(--brand-500); }
+.field.calc input { background: var(--brand-50); border-style: dashed; }
+.field.calc input:focus { background: var(--panel); border-style: solid; }
+table.items th.calc { color: var(--brand); }
+table.items td.calc input { background: var(--brand-50); border-color: transparent; }
+table.items td.calc input:hover { border-color: var(--line-strong); }
+table.items td.calc input:focus { background: var(--panel); }
 
 /* ---------- LR register candidates ---------- */
 .lrcands { margin-top: var(--sp-3); border: 1px solid var(--warn-line); background: var(--warn-bg);
@@ -578,8 +739,42 @@ table.items input:hover { border-color: var(--line-strong); background: var(--pa
 table.items input:focus { outline: none; border-color: var(--brand); background: var(--panel);
   box-shadow: var(--focus); }
 table.items td.num input { text-align: right; }
+/* An ENTRY grid — a table whose every cell is a box to be filled (the GRN
+   breakdown, the shortage rows). A ghost input that only appears under the
+   cursor is right for a register with one editable column in twelve; here it
+   left a whole row reading as a blank strip, with nothing to say the columns
+   above it were even fillable. So these show their edges at rest. */
+table.items.entry input { border-color: var(--line); background: var(--panel); }
+table.items.entry input:hover { border-color: var(--line-strong); }
+table.items.entry td.calc input { background: var(--brand-50); border-color: var(--brand-200); }
 table.items .num, table.items .num input, table.items th.num { text-align: right; }
 table.items .num, table.items td.mono, table.items .conf { font-variant-numeric: tabular-nums; }
+
+/* ---------- a table wider than the panel that holds it ----------
+   The scroll belongs to the TABLE, not to the pane. Left to the pane, a register
+   wider than the window pushed the panel's own edge off-screen: the white card
+   stopped where the pane did and the rows carried on across the background, so
+   the header row, the card and the page chrome each ended somewhere different.
+   That is one fault reading as three, and it is why every wide table in the app
+   is wrapped in this. Below its container's width it does nothing at all.
+
+   The cost, taken knowingly: this box becomes the scrollport, so the sticky
+   header inside it no longer floats over a vertical scroll. A header that stays
+   above the WRONG columns is worse than one that scrolls away. */
+.tablewrap { overflow-x: auto; max-width: 100%; }
+.tablewrap > table.items { margin: 0; }
+/* The controls of a row-editor opened INSIDE a wide table — its title, its
+   running total, its Save. The editor is a cell of that table, so it is as wide
+   as the table is, and a Save button 1,400px to the right is a Save button
+   nobody finds. These hold the left edge while the columns scroll behind them. */
+.rowedit-bar { position: sticky; left: 0; width: max-content; max-width: 100%; }
+
+/* The muted second line inside a cell — a value and its qualifier sharing one
+   column (a date and what it is dated from, a product and its category). Defined
+   for every items table rather than only the register below, because it is the
+   same device that keeps the dead-stock and clearance grids down to one screen. */
+table.items td .cellsub { font-size: var(--fs-xs); color: var(--muted); line-height: 1.3;
+  overflow-wrap: anywhere; margin-top: 1px; }
 
 table.items.reg { table-layout: fixed; width: 100%; }
 table.items.reg th, table.items.reg td { vertical-align: top; }
@@ -592,10 +787,79 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
   font-size: var(--fs-md); line-height: 1; padding: 4px 6px; border-radius: 5px; }
 .iconbtn:hover { color: var(--brand); background: var(--brand-100); }
 .iconbtn.danger:hover { color: var(--danger); background: var(--danger-bg); }
+/* folds a line's variant rows away. Sized and shaped like the panel minimize
+   control rather than like the buttons beside it, because it does the same job
+   — this is a view control, not another thing you can do to the receipt. */
+.splittoggle { padding: 2px 7px; margin-left: 4px; font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums; color: var(--muted);
+  border-color: var(--line-strong); background: var(--panel-2); }
+.splittoggle:hover { color: var(--brand); border-color: var(--brand);
+  background: var(--brand-50); }
+
 .items-foot { display: flex; gap: var(--sp-4); margin-top: var(--sp-3); padding-top: var(--sp-2);
   border-top: 1px solid var(--line); color: var(--muted); font-size: var(--fs-sm);
   flex-wrap: wrap; align-items: center; }
 .items-foot b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ---------- voice into a form ---------- */
+/* One mic per box, and a Product Master has thirty boxes — so they are invisible
+   until the field is hovered or focused. Kept in the flow's corner rather than
+   beside the input: a mic that takes width would push every field narrower on
+   every master, for a control most fields never use. */
+.mgrid .field.hasmic { position: relative; }
+.fieldmic { position: absolute; right: 5px; top: 22px; z-index: 1;
+  background: transparent; border: none; padding: 3px 4px; border-radius: 5px;
+  font-size: 12px; line-height: 1; opacity: 0; transition: opacity .12s, background .12s; }
+.field.hasmic:hover .fieldmic, .field.hasmic:focus-within .fieldmic { opacity: .75; }
+.fieldmic:hover { opacity: 1 !important; background: var(--brand-50); }
+/* while it is listening it must be visible whatever the pointer is doing */
+.fieldmic.on { opacity: 1 !important; background: var(--danger-bg); animation: micpulse 1.1s ease-in-out infinite; }
+.mgrid .field.hasmic input, .mgrid .field.hasmic textarea { padding-right: 26px; }
+@keyframes micpulse { 50% { opacity: .45 !important; } }
+
+.btn.dictate.on { border-color: var(--danger); color: var(--danger);
+  background: var(--danger-bg); animation: micpulse 1.1s ease-in-out infinite; }
+/* What was heard, under the actions that heard it. Always shown after a
+   dictation — including when nothing matched, which is the case that needs it. */
+.heardstrip { flex: 1 0 100%; order: 9; margin-top: 8px; font-size: var(--fs-sm);
+  color: var(--text-2); background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 6px 10px; }
+.heardstrip b { color: var(--text); font-weight: 600; }
+.heardstrip .hwhy { color: var(--warn); }
+
+/* ---------- notifications ---------- */
+/* The bell sits among the header's pills and buttons, so it is sized like them
+   rather than like an icon dropped in. The count rides on its corner: a badge
+   inside the button would push the glyph off-centre every time the number
+   gained a digit. */
+.bell { position: relative; background: transparent; border: 1px solid var(--on-chrome-line);
+  border-radius: var(--radius-sm); padding: 6px 11px; font-size: var(--fs-md); cursor: pointer;
+  color: var(--on-chrome); line-height: 1.1; flex: 0 0 auto; }
+.bell:hover { background: rgba(255,255,255,.12); border-color: var(--on-chrome); }
+/* unread earns the gold edge rather than a filled panel: a white-filled control
+   up here reads as a card sitting on the bar, not an action on it (see .topbar) */
+.bell.has { border-color: var(--gold-line); }
+.bellcount { position: absolute; top: -7px; right: -7px; min-width: 18px; height: 18px;
+  padding: 0 5px; border-radius: 999px; background: var(--warn); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+  font-variant-numeric: tabular-nums; }
+.bellcount.crit { background: var(--danger); }
+
+.notifpanel { max-width: 720px; width: 92vw; }
+/* A notice is a line of prose with its actions at the end, not a table row: what
+   it says is the point, and the count in it is already in the sentence. */
+.notice { display: flex; gap: 11px; align-items: flex-start; padding: 11px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel);
+  margin-bottom: 8px; }
+.notice.unread { border-left: 3px solid var(--warn); background: var(--panel-2); }
+.notice .ndot { font-size: var(--fs-md); line-height: 1.3; }
+.notice .nbody { flex: 1; min-width: 0; }
+.notice .ntitle { font-weight: 600; }
+.notice.unread .ntitle { color: var(--text); }
+.notice .nsub { font-size: var(--fs-sm); color: var(--text-2); margin-top: 2px; line-height: 1.45; }
+.notice .nmeta { font-size: var(--fs-xs); color: var(--muted); margin-top: 3px; }
+.notice .nacts { display: flex; gap: 6px; flex: 0 0 auto; }
+.notice .nacts .btn { padding: 3px 10px; font-size: var(--fs-xs); }
 
 /* ---------- warnings ---------- */
 .warnbox { background: var(--warn-bg); border: 1px solid var(--warn-line);
@@ -965,3 +1229,125 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .pagehead .pagesub { flex: 1 1 200px; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .pagehead .btn, .pagehead label { flex: 0 0 auto; }
+
+/* ---------- Label Designer ----------
+   Three columns: what a label MAY carry, the label itself, and the properties of
+   whatever is selected. The middle one is the only part that is a picture of a
+   physical object, so it is the only part drawn on a neutral ground — the panels
+   either side are chrome, and chrome that competes with the artwork makes the
+   artwork hard to judge. */
+.ldesign { display: flex; align-items: stretch; overflow: hidden; }
+.lpanel, .lprops { width: 258px; flex: 0 0 258px; background: var(--panel);
+  border-right: 1px solid var(--line); display: flex; flex-direction: column;
+  overflow: hidden; }
+.lprops { border-right: none; border-left: 1px solid var(--line); }
+.lpanel .head, .lprops .head { padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line); }
+.lpanel .head h3, .lprops .head h3 { margin: 0; font-size: var(--fs-sm);
+  text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 700; }
+.lgroup { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+.lgroup h5 { margin: 0 0 6px; font-size: var(--fs-xs); text-transform: uppercase;
+  letter-spacing: .5px; color: var(--brand-500); }
+/* Draggable AND clickable: dragging is how you place a field where you want it,
+   clicking is how you add one without a steady hand. Both are the same gesture
+   to the person — "put this on the label". */
+.lfield { display: flex; align-items: center; gap: var(--sp-2); width: 100%;
+  text-align: left; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 6px 9px; margin-bottom: 4px;
+  cursor: grab; font-size: var(--fs-sm); color: var(--text); }
+.lfield:hover { border-color: var(--brand); background: var(--brand-50); }
+.lfield:active { cursor: grabbing; }
+.lfield .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.lfield .kd { font-size: var(--fs-xs); color: var(--muted); }
+/* already on the label — still addable (two SKU lines is a legitimate design),
+   but it should not look like the untouched ones */
+.lfield.used { background: var(--brand-100); border-color: var(--brand-200); }
+.lfield.used .kd::after { content: ' ✓'; color: var(--ok); }
+
+.lcanvaswrap { flex: 1; min-width: 0; display: flex; flex-direction: column;
+  overflow: hidden; }
+.lcanvas { flex: 1; overflow: auto; padding: var(--sp-5);
+  background: var(--panel-3); display: flex; flex-direction: column;
+  align-items: flex-start; }
+/* The label. White, hard-edged and exactly its millimetre size at the chosen
+   zoom — everything else on this screen is a control, this is the product. */
+.lsurface { position: relative; background: #fff; overflow: hidden;
+  box-shadow: var(--shadow-2); flex: 0 0 auto; user-select: none; }
+.lsurface .lqr svg { width: 100%; height: 100%; display: block; }
+/* the name of an attribute this product happens not to have. Visible while
+   designing so the box can still be positioned, absent from every print. */
+.lph { color: #b9aca4; font-style: italic; }
+.lhandle { position: absolute; right: -4px; bottom: -4px; width: 9px; height: 9px;
+  background: var(--brand); border: 1px solid #fff; border-radius: 2px;
+  cursor: nwse-resize; }
+.llock { position: absolute; right: -6px; top: -8px; font-size: 10px; }
+/* a box that has stopped following the product. Small, permanent, and on the
+   canvas rather than in a panel — the mistake it marks is invisible otherwise. */
+.lfixed { position: absolute; right: -7px; top: -9px; font-size: 10px;
+  color: var(--brand); }
+/* Typing on the label itself. Sized and styled from the element it replaces, so
+   the words are laid out as they will print while they are being typed. */
+.ltextin { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0;
+  margin: 0; border: none; border-radius: 0; background: #fffbe9;
+  outline: 1.5px solid var(--brand); box-shadow: none; }
+
+/* ---------- the label's own size ----------
+   Presets and two millimetre boxes, in the toolbar where the design is, because
+   a designer who cannot find the size types the size into the name. */
+.ltoolbar { padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line);
+  background: var(--panel); row-gap: var(--sp-2); }
+.lsize { display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto; }
+.lsize > select { width: 210px; }
+.lsize .mm { display: flex; align-items: center; gap: 4px; }
+.lsize .mm input { width: 62px; }
+.lsize .mm span { font-size: var(--fs-xs); color: var(--muted); }
+.lsize .mm .btn { padding: 4px 8px; }
+.lsize > .chk { margin: 0; font-size: var(--fs-xs); color: var(--text-2);
+  white-space: nowrap; }
+/* stacked, for the properties panel, where there is no room for a row */
+.lsize.col { display: block; }
+.lsize.col > select, .lsize.col .mm { width: 100%; margin-bottom: 5px; }
+.lsize.col .mm input { flex: 1; min-width: 0; width: auto; }
+
+.lprops .lform { padding: var(--sp-3) var(--sp-4); overflow-y: auto; flex: 1; }
+.lform .row2 { display: flex; gap: var(--sp-2); }
+.lform .row2 > .field { flex: 1; min-width: 0; }
+.lform .chk { margin: 6px 0; }
+.lalign { margin: var(--sp-2) 0 var(--sp-3); }
+.lalign > div { display: flex; gap: 4px; margin-top: 4px; }
+.lalign .btn { padding: 4px 8px; font-size: var(--fs-md); line-height: 1; }
+
+/* ---------- template gallery ---------- */
+.tplgrid { display: grid; gap: var(--sp-4);
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.tplcard { display: flex; gap: var(--sp-3); background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: var(--sp-3); box-shadow: var(--shadow-1); }
+.tplcard.off { opacity: .62; }
+.tplthumb { flex: 0 0 auto; display: flex; align-items: flex-start; }
+.tplbody { flex: 1; min-width: 0; }
+.tplbody .nm { font-weight: 700; font-size: var(--fs-md); display: flex;
+  align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 3px; }
+.tplacts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: var(--sp-3); }
+.tplacts .btn { padding: 3px 9px; font-size: var(--fs-xs); }
+
+/* ---------- QR / Label Printing ----------
+   The list and the proof side by side: what will print, and what it will look
+   like. The proof is sticky because the selection is scrolled through and the
+   question it answers ("is this the right label?") does not go away. */
+.lprintwrap { display: grid; grid-template-columns: minmax(0, 1fr) 330px;
+  gap: var(--sp-5); padding: var(--sp-5); align-items: start; }
+@media (max-width: 1180px) { .lprintwrap { grid-template-columns: minmax(0, 1fr); } }
+.lprintside { position: sticky; top: var(--sp-5); }
+/* The proof scales to this box (see proofPx), so it never needs to scroll — and
+   must not: a label with its edges cut off is the one thing a proof cannot be. */
+.lproof { display: flex; justify-content: center; padding: var(--sp-3);
+  background: var(--panel-3); border-radius: var(--radius); overflow: hidden; }
+/* the physical size, stated on the panel that shows a scaled picture of it */
+.proofsize { float: right; text-transform: none; letter-spacing: 0; font-weight: 600;
+  font-size: var(--fs-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+table.items tbody tr.sel { background: var(--brand-100); }
+.infobox { background: var(--info-bg); border: 1px solid var(--info-line);
+  border-radius: var(--radius); padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-sm); color: var(--text-2); line-height: var(--lh); }

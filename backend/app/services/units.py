@@ -29,15 +29,37 @@ import datetime as dt
 from .. import models
 
 # a "piece" has to be a thing you can hold. Anything measured continuously is not.
-COUNTABLE_UOM = {"PCS", "PC", "NOS", "NO", "SET", "SETS", "BOX", "PAIR", "PAIRS", "EA"}
+#
+# The fallback list, used when no session is to hand. The real answer is the
+# `countable` flag on the unit-type master (services/unit_types.py), because that
+# is where a warehouse adds its own units — and a unit somebody defined last week
+# must not be refused a label by a set literal written last year.
+COUNTABLE_UOM = {"PCS", "PC", "NOS", "NO", "SET", "SETS", "BOX", "PAIR", "PAIRS",
+                 "EA", "EACH", "DOZEN", "DOZ", "HALF-DOZEN", "BUNDLE", "UNIT"}
 MAX_PER_RECEIPT = 500
 
 
-def can_serialise(uom, qty):
-    """(ok, reason) — whether this receipt line becomes per-piece identities."""
+def is_countable(uom, db=None):
+    """Whether goods in this unit are things you can hold and tag."""
+    u = (uom or "PCS").strip().upper()
+    if db is not None:
+        from . import unit_types
+        t = unit_types.match_uom(db, u)
+        if t is not None:
+            return bool(t.countable)
+    return u in COUNTABLE_UOM
+
+
+def can_serialise(uom, qty, db=None):
+    """(ok, reason) — whether this receipt line becomes per-piece identities.
+
+    `qty` is already in the product's OWN unit — six pairs, not twelve pieces —
+    because the conversion happens before anything reaches here. One identity per
+    stock unit is what makes the count of QR codes equal the count of things a
+    picker can pick up."""
     q = float(qty or 0)
     u = (uom or "PCS").strip().upper()
-    if u not in COUNTABLE_UOM:
+    if not is_countable(u, db):
         return False, f"{u} is measured, not counted — no per-piece codes"
     if q <= 0:
         return False, "nothing received"
@@ -65,7 +87,7 @@ def unit_code(product, seq):
 def create_for_receipt(db, product, qty, purchase=None, bundle=None):
     """Mint one identity per piece received. Returns the new ProductUnits ([] when
     the line isn't serialisable — see can_serialise)."""
-    ok, _ = can_serialise(product.uom, qty)
+    ok, _ = can_serialise(product.uom, qty, db)
     if not ok:
         return []
     seq = next_seq(db, product)
@@ -122,7 +144,7 @@ def backfill(db, product, purchase=None):
     have = db.query(models.ProductUnit).filter(
         models.ProductUnit.product_id == product.id).count()
     want = float(product.stock_qty or 0)
-    ok, reason = can_serialise(product.uom, want)
+    ok, reason = can_serialise(product.uom, want, db)
     if not ok:
         return [], reason
     missing = int(round(want)) - have

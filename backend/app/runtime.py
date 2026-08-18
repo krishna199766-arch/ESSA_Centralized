@@ -16,6 +16,12 @@ _state = {
     "anthropic_api_key": config.ANTHROPIC_API_KEY,
     "vision_model": config.VISION_MODEL,
     "provider_preference": config.EXTRACTION_PROVIDER,   # auto | claude_vision | tesseract
+    # The dead-stock discount ladder and the assumptions the cash impact is
+    # worked out on — a commercial policy, not a constant, so it is set from the
+    # screen and kept here rather than compiled into the code that applies it.
+    # Empty until someone changes it: services/dead_stock.py holds the defaults,
+    # and a stored blank must not shadow a default that is later improved.
+    "dead_stock_rules": {},
 }
 
 

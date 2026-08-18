@@ -25,11 +25,32 @@ WRITABLE = [
     "stock_holding_days", "additional_margin",
     "bundle", "boxes", "qty", "amount",
     "inv_no", "inv_date",
-    "paid_topay", "freight_applicable", "freight_amount", "item",
+    "paid_topay", "freight_applicable", "freight_amount", "freight_total",
+    "freight_charges", "item",
 ]
 _NUMERIC = {"agent_commission", "stock_holding_days", "additional_margin",
-            "bundle", "boxes", "qty", "amount", "freight_amount"}
+            "bundle", "boxes", "qty", "amount", "freight_amount", "freight_total"}
 _BOOLEAN = {"freight_applicable"}
+# The named charge lines under the freight — {"H.C.": 10, "S.T. Charge": 20}. A
+# map rather than a column each, because every transporter prints a different set
+# of them (see LREntry.freight_total).
+_JSON = {"freight_charges"}
+# An LR prints "TO PAY"; a register page writes "ToPay"; the form offers "TOPAY".
+# They are one fact, and the reports that ask "what do we owe the transporters"
+# filter on it exactly — so a consignment written with a space in it silently
+# vanished from Transport Pending Bills. Normalised here, at the single funnel
+# every LR write passes through, rather than at each place that reads it.
+_PAID_TOPAY = {"TOPAY": "TOPAY", "TO PAY": "TOPAY", "TO-PAY": "TOPAY",
+               "PAY": "TOPAY", "TO_PAY": "TOPAY",
+               "PAID": "PAID", "PREPAID": "PAID", "PAID BY SUPPLIER": "PAID",
+               "NO": "NO", "NONE": "NO", "NIL": "NO", "-": "NO"}
+
+
+def normalise_paid_topay(value):
+    """"To Pay" / "TOPAY" / "to-pay" → TOPAY. Anything unrecognised is kept
+    verbatim — a word nobody anticipated is still what the page said."""
+    key = " ".join(str(value or "").upper().split())
+    return _PAID_TOPAY.get(key, value)
 # Stored as ISO text so the range filter below (`recv_date >= date_from`, a plain
 # SQL string comparison) is arithmetic rather than alphabetical. With "31/07/2026"
 # in the column, "01/08/2026" sorts before it and a July-to-August search quietly
@@ -62,6 +83,11 @@ def _coerce(field, value):
         return None
     if field in _BOOLEAN:
         return value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
+    if field in _JSON:
+        # only ever a {name: amount} map; anything else is a client sending the
+        # wrong shape and is dropped rather than stored to break a later read
+        return {str(k): v for k, v in value.items() if v not in (None, "")} \
+            if isinstance(value, dict) and value else None
     if isinstance(value, str):
         value = value.strip()
     if value == "":
@@ -75,6 +101,8 @@ def _coerce(field, value):
         # readable → ISO; unreadable → kept verbatim, because a date this cannot
         # parse is still what the register page said
         return dates.normalise(value)
+    if field == "paid_topay":
+        return normalise_paid_topay(value)
     return value
 
 
@@ -87,8 +115,10 @@ def _apply(entry, data, db, fields=WRITABLE):
     # register page carries the figure and no tick, and so does a PATCH that
     # settles the freight from the grid. Without this the form would show the
     # amount greyed out behind an unticked box that contradicts it.
-    if "freight_amount" in data and "freight_applicable" not in data:
-        entry.freight_applicable = entry.freight_amount is not None
+    if ("freight_amount" in data or "freight_total" in data) \
+            and "freight_applicable" not in data:
+        entry.freight_applicable = (entry.freight_amount is not None
+                                    or entry.freight_total is not None)
     for field, kind in _LEARNS.items():
         if data.get(field):
             masters_svc.get_or_create_option(db, kind, str(data[field]).strip())
@@ -168,6 +198,14 @@ def save(body: SaveLR, db: Session = Depends(get_db)):
             seen.setdefault(key, []).append(r)
         entry = models.LREntry(document_id=body.document_id, entry_source="import")
         _apply(entry, r, db)
+        # A translated row keeps the page's own words. Handled here rather than
+        # through WRITABLE because these two are provenance, not data entry: the
+        # import records them and the edit form must never be able to rewrite what
+        # the register said.
+        orig = r.get("original_values")
+        if isinstance(orig, dict) and orig:
+            entry.original_values = {k: v for k, v in orig.items() if v}
+            entry.source_language = (r.get("source_language") or "").strip() or None
         entry.lr_entry_no = lr_svc.next_entry_no(db, issued)
         issued.append(entry.lr_entry_no)
         # the office books the entry the day the page is imported; the register's
@@ -234,6 +272,11 @@ def _row_out(e: models.LREntry):
         "document_id": e.document_id, "received_by": e.received_by,
         "matched": bool(e.matched), "invoice_document_id": e.invoice_document_id,
         "mismatches": e.mismatches or [],
+        # set only when the page was NOT in English — the grid shows a badge and
+        # the original text behind it, so a translated reading is never presented
+        # as if the register had been written in English
+        "source_language": e.source_language,
+        "original_values": e.original_values or {},
         "freight_applicable": bool(e.freight_applicable),
         "attachments": [_att_out(a) for a in e.attachments],
     })
@@ -308,7 +351,10 @@ def search(q: str = "", supplier: str = "", transport: str = "", received: str =
     return {"count": total, "shown": len(rows),
             "totals": {"qty": _sum("qty"), "bundle": _sum("bundle"),
                        "boxes": _sum("boxes"), "amount": _sum("amount"),
-                       "freight_amount": _sum("freight_amount")},
+                       "freight_amount": _sum("freight_amount"),
+                       # what the transporters are owed — freight plus the charge
+                       # lines under it, which is the figure a payment run needs
+                       "freight_total": _sum("freight_total")},
             "rows": [_row_out(e) for e in rows]}
 
 

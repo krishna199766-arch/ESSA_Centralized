@@ -8,8 +8,10 @@ from .database import Base, engine
 from . import models  # noqa: F401  (register tables)
 from .routers import (documents, suppliers, purchases, inventory, outward,
                       payments, returns, reports, settings, auth, masters, lr,
-                      bundles, dashboard)
+                      bundles, dashboard, master_data, labels, dead_stock,
+                      notifications, voice, users)
 from .extraction.engine import provider_status
+from .security import auth_middleware
 from .config import COMPANY_NAME, COMPANY_GSTIN
 from . import runtime
 
@@ -28,7 +30,15 @@ def _migrate():
             "product_type": "VARCHAR", "material": "VARCHAR", "design_no": "VARCHAR",
             "sale_price": "FLOAT", "sale_discount_pct": "FLOAT", "detailed": "BOOLEAN",
             "detailed_at": "DATETIME", "detailed_by": "VARCHAR",
-            "category": "VARCHAR", "category_section": "VARCHAR"}
+            "category": "VARCHAR", "category_section": "VARCHAR",
+            # the unit this product is counted in, and how many individual items
+            # are in one of it (piece = 1, pair = 2). Left NULL on existing rows
+            # on purpose: a product received before unit types existed keeps
+            # counting the way it did until a receipt pins it — see
+            # services/inventory.line_unit_type.
+            "unit_type": "VARCHAR", "pieces_per_unit": "FLOAT",
+            # the rest of the stock master's attribute set
+            "brand": "VARCHAR", "style": "VARCHAR", "sleeve": "VARCHAR"}
     missing = {k: v for k, v in adds.items() if k not in have}
     if missing:
         with engine.begin() as conn:
@@ -58,6 +68,11 @@ def _migrate():
             "auto_transfer_location": "VARCHAR", "purchase_manager": "VARCHAR",
             "stock_holding_days": "FLOAT", "additional_margin": "FLOAT",
             "freight_applicable": "BOOLEAN",
+            # a page read in Tamil, and what it actually said
+            "source_language": "VARCHAR", "original_values": "JSON",
+            # the transporter's G. TOTAL and the charge lines under it — freight
+            # alone was never the whole bill
+            "freight_total": "FLOAT", "freight_charges": "JSON",
         }
         # Fields Essa never used — no consignment ever carried one, so they were
         # ten empty columns in every view. Dropped rather than left unmapped:
@@ -100,18 +115,27 @@ def _migrate():
                 conn.execute(text("ALTER TABLE lr_entries ADD COLUMN received_by VARCHAR"))
                 if "purchaser" in lcols:
                     conn.execute(text("UPDATE lr_entries SET received_by = purchaser"))
-    # purchase_lines: category chosen at GRN time
+    # purchase_lines: category and unit type chosen at GRN time
     if "purchase_lines" in insp.get_table_names():
         plcols = {c["name"] for c in insp.get_columns("purchase_lines")}
-        if "category" not in plcols:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE purchase_lines ADD COLUMN category VARCHAR"))
+        for name, typ in (("category", "VARCHAR"), ("unit_type", "VARCHAR"),
+                          # retail pricing carried from the invoice review
+                          ("mrp", "FLOAT"), ("sale_price", "FLOAT"),
+                          ("sale_discount_pct", "FLOAT"),
+                          # the supplier's size cell, often the whole size run
+                          ("size", "VARCHAR")):
+            if name not in plcols:
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        f"ALTER TABLE purchase_lines ADD COLUMN {name} {typ}"))
     # purchase_line_splits: grew from size-only to the full attribute breakdown
     if "purchase_line_splits" in insp.get_table_names():
         scols = {c["name"] for c in insp.get_columns("purchase_line_splits")}
         sadds = {"color": "VARCHAR", "material": "VARCHAR", "pattern": "VARCHAR",
                  "fit": "VARCHAR", "product_type": "VARCHAR", "design_no": "VARCHAR",
-                 "sale_discount_pct": "FLOAT", "category": "VARCHAR"}
+                 "sale_discount_pct": "FLOAT", "category": "VARCHAR",
+                 "unit_type": "VARCHAR",
+                 "brand": "VARCHAR", "style": "VARCHAR", "sleeve": "VARCHAR"}
         smissing = {k: v for k, v in sadds.items() if k not in scols}
         if smissing:
             with engine.begin() as conn:
@@ -153,6 +177,20 @@ def _migrate():
 
 _migrate()
 
+# ---- accounts ----
+# Deliberately NOT inside the try/except below. Every other seed there is a
+# convenience, and an install that starts without its category list is merely
+# inconvenient; an install that starts with an empty users table cannot be
+# signed into at all, and swallowing that would present it as a login screen
+# that rejects every correct password. If this fails, the server should fail.
+from .database import SessionLocal as _Session
+from .services import users as _users
+_udb = _Session()
+try:
+    _users.seed(_udb)
+finally:
+    _udb.close()
+
 # load the product-category master (from the GRN Excel) on first run, and heal
 # any LR row that was linked to an invoice before the cross-fill was symmetric
 # (linked, but Inv No / Inv Date left blank)
@@ -160,9 +198,17 @@ try:
     from .database import SessionLocal
     from .services import masters as _masters
     from .services import lr_link as _lr_link
+    from .services import unit_types as _unit_types
     _db = SessionLocal()
     _n = _masters.import_categories(_db)
     _masters.seed_options(_db)
+    # dozens-to-pieces needs a unit master to convert against, and the warehouse
+    # should not have to build one before the first receipt
+    _unit_types.seed(_db)
+    # a warehouse with no label template cannot print a sticker, and designing
+    # one before the first receipt is a wall in front of the first garment
+    from .services import label_designer as _label_designer
+    _label_designer.ensure_default(_db)
     _lr_link.backfill_linked_rows(_db)
     _db.close()
 except Exception:
@@ -170,6 +216,18 @@ except Exception:
 
 app = FastAPI(title="Essa Document Intake", version="0.1.0",
               description="Trainable invoice-to-data extraction for Essa Garments")
+
+# ---- who may call what ----
+# One middleware rather than a dependency on each route — see security.POLICY
+# for the table it reads, and why it is a table.
+#
+# Order is load-bearing and reads backwards: Starlette runs the LAST-added
+# middleware first, so CORS is added after this one in order to sit outside it.
+# That is what makes a rejection usable — a 401 raised inside CORS still comes
+# back with the headers the browser needs to hand the body to the app, and a
+# preflight OPTIONS is answered by CORS before it ever reaches an auth check it
+# carries no token to pass.
+app.middleware("http")(auth_middleware)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
@@ -185,9 +243,15 @@ app.include_router(reports.router)
 app.include_router(settings.router)
 app.include_router(auth.router)
 app.include_router(masters.router)
+app.include_router(master_data.router)
 app.include_router(lr.router)
 app.include_router(bundles.router)
 app.include_router(dashboard.router)
+app.include_router(labels.router)
+app.include_router(dead_stock.router)
+app.include_router(notifications.router)
+app.include_router(voice.router)
+app.include_router(users.router)
 
 
 # ---- the retail shop (POS) at /pos ----

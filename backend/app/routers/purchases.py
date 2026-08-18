@@ -7,6 +7,7 @@ from .. import models
 from ..services import inventory as inv
 from ..services import barcode_svc
 from ..services import shortages as short_svc
+from ..services import size_split
 
 router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 
@@ -40,15 +41,46 @@ class ScanCode(BaseModel):
 class LineEdit(BaseModel):
     """What can be set on a GRN line before posting. `category` decides the
     product's category master mapping instead of leaving it to auto-classification.
-    Empty string clears it (back to auto)."""
+    `unit_type` decides what one of these IS — piece, pair, dozen — and therefore
+    how a billed dozen converts into stock and how many QR labels it produces.
+    Empty string clears either (back to auto).
+
+    The three retail fields are the pricing carried off the invoice review — the
+    MRP the supplier printed and the shelf price someone set against it. Editable
+    here so a mistyped price is a correction rather than an unpost."""
     category: Optional[str] = None
+    unit_type: Optional[str] = None
+    mrp: Optional[float] = None
+    sale_price: Optional[float] = None
+    sale_discount_pct: Optional[float] = None
 
 
-def _split_out(s: models.PurchaseLineSplit):
+def _unit_view(db, line, split=None, qty=None, rate=None):
+    """What this row's billed quantity becomes, and what decided it.
+
+    Returned on every line so the receiving screen can show the arithmetic before
+    anyone posts it — "1 DOZ → 12 pcs → 6 PAIR · 6 QR label(s)" — rather than
+    discovering after the fact that a dozen became one."""
+    from ..services import unit_types as ut
+    product = (split.product if split is not None else
+               (line.product if not line.is_split else None))
+    code, _, why = ut.resolve(
+        db, explicit=(split.unit_type if split is not None else None) or line.unit_type,
+        description=line.description,
+        category=(split.category if split is not None else None) or line.category,
+        uom=line.uom, product=product)
+    conv = ut.convert(db, qty, line.uom, code,
+                      rate if rate is not None else line.rate)
+    conv["why"] = why
+    conv["locked"] = bool(product is not None and product.unit_type)
+    return conv
+
+
+def _split_out(s: models.PurchaseLineSplit, db: Session = None):
     p = s.product
     d = {a: getattr(s, a) for a in inv.SPLIT_ATTRS}
     d.update({
-        "id": s.id, "category": s.category,
+        "id": s.id, "category": s.category, "unit_type": s.unit_type,
         "qty": s.qty, "rate": s.effective_rate, "own_rate": s.rate,
         "mrp": s.mrp, "sale_price": s.sale_price, "sale_discount_pct": s.sale_discount_pct,
         "amount": s.amount, "code": s.code, "label": s.variant_label,
@@ -61,6 +93,8 @@ def _split_out(s: models.PurchaseLineSplit):
         # where fit, pattern, material and pricing come from someone holding it.
         "product_detailed": bool(p.detailed) if p else None,
     })
+    if db is not None:
+        d["unit"] = _unit_view(db, s.line, s, qty=s.qty, rate=s.effective_rate)
     return d
 
 
@@ -84,7 +118,20 @@ def _line_out(l: models.PurchaseLine, db: Session = None, suggest: bool = True):
         "id": l.id, "product_id": l.product_id, "barcode": l.barcode,
         "description": l.description, "hsn": l.hsn, "qty": l.qty, "uom": l.uom,
         "rate": l.rate, "amount": l.amount, "is_new_product": l.is_new_product,
+        # retail, carried from the invoice review and applied to the product at
+        # post — a breakdown row overrides it per variant
+        "mrp": l.mrp, "sale_price": l.sale_price,
+        "sale_discount_pct": l.sale_discount_pct,
+        "size": l.size,
+        # "30:2, 32:4, 34:4, 36:2" read back as rows. The supplier already
+        # counted the mix; offering it here means nobody re-keys a count that has
+        # been done, and each size still becomes its own product with its own SKU
+        # and QR. Offered, never applied on its own — see services/size_split.py.
+        "size_breakdown": size_split.suggest(l) if suggest else None,
         "category": l.category, "category_suggestion": suggestion,
+        # what one of these is, and what the billed quantity becomes because of it
+        "unit_type": l.unit_type,
+        "unit": _unit_view(db, l, qty=short["received_qty"]) if db is not None else None,
         "product_category": l.product.category if l.product else None,
         "product_sku": l.product.sku if l.product else None,
         "product_detailed": bool(l.product.detailed) if l.product else None,
@@ -96,7 +143,7 @@ def _line_out(l: models.PurchaseLine, db: Session = None, suggest: bool = True):
         # the QR carries the whole product record; the code itself is the identity
         "qr_code": (l.product.barcode or l.product.sku) if l.product else None,
         "stock_after": l.product.stock_qty if l.product else None,
-        "splits": [_split_out(s) for s in l.splits],
+        "splits": [_split_out(s, db) for s in l.splits],
         "split_qty": st["split_qty"], "split_remainder": st["remainder"],
         "split_balanced": st["balanced"],
         # --- what actually arrived ---
@@ -227,7 +274,11 @@ def edit_line(line_id: int, body: LineEdit, db: Session = Depends(get_db)):
 
     The mapping is also *learned*: this is the one moment someone states what a
     supplier's wording means, so the same wording maps itself on the next invoice
-    instead of being asked again. Clearing the category forgets it."""
+    instead of being asked again. Clearing the category forgets it.
+
+    `unit_type` works the same way and for the same reason. Saying once that a
+    pillow cover is a PAIR is what turns the next "1 DOZ" into six pairs and six
+    labels without anyone being asked again."""
     line = _draft_line(line_id, db)
     fields = body.model_dump(exclude_unset=True)
     if "category" in fields:
@@ -238,6 +289,36 @@ def edit_line(line_id: int, body: LineEdit, db: Session = Depends(get_db)):
         line.category = name or None
         from ..services import categorize
         categorize.learn_alias(db, line.description, name or None)
+    if "unit_type" in fields:
+        from ..services import unit_types as ut
+        code = (fields["unit_type"] or "").strip().upper()
+        if code and not ut.get(db, code):
+            raise HTTPException(400, f"“{code}” is not a unit type — add it in Masters")
+        line.unit_type = code or None
+        # a product already counted in something is not re-counted by an edit
+        # here; say so rather than accepting a setting that will be ignored
+        if code and line.product is not None and line.product.unit_type \
+                and line.product.unit_type != code:
+            raise HTTPException(400,
+                f"{line.product.sku or 'this product'} is already counted in "
+                f"{line.product.unit_type} — changing the unit would restate stock "
+                f"that is already on the shelf")
+        if code:
+            ut.learn(db, line.description, code)
+    # MRP − sale discount % = sell price, kept in step here too, so the figure a
+    # GRN carries is the same one the review screen would have computed
+    for fld in ("mrp", "sale_price", "sale_discount_pct"):
+        if fld in fields:
+            setattr(line, fld, fields[fld])
+    if any(k in fields for k in ("mrp", "sale_discount_pct", "sale_price")):
+        mrp, pct, price = line.mrp, line.sale_discount_pct, line.sale_price
+        if mrp:
+            if "sale_discount_pct" in fields and pct is not None:
+                line.sale_price = round(mrp * (1 - pct / 100), 2)
+            elif "sale_price" in fields and price is not None:
+                line.sale_discount_pct = round((1 - price / mrp) * 100, 2)
+            elif "mrp" in fields and pct is not None:
+                line.sale_price = round(mrp * (1 - pct / 100), 2)
     db.commit()
     db.refresh(line)
     return _line_out(line, db)

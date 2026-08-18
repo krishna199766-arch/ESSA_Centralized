@@ -45,9 +45,9 @@ from .. import models
 # transcribed differently, not office edits.
 LR_ALL_FIELDS = ["recv_date", "transport", "bundle", "lr_no", "lr_date",
                  "supplier_name", "inv_no", "inv_date", "qty", "amount",
-                 "paid_topay", "freight_amount", "item",
+                 "paid_topay", "freight_amount", "freight_total", "item",
                  "lr_mode", "boxes", "agent"]
-_LR_NUMERIC = {"bundle", "qty", "amount", "freight_amount", "boxes"}
+_LR_NUMERIC = {"bundle", "qty", "amount", "freight_amount", "freight_total", "boxes"}
 
 
 def _norm(v):

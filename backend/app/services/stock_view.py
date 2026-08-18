@@ -28,10 +28,31 @@ from . import barcode_svc
 # (same list as inventory.SPLIT_ATTRS), in the order a person reads them off a
 # garment. `label` is what the screens print, so the wording is set once here.
 ATTRIBUTES = [
-    ("size", "Size"), ("color", "Colour"), ("material", "Material"),
-    ("pattern", "Pattern"), ("fit", "Fit"), ("product_type", "Type"),
+    ("brand", "Brand"), ("size", "Size"), ("color", "Colour"),
+    ("material", "Material"), ("pattern", "Pattern"), ("fit", "Fit"),
+    ("style", "Style"), ("sleeve", "Sleeve"), ("product_type", "Type"),
     ("design_no", "Design No"),
 ]
+
+
+def display_name(product) -> str:
+    """What this product is CALLED, everywhere one is named.
+
+    The category, not the invoice wording. `description` is whatever the supplier
+    printed on their bill — "TISSOT Lycra", "IND SMART LYCRA" — which is a style
+    or a mill name and tells nobody in the warehouse, the shop or at the till
+    what the article actually is. The category is the answer to that question:
+    LADIES-SHORTS, KIDS-KURTA SET. It is also the one field somebody deliberately
+    SETS, on the GRN line, before the product is created.
+
+    The supplier's wording is not thrown away — it stays on `description`, is
+    still returned beside this, and is still what a re-buy is matched on. It just
+    stops being the name. A product with no category falls back to it, because a
+    row with no name at all is worse than a row named after a mill."""
+    if not product:
+        return ""
+    return (getattr(product, "category", None) or "").strip() \
+        or (getattr(product, "description", None) or "")
 
 
 def _batch_label(purchase, bundle_code=None):
@@ -135,7 +156,10 @@ def product_card(db, product, purchase=None, with_batches=True):
         "qr_png_url": f"/api/inventory/products/{product.id}/qr.png",
         "label_url": f"/api/inventory/products/{product.id}/label",
         # --- what it is ---
-        "name": product.description,
+        # `name` is what it is CALLED (the category); `description` is what the
+        # supplier called it. Both travel, so a screen can lead with the one and
+        # still show the other underneath — see display_name.
+        "name": display_name(product),
         "description": product.description,
         "hsn": product.hsn,
         "uom": product.uom,

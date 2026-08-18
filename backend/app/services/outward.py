@@ -78,7 +78,8 @@ def validate_stock(db, outward):
     for l in outward.lines:
         prod = db.get(models.Product, l.product_id)
         if prod and (l.qty or 0) > (prod.stock_qty or 0):
-            problems.append({"product": prod.description, "requested": l.qty,
+            from . import stock_view
+            problems.append({"product": stock_view.display_name(prod), "requested": l.qty,
                              "on_hand": prod.stock_qty})
     return problems
 

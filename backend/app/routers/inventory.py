@@ -1,3 +1,5 @@
+import os
+import json
 import datetime as dt
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
@@ -6,8 +8,10 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models
+from ..config import DATA_DIR
 from ..services import inventory as inv
 from ..services import barcode_svc
+from ..services import stock_view
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
@@ -18,7 +22,11 @@ class StockAdjust(BaseModel):
 
 
 class ProductDetail(BaseModel):
-    """Physical-inspection attributes submitted from the warehouse mobile app."""
+    """Physical-inspection attributes submitted from the warehouse mobile app.
+
+    The full attribute set Essa keeps against its stock — the columns of the
+    stock master (Attributes Reference.xlsx): brand, colour, pattern, style, fit,
+    sleeve, type, material, size."""
     color: Optional[str] = None
     size: Optional[str] = None
     pattern: Optional[str] = None
@@ -26,24 +34,67 @@ class ProductDetail(BaseModel):
     product_type: Optional[str] = None
     material: Optional[str] = None
     design_no: Optional[str] = None
+    brand: Optional[str] = None
+    style: Optional[str] = None
+    sleeve: Optional[str] = None
     mrp: Optional[float] = None
     sale_price: Optional[float] = None
     sale_discount_pct: Optional[float] = None
     detailed_by: Optional[str] = None
 
 
-# sensible starter option sets for the mobile dropdowns (garment/textile domain).
-# The app also allows free-text, and we merge in any values already in the DB.
-BASE_OPTIONS = {
-    "color": ["White", "Black", "Grey", "Kavi", "Medium Kavi", "Light Kavi", "Marvel Grey",
-              "Yellow", "Orange", "Blue", "Green", "Red", "Cream", "Maroon", "Multi"],
-    "size": ["S", "M", "L", "XL", "XXL", "XXXL", "Free Size", "127 X 200", "127 X 225"],
-    "pattern": ["Plain", "Printed", "Checked", "Striped", "Embroidered", "Dobby", "Jacquard", "Border"],
-    "fit": ["Regular", "Slim", "Loose", "Comfort"],
-    "product_type": ["Dhoti", "Shirt", "Kurti", "Suit", "Panel", "Fabric", "Saree", "Toy", "Other"],
-    "material": ["Cotton", "Silk", "Rayon", "Polyester", "Linen", "Chanderi", "Blend", "Balatan"],
-    "uom": ["PCS", "MTR", "SET", "BOX"],
+# The attribute vocabularies, read from Essa's own masters rather than invented
+# here. data/product_attributes.json is generated from Attributes Reference.xlsx
+# ("Quanto Report", 13,851 stock rows) and holds the real values in use — 300
+# brands, 88 colours — ordered by how often each occurs, with the placeholders
+# (Unspecified, No Color) last.
+#
+# STYLE comes from data/style_master.json instead: the full 264-entry list with
+# its ERP codes, of which the stock rows only exercise 78. A vocabulary is a list
+# of what MAY be recorded, not a summary of what has been, so the master wins —
+# but it is ordered by use, so the 78 anyone actually reaches for are at the top
+# and the other 179 are below rather than in the way. The names are kept in the
+# master's own casing, because that string is what gets stored on the product and
+# printed on its label, and it has to match the ERP it came from.
+#
+# It was a hand-written starter list before: eight fits that were not Essa's
+# eight, four "patterns" where the master has twelve, and no brand, style or
+# sleeve at all. A dropdown that does not offer the value someone is looking at
+# teaches them to type it by hand, and typed-by-hand is how "REGULAR FIT",
+# "Regular fit" and "Reg. Fit" become three fits.
+#
+# Free text is still accepted everywhere, and whatever is already in the database
+# is merged in below — the list guides, it does not gate.
+_ATTR_FILE = os.path.join(DATA_DIR, "product_attributes.json")
+_FALLBACK_OPTIONS = {
+    "color": ["White", "Black", "Grey", "Blue", "Green", "Red", "Cream", "Maroon", "Multi"],
+    "size": ["S", "M", "L", "XL", "XXL", "Free Size"],
+    "pattern": ["Plain", "Print", "Check", "Stripes"],
+    "fit": ["Regular Fit", "Slim Fit", "Narrow Fit", "Ankle Fit"],
+    "product_type": [], "material": ["Cotton", "Hosiery", "Synthetic", "Jean", "Lycra"],
+    "brand": ["Essa"], "style": [], "sleeve": ["Full", "Half", "Sleeveless", "3/4th"],
 }
+#: uom is ours, not the master's — it is the unit-type master's business
+_UOM_OPTIONS = ["PCS", "PAIR", "SET", "BOX", "DOZEN", "MTR", "KG"]
+
+
+def _base_options():
+    """The master's vocabularies, or a small fallback if the file is missing."""
+    opts = {k: list(v) for k, v in _FALLBACK_OPTIONS.items()}
+    try:
+        with open(_ATTR_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for key, vals in data.items():
+            if key.startswith("_") or key == "products" or not isinstance(vals, list):
+                continue
+            opts[key] = [str(v) for v in vals if str(v).strip()]
+    except (OSError, ValueError):
+        pass                      # ship without the master rather than 500
+    opts["uom"] = list(_UOM_OPTIONS)
+    return opts
+
+
+BASE_OPTIONS = _base_options()
 
 
 def _product_out(p: models.Product, ctx=None):
@@ -64,13 +115,20 @@ def _product_out(p: models.Product, ctx=None):
 
 def _product_fields(p: models.Product):
     return {
-        "id": p.id, "sku": p.sku, "barcode": p.barcode, "description": p.description,
+        # `name` is what it is CALLED (its category), `description` what the
+        # supplier's bill called it — see stock_view.display_name
+        "id": p.id, "sku": p.sku, "barcode": p.barcode,
+        "name": stock_view.display_name(p), "description": p.description,
         "hsn": p.hsn, "uom": p.uom, "mrp": p.mrp, "stock_qty": p.stock_qty,
+        # what one of these is. `stock_qty` is a count of THESE — six pairs, not
+        # twelve pillow covers — so a screen showing the number must show the unit
+        "unit_type": p.unit_type, "pieces_per_unit": p.pieces_per_unit,
         "avg_cost": p.avg_cost, "last_rate": p.last_rate, "stock_value": p.stock_value,
         "supplier_name": p.primary_supplier.name if p.primary_supplier else None,
-        # physical-detail attributes
+        # physical-detail attributes — the stock master's full set
         "color": p.color, "size": p.size, "pattern": p.pattern, "fit": p.fit,
         "product_type": p.product_type, "material": p.material, "design_no": p.design_no,
+        "brand": p.brand, "style": p.style, "sleeve": p.sleeve,
         "sale_price": p.sale_price, "sale_discount_pct": p.sale_discount_pct,
         "category": p.category, "category_section": p.category_section,
         "detailed": bool(p.detailed), "detailed_by": p.detailed_by,
@@ -94,12 +152,18 @@ def product_options(db: Session = Depends(get_db)):
     fields = {"color": models.Product.color, "size": models.Product.size,
               "pattern": models.Product.pattern, "fit": models.Product.fit,
               "product_type": models.Product.product_type, "material": models.Product.material,
-              "uom": models.Product.uom}
+              "brand": models.Product.brand, "style": models.Product.style,
+              "sleeve": models.Product.sleeve, "uom": models.Product.uom}
     for key, col in fields.items():
+        opts.setdefault(key, [])
+        # case-insensitive: the master says "Regular Fit", and a product already
+        # carrying "REGULAR FIT" is the same fit, not a second one to offer
+        have = {v.strip().lower() for v in opts[key]}
         seen = {v[0] for v in db.query(col).distinct() if v[0]}
         for val in sorted(seen):
-            if val not in opts[key]:
+            if val.strip().lower() not in have:
                 opts[key].append(val)
+                have.add(val.strip().lower())
     return opts
 
 
@@ -164,8 +228,7 @@ def detail_product(prod_id: int, body: ProductDetail, db: Session = Depends(get_
     if not p:
         raise HTTPException(404, "product not found")
     data = body.model_dump(exclude_none=True)
-    for k in ("color", "size", "pattern", "fit", "product_type", "material",
-              "design_no", "mrp", "sale_price", "sale_discount_pct"):
+    for k in (*inv.SPLIT_ATTRS, "mrp", "sale_price", "sale_discount_pct"):
         if k in data:
             setattr(p, k, data[k])
     p.detailed = True
@@ -239,11 +302,15 @@ def product_units(prod_id: int, db: Session = Depends(get_db)):
     rep = integrity.product_report(db, p, ctx)
     rows = db.query(models.ProductUnit).filter(
         models.ProductUnit.product_id == prod_id).order_by(models.ProductUnit.seq).all()
-    ok, reason = unit_svc.can_serialise(p.uom, rep["expected_units"] or p.stock_qty)
+    ok, reason = unit_svc.can_serialise(p.uom, rep["expected_units"] or p.stock_qty, db)
     return {
         "product": {"id": p.id, "sku": p.sku, "description": p.description,
+                    "name": stock_view.display_name(p),
                     "uom": p.uom, "stock_qty": p.stock_qty, "mrp": p.mrp,
-                    "size": p.size, "color": p.color, "category": p.category},
+                    "size": p.size, "color": p.color, "category": p.category,
+                    # one code per stock unit — a pair of pillow covers is one
+                    # article and gets one label, not two
+                    "unit_type": p.unit_type, "pieces_per_unit": p.pieces_per_unit},
         "count": len(rows), "serialisable": ok, "reason": reason,
         # --- integrity: what may be printed, and what is merely left over ---
         "state": rep["state"], "live_units": rep["live_units"],

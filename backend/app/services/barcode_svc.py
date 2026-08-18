@@ -116,6 +116,9 @@ QR_ORDER = [
     ("cat", "category"), ("sec", "category_section"), ("ty", "product_type"),
     ("sz", "size"), ("col", "color"), ("pat", "pattern"), ("fit", "fit"),
     ("mat", "material"), ("dsn", "design_no"),
+    # appended, never inserted — a label printed before these existed decodes
+    # exactly as it did, because every field it carried is still in the same place
+    ("brd", "brand"), ("sty", "style"), ("slv", "sleeve"),
 ]
 
 
@@ -240,7 +243,7 @@ def _unit_label_card(u) -> str:
     return _garment_card(
         unit_qr_svg(u, scale=3), u.code, g("sku"), g("description"),
         g("size"), g("color"), g("material"), g("category"),
-        f"₹{p.mrp:g}" if p and p.mrp else "")
+        f"₹{p.mrp:g}" if p and p.mrp else "", _unit_note(p))
 
 
 def unit_labels_sheet(units) -> str:
@@ -346,20 +349,32 @@ def parse_qr_payload(text):
 # travels with the symbol everywhere it is drawn — sheet, screen, phone PNG.
 QUIET_ZONE = 4
 
+#: the root width/height, with an optional CSS unit — segno writes bare pixels,
+#: python-barcode writes millimetres
 _SVG_HEAD_RE = re.compile(
-    r'<svg([^>]*?)\bwidth="([\d.]+)"\s+height="([\d.]+)"')
+    r'<svg([^>]*?)\bwidth="([\d.]+)(mm|cm|in|pt|pc|px)?"\s+'
+    r'height="([\d.]+)(mm|cm|in|pt|pc|px)?"')
+
+#: CSS absolute units, in px — the user-unit space a viewBox is measured in
+_UNIT_PX = {"": 1.0, "px": 1.0, "mm": 96 / 25.4, "cm": 960 / 25.4,
+            "in": 96.0, "pt": 96 / 72, "pc": 16.0}
 
 
 def _scalable(svg: str) -> str:
-    """Give a segno symbol a viewBox and crisp edges.
+    """Give a symbol a viewBox and crisp edges.
 
-    segno emits `width`/`height` in pixels and no viewBox. An SVG without one has
-    no mapping from user units to its viewport, so CSS `width: 32mm` resizes the
-    viewport and leaves the drawing at its intrinsic size — and because the
-    outermost svg clips by default, the overflow is silently cut off rather than
-    scaled. A 41-module symbol rendered at scale 3 is 135px of drawing inside a
-    98px box: the outer quarter of the code, finder pattern and all, simply is not
-    there. It looks like a QR and cannot be decoded.
+    Neither generator emits one. An SVG without a viewBox has no mapping from
+    user units to its viewport, so CSS `width: 32mm` resizes the viewport and
+    leaves the drawing at its intrinsic size — and because the outermost svg
+    clips by default, the overflow is silently cut off rather than scaled. A
+    41-module symbol rendered at scale 3 is 135px of drawing inside a 98px box:
+    the outer quarter of the code, finder pattern and all, simply is not there.
+    It looks like a QR and cannot be decoded.
+
+    The viewBox is in USER UNITS, which are px — so a root sized in millimetres
+    (python-barcode writes `width="33.000mm"`, and its bars are placed in mm too)
+    has to be converted, or the box describes a region a quarter the size of the
+    drawing and clips exactly as badly.
 
     `crispEdges` turns off antialiasing on the module boundaries. At label sizes a
     softened edge costs real contrast, and contrast is what a phone camera in
@@ -369,10 +384,13 @@ def _scalable(svg: str) -> str:
     m = _SVG_HEAD_RE.search(svg)
     if not m:
         return svg
-    attrs, w, h = m.group(1), m.group(2), m.group(3)
+    attrs, w, wu, h, hu = m.groups()
+    vw = float(w) * _UNIT_PX.get(wu or "", 1.0)
+    vh = float(h) * _UNIT_PX.get(hu or "", 1.0)
     return svg.replace(
         m.group(0),
-        f'<svg{attrs}width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+        f'<svg{attrs}width="{w}{wu or ""}" height="{h}{hu or ""}" '
+        f'viewBox="0 0 {vw:g} {vh:g}" '
         f'shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"',
         1)
 
@@ -516,7 +534,10 @@ def barcode_svg(code: str) -> str:
             svg = buf.getvalue().decode()
             # strip the XML prolog so it can be inlined inside HTML
             i = svg.find("<svg")
-            return svg[i:] if i >= 0 else svg
+            # and give it a viewBox, for the same reason the QR gets one: the
+            # designer draws this into a box of its own choosing, and without
+            # one the stripe is cut off at whatever the box happens to be
+            return _scalable(svg[i:] if i >= 0 else svg)
         except Exception:
             pass
     return f'<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40">' \
@@ -528,8 +549,23 @@ def _hesc(s) -> str:
     return (str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def _unit_note(p) -> str:
+    """"PAIR · 2 pcs" — but only when one of these is more than one thing.
+
+    A tag on a pillow cover has to say it covers a pair, or the person holding it
+    counts two articles where the system counts one. A handkerchief needs no such
+    note: the tag is on the handkerchief."""
+    if not p:
+        return ""
+    per = float(getattr(p, "pieces_per_unit", 1) or 1)
+    code = getattr(p, "unit_type", None) or getattr(p, "uom", None)
+    if per <= 1 or not code:
+        return ""
+    return f"{code} · {per:g} pcs"
+
+
 def _garment_card(qr_svg_markup, code, sku, description, size, color, material,
-                  category, mrp) -> str:
+                  category, mrp, unit="") -> str:
     """One garment tag. The SKU label and the per-piece label differ only in the
     code beneath the symbol, so they are built here and the warehouse only ever
     learns to read one thing.
@@ -543,7 +579,7 @@ def _garment_card(qr_svg_markup, code, sku, description, size, color, material,
     says which product this is (ESSA-00002) and the line under the symbol says
     which of its garments (ESSA-00002-101) — and losing either leaves someone
     holding a tag that answers only half the question."""
-    bits = [b for b in (size, color, material) if b]
+    bits = [b for b in (size, color, material, unit) if b]
     # size first and in bold — on a rack it is the field someone reads before any
     # other, and it is the one a mis-pick turns on
     meta = ""
@@ -576,7 +612,7 @@ def _label_card(p) -> str:
     return _garment_card(
         product_qr_svg(p, scale=3), p.sku or str(p.id), p.sku, p.description,
         p.size, p.color, p.material, p.category,
-        f"₹{p.mrp:g}" if p.mrp else "")
+        f"₹{p.mrp:g}" if p.mrp else "", _unit_note(p))
 
 
 def bundle_labels_sheet(bundles) -> str:
@@ -655,8 +691,7 @@ def bundle_labels_sheet(bundles) -> str:
   }}
 </style></head><body>
   <div class="bar"><button onclick="window.print()">🖨 Print {n} bundle label{'s' if n != 1 else ''}</button></div>
-  <div class="hint">Print at 100% / “Actual size” — any scaling shrinks the modules
-    and the quiet zone with them.</div>
+  <div class="hint">Print at 100% / “Actual size”.</div>
   <div class="sheet">{cards}</div>
 </body></html>"""
 
@@ -749,7 +784,6 @@ def _garment_sheet(title, noun, cards) -> str:
   }}
 </style></head><body>
   <div class="bar"><button onclick="window.print()">🖨 Print {n} {noun}{'s' if n != 1 else ''}</button></div>
-  <div class="hint">Print at 100% / “Actual size” — any scaling shrinks the modules
-    and the quiet zone with them.</div>
+  <div class="hint">Print at 100% / “Actual size”.</div>
   <div class="sheet">{cards}</div>
 </body></html>"""

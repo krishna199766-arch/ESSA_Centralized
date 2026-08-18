@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { api } from './api.js'
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { api, session, setUnauthorizedHandler } from './api.js'
+import { parseDictation, coerceSpoken, dictationTargets } from './voicefill.js'
 
 // ---------- helpers ----------
 const num = (v) => (v === '' || v == null ? null : isNaN(+v) ? v : +v)
@@ -37,6 +38,71 @@ const matches = (obj, q, fields) => {
 //      navigation and reloads. A collapsed panel still shows what it holds.
 //  Every icon carries a title= too. An icon on its own teaches nobody.
 // ==========================================================================
+
+// ==========================================================================
+//  Pagination
+//  ------------------------------------------------------------------------
+//  Every list in this app grows without limit — a register gains rows every
+//  day, inventory gains a product per variant received, the category master
+//  already holds 686. Rendering all of them put thousands of DOM nodes on a
+//  screen nobody can read, and "how many are there" could only be answered by
+//  scrolling to the bottom.
+//
+//  One hook and one control, used everywhere, so paging behaves identically
+//  whichever list you are on: the same page sizes, the same "1–50 of 686", the
+//  same keys. A component that each screen implemented its own way would drift
+//  into six subtly different behaviours.
+// ==========================================================================
+const PAGE_SIZES = [25, 50, 100, 200]
+
+function usePaged(rows, initial = 50) {
+  const [page, setPage] = useState(1)
+  const [size, setSize] = useState(initial)
+  const list = rows || []
+  const total = list.length
+  const pages = size === 0 ? 1 : Math.max(1, Math.ceil(total / size))
+  // A filter that shortens the list must not strand you on page 9 of 3 looking
+  // at an empty screen — which reads as "the search found nothing".
+  useEffect(() => { if (page > pages) setPage(1) }, [pages, page])
+  const start = size === 0 ? 0 : (page - 1) * size
+  return {
+    page, setPage, size, setSize, total, pages,
+    from: total === 0 ? 0 : start + 1,
+    to: size === 0 ? total : Math.min(total, start + size),
+    slice: size === 0 ? list : list.slice(start, start + size),
+  }
+}
+
+function Pager({ page, setPage, size, setSize, total, pages, from, to,
+                 noun = 'row', nouns, style }) {
+  // Nothing to page through, and no page-size choice worth offering: a bar under
+  // a list of four is noise. The screens carry their own counts already.
+  if (total <= PAGE_SIZES[0]) return null
+  const go = (p) => setPage(Math.min(pages, Math.max(1, p)))
+  return (
+    <div className="pager" style={style}>
+      <span className="pager-count">
+        <b>{from.toLocaleString('en-IN')}–{to.toLocaleString('en-IN')}</b>
+        {' of '}<b>{total.toLocaleString('en-IN')}</b>{' '}
+        {total === 1 ? noun : (nouns || noun + 's')}
+      </span>
+      <label className="pager-size">
+        Show
+        <select value={size} onChange={(e) => { setSize(+e.target.value); setPage(1) }}>
+          {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+          <option value={0}>All</option>
+        </select>
+      </label>
+      <div className="pager-nav">
+        <button className="btn" disabled={page <= 1} onClick={() => go(1)} title="First page">«</button>
+        <button className="btn" disabled={page <= 1} onClick={() => go(page - 1)}>‹ Previous</button>
+        <span className="pager-page">Page {page} of {pages}</span>
+        <button className="btn" disabled={page >= pages} onClick={() => go(page + 1)}>Next ›</button>
+        <button className="btn" disabled={page >= pages} onClick={() => go(pages)} title="Last page">»</button>
+      </div>
+    </div>
+  )
+}
 
 function SearchBox({ value, onChange, placeholder, style, title }) {
   return (
@@ -332,18 +398,277 @@ function DateField({ label, value, onChange, style, width, required, title, inli
   )
 }
 
-function Field({ label, value, onChange, flagged, note, wide, source, date }) {
+// `calc` marks a field the arithmetic keeps in step — tinted, with an ƒ and a
+// tooltip saying what it comes from. It stays editable: typing into it makes it
+// the input and its counterpart moves instead.
+function Field({ label, value, onChange, flagged, note, wide, source, date, calc }) {
   return (
-    <div className={'field' + (flagged ? ' flag' : '') + (source && !flagged ? ' fromlr' : '')}
+    <div className={'field' + (flagged ? ' flag' : '') + (source && !flagged ? ' fromlr' : '')
+      + (calc ? ' calc' : '')}
       style={wide ? { gridColumn: '1 / -1' } : null}>
-      <label>{label}</label>
+      <label title={calc || undefined}>{label}{calc ? ' ƒ' : ''}</label>
       {date
         ? <DateField inline value={value} onChange={onChange} />
-        : <input value={value ?? ''} onChange={(e) => onChange(e.target.value)} />}
+        : <input value={value ?? ''} title={calc || undefined}
+            onChange={(e) => onChange(e.target.value)} />}
       {flagged && <div className="flagnote">⚠ needs review{note ? ' · ' + note : ''}</div>}
+      {!flagged && note && <div className="srcnote">{note}</div>}
       {source && !flagged && <div className="srcnote">🔗 from {source}</div>}
     </div>
   )
+}
+
+// ==========================================================================
+//  Auto-calculation — the arithmetic an invoice already contains
+//  ------------------------------------------------------------------------
+//  An invoice's figures are not independent. MRP less a discount IS the rate;
+//  qty times rate IS the amount; a tax rate over the taxable value IS the tax
+//  amount. Typing all of them and hoping they agree is how a review screen
+//  produces a document that reconciles against nothing.
+//
+//  ONE RULE decides everything below: **the field you just edited is the input,
+//  and only its dependents move.** Type 5 into IGST % and the amount appears;
+//  type 933 into IGST Amount and the % appears. Neither overwrites the other,
+//  because at any moment exactly one of them is the thing a human just asserted.
+//
+//  And nothing recalculates on LOAD. This screen exists to review what was read
+//  off a photograph; recomputing on arrival would overwrite the extraction with
+//  its own idea of itself and hide precisely the disagreements the warnings
+//  panel is there to show. Everything here fires on an edit, or on the explicit
+//  Recalculate button.
+// ==========================================================================
+const nf = (v) => {
+  if (v === '' || v == null) return null
+  const x = parseFloat(String(v).replace(/,/g, ''))
+  return Number.isFinite(x) ? x : null
+}
+const r2 = (v) => (v == null ? null : Math.round(v * 100) / 100)
+
+// Fields a human can type on a line, and what each one drives. `amount` and
+// `taxable_value` are outputs of the row above them but inputs when typed
+// directly — a supplier who bills a flat line amount is stating the amount, and
+// the rate is then whatever divides into it.
+// `prev` is the row as it stood BEFORE this edit. It is needed for exactly one
+// judgement — whether Taxable was tracking Amount or had been set apart by hand —
+// and that can only be told from the values that were there a moment ago.
+// MRP less a percentage is a price. ONE relationship, and this business runs it
+// twice — on opposite sides of itself:
+//
+//   MRP − discount % = RATE          what we pay the supplier (the invoice)
+//   MRP − discount % = SALE PRICE    what the shop charges  (the price tag)
+//
+// The two are never the same number and must never be confused (see
+// models.Product.sale_discount_pct, which exists precisely because the purchase
+// discount had already taken the plain name). The arithmetic behind them IS the
+// same though, so it is solved once, here, for whichever of the three corners
+// was not just typed. `edited` is 'pct' | 'price' | 'mrp'.
+function fromMrp(mrp, pct, price, edited) {
+  if (!mrp) return [pct, price]
+  if (edited === 'pct') return pct == null ? [pct, price] : [pct, r2(mrp * (1 - pct / 100))]
+  if (edited === 'price') return price == null ? [pct, price] : [r2((1 - price / mrp) * 100), price]
+  if (edited === 'mrp') {
+    // a corrected MRP keeps the percentage that was agreed and re-prices; with no
+    // percentage recorded it is the percentage that is unknown, not the price
+    if (pct != null) return [pct, r2(mrp * (1 - pct / 100))]
+    if (price != null) return [r2((1 - price / mrp) * 100), price]
+  }
+  return [pct, price]
+}
+
+//: the fields that describe what ONE piece costs. Only an edit to one of these
+//: can move the discount — correcting a description or an HSN must not make a
+//: discount appear on a line that never had one.
+const PRICE_KEYS = new Set(['mrp', 'discount_pct', 'discount_amount', 'rate',
+                            'buffer_pct', 'amount'])
+
+// ---- the gap between cost and MRP, named from both ends ----
+//
+// MRP and Rate are two numbers with one gap between them, and the trade states
+// that gap two different ways depending on which end it is standing at:
+//
+//   * **Discount %** — off the printed price. (MRP − Rate) ÷ MRP. This is what a
+//     supplier's bill says, because the bill starts from the tag.
+//   * **Buffer %** — on top of cost. (MRP − Rate) ÷ Rate. This is what you say
+//     when there is no tag yet: the goods cost 650, put 53% on it and print 995.
+//
+// They are never the same number for the same gap (345 off 995 is 34.7%; 345 on
+// 650 is 53.1%), which is exactly why both are offered rather than one being
+// made to serve as the other. Either can be typed; the other follows, and so
+// does the price at the far end.
+//
+// Buffer is DERIVED, never stored: it is recomputed from Rate and MRP whenever
+// either moves, so a line reloaded from a saved invoice shows the same buffer it
+// was entered at without a column existing to go stale.
+function bufferFrom(mrp, rate) {
+  if (mrp == null || !rate) return null
+  return r2((mrp / rate - 1) * 100)
+}
+function mrpFromBuffer(rate, buffer) {
+  if (rate == null || buffer == null) return null
+  // A WHOLE rupee, not two decimals. An MRP is a printed price — 995, never
+  // 995.02 — and the buffer behind it is a round figure somebody chose (50%,
+  // 53%), so the product of the two always carries paise no tag would show.
+  // Rounding here is what makes the reverse direction produce a price that can
+  // actually go on a label, and it closes the round trip: 650 + 53.08% → 995,
+  // and 995 against 650 reads back as 53.08%. An MRP that was TYPED is never
+  // touched — only one derived from a buffer.
+  return Math.round(rate * (1 + buffer / 100))
+}
+function rateFromBuffer(mrp, buffer) {
+  if (mrp == null || buffer == null || buffer <= -100) return null
+  return r2(mrp / (1 + buffer / 100))
+}
+
+// The SELLING side of the triangle above: MRP − Discount % = Sale price, in
+// whichever direction was typed. Used on the GRN breakdown, where retail pricing
+// is set per variant — a shop's price belongs to "L / Red", not to the bundle
+// the supplier billed.
+//
+// Values in and out are the strings a form holds, blanks included: clearing the
+// discount empties that box and leaves the price alone, rather than resolving to
+// zero and marking the goods down to nothing.
+const SALE_KEYS = { mrp: 'mrp', sale_discount_pct: 'pct', sale_price: 'price' }
+
+// `blank` is what an emptied box becomes: '' for the form-shaped rows of the GRN
+// breakdown, null for the invoice's line items, which hold numbers.
+function recalcSale(row, edited, blank = '') {
+  const corner = SALE_KEYS[edited]
+  if (!corner) return row
+  const [pct, price] = fromMrp(nf(row.mrp), nf(row.sale_discount_pct),
+                               nf(row.sale_price), corner)
+  return { ...row, sale_discount_pct: pct ?? blank, sale_price: price ?? blank }
+}
+
+function recalcLine(row, edited, prev = row) {
+  const L = { ...row }
+  const qty = nf(L.qty)
+  let mrp = nf(L.mrp)
+  let rate = nf(L.rate), disc = nf(L.discount_pct), amount = nf(L.amount)
+  const discAmt = nf(L.discount_amount)
+  const buffer = nf(L.buffer_pct)
+
+  // --- MRP ─ discount ─ rate, in whichever direction was just typed ---
+  //
+  // All of it PER PIECE, because MRP and Rate are per piece and a discount
+  // between them that quietly switched to a line total could not be checked
+  // against either. 995 − 650 = 345 is a sum anyone can do against the invoice;
+  // 4140 is one nobody can.
+  if (edited === 'buffer_pct') {
+    // REVERSE pricing: cost + buffer % → MRP. The direction that matters for
+    // goods arriving with no printed tag — the cost is known and the retail
+    // price is the thing being decided.
+    if (rate != null) mrp = mrpFromBuffer(rate, buffer)
+    // …and its mirror, for a line that has an MRP but no cost yet: the same
+    // buffer says what the cost behind that tag must have been.
+    else if (mrp != null) rate = rateFromBuffer(mrp, buffer)
+    if (mrp) disc = rate == null ? disc : r2((1 - rate / mrp) * 100)
+  } else if (edited === 'discount_amount' && mrp != null && discAmt != null) {
+    // the one corner fromMrp does not carry: rupees off rather than percent off
+    rate = r2(mrp - discAmt)
+    if (mrp) disc = r2((discAmt / mrp) * 100)
+  } else if (edited === 'discount_pct' || edited === 'rate' || edited === 'mrp') {
+    [disc, rate] = fromMrp(mrp, disc, rate,
+      edited === 'discount_pct' ? 'pct' : edited === 'rate' ? 'price' : 'mrp')
+  }
+
+  // --- qty × rate = amount, or amount ÷ qty = rate when the amount was typed ---
+  if (edited === 'amount' && qty) {
+    rate = r2(amount / qty)
+    if (mrp) disc = r2((1 - rate / mrp) * 100)
+  } else if (qty != null && rate != null) {
+    amount = r2(qty * rate)
+  }
+
+  L.rate = rate
+  L.discount_pct = disc
+  L.amount = amount
+  L.mrp = mrp                     // moved only by a buffer edit; see above
+  // The discount in rupees, PER PIECE — the same base as the % beside it and as
+  // the MRP and Rate it sits between. Touched only when one of those actually
+  // moved: an edit to the description or the HSN has nothing to say about
+  // pricing, and a discount that materialises out of one is a figure the invoice
+  // never stated.
+  if (PRICE_KEYS.has(edited) && mrp != null && rate != null) {
+    L.discount_amount = r2(mrp - rate)
+  }
+  // The buffer, restated from wherever the two prices ended up. Skipped when the
+  // buffer is what was typed — recomputing it from the MRP it just produced is a
+  // round trip that only introduces rounding, and it would fight the cursor.
+  if (PRICE_KEYS.has(edited) && edited !== 'buffer_pct') {
+    L.buffer_pct = bufferFrom(mrp, rate)
+  }
+  // The taxable value is the line amount unless the invoice states its own. It
+  // keeps up while it merely echoes the amount; the moment someone types a
+  // different figure into it, that is an assertion about the invoice and nothing
+  // here overwrites it again.
+  const wasTracking = nf(prev.taxable_value) == null
+    || nf(prev.taxable_value) === nf(prev.amount)
+  if (edited !== 'taxable_value' && wasTracking) L.taxable_value = amount
+  // The SELLING triangle, hanging off the same MRP: MRP − Sale disc % = Sell
+  // price. A correction to the MRP moves both sides of the line at once, which
+  // is right — one printed retail price feeds what we pay AND what we charge —
+  // while the two discounts stay strictly apart.
+  return recalcSale(L, edited, null)
+}
+
+//: the taxable figure a rate is charged on — the invoice's own when it has one,
+//: otherwise what the lines add up to
+function taxBase(data) {
+  const stated = nf(data.totals?.taxable_total)
+  if (stated) return stated
+  return r2((data.line_items || []).reduce(
+    (s, it) => s + (nf(it.taxable_value) ?? nf(it.amount) ?? 0), 0))
+}
+
+//: every % ─ amount pair in the tax block. Both directions, always.
+const TAX_PAIRS = [
+  ['cgst_rate', 'cgst_amount'], ['sgst_rate', 'sgst_amount'],
+  ['igst_rate', 'igst_amount'],
+  // not a tax, but the same arithmetic and the same complaint: a special
+  // discount typed as 979.25 should say what percentage it is, and one typed as
+  // 5% should say what it costs
+  ['special_discount_pct', 'special_discount'],
+]
+
+function recalcTaxes(tax, base, edited) {
+  const t = { ...tax }
+  for (const [rk, ak] of TAX_PAIRS) {
+    if (edited === rk && base) t[ak] = r2(base * (nf(t[rk]) || 0) / 100)
+    else if (edited === ak && base) t[rk] = r2((nf(t[ak]) || 0) / base * 100)
+  }
+  // CGST and SGST are one tax split in half — a state levy is never 9% one side
+  // and 2% the other. Mirrored only when the other half is blank or was tracking
+  // this one, so a deliberately odd pair is never quietly straightened.
+  const mirror = (from, to) => {
+    const was = nf(tax[from]), other = nf(tax[to])
+    if (other == null || other === 0 || other === was) {
+      t[to] = nf(t[from])
+      if (base) t[to.replace('_rate', '_amount')] = r2(base * (nf(t[to]) || 0) / 100)
+    }
+  }
+  if (edited === 'cgst_rate') mirror('cgst_rate', 'sgst_rate')
+  if (edited === 'sgst_rate') mirror('sgst_rate', 'cgst_rate')
+  return t
+}
+
+// The foot of the invoice, derived from everything above it. Deliberately the
+// same shape the server reconciles against (extraction/validate.py), so the
+// figure this screen computes is the one that will NOT raise a warning on save.
+function recalcTotals(data) {
+  const items = data.line_items || []
+  const tax = data.taxes || {}
+  const tot = { ...(data.totals || {}) }
+  const sub = r2(items.reduce((s, it) => s + (nf(it.amount) || 0), 0))
+  const taxable = r2(items.reduce((s, it) => s + (nf(it.taxable_value) ?? nf(it.amount) ?? 0), 0))
+  tot.total_qty = r2(items.reduce((s, it) => s + (nf(it.qty) || 0), 0))
+  tot.sub_total = sub
+  tot.taxable_total = taxable || sub
+  tot.tax_total = r2((nf(tax.cgst_amount) || 0) + (nf(tax.sgst_amount) || 0)
+                     + (nf(tax.igst_amount) || 0))
+  tot.grand_total = r2((tot.taxable_total || 0) + tot.tax_total
+                       + (nf(tax.other_charges) || 0) + (nf(tax.freight) || 0)
+                       - (nf(tax.special_discount) || 0) + (nf(tax.round_off) || 0))
+  return tot
 }
 
 // ---------- line items ----------
@@ -354,30 +679,78 @@ function Field({ label, value, onChange, flagged, note, wide, source, date }) {
 // is what keeps one item's cost history in one product — but it is the supplier's
 // number, not ours, and nobody reviewing an invoice checks it by eye. The
 // trade-off: a misread supplier barcode can no longer be corrected here.
+// `calc` marks a column the arithmetic maintains — it is tinted, and its tooltip
+// says what it is derived from, so nobody wonders why a figure they did not type
+// appeared. Every one of them is still editable: typing into a derived cell makes
+// it the input and moves the others instead (see recalcLine).
 const ITEM_COLS = [
   ['description', 'Description', false, 200],
   ['brand', 'Brand', false, 90], ['design', 'Design', false, 90], ['size', 'Size', false, 80],
   ['hsn', 'HSN', false, 80], ['qty', 'Qty', true, 60], ['uom', 'UOM', false, 60],
-  ['mrp', 'MRP', true, 70], ['rate', 'Rate', true, 70], ['discount_pct', 'Disc %', true, 60],
-  ['taxable_value', 'Taxable', true, 90], ['amount', 'Amount', true, 90],
+  // MRP → less the discount → Rate, read left to right, every one of them PER
+  // PIECE so the row can be checked against the invoice by eye: 995 − 345 = 650.
+  // Only Taxable and Amount are line totals, and they sit apart at the end.
+  ['mrp', 'MRP', true, 70, 'Printed retail price, per piece. Worked out for you if you type a Rate and a Buffer %.'],
+  ['discount_pct', 'Discount %', true, 92, 'Off MRP, per piece: (MRP − Rate) ÷ MRP. Type a Rate instead and this fills itself.'],
+  ['rate', 'Rate', true, 74, 'The COST, per piece — what you pay. Type it and both percentages fill themselves.'],
+  // The same gap as Discount %, named from the other end — so the two flank the
+  // Rate they describe: MRP −discount→ Rate, and Rate +buffer→ MRP. Which one
+  // somebody types depends on which price they already know, and that is the
+  // whole point of carrying both.
+  ['buffer_pct', 'Buffer %', true, 88, 'REVERSE pricing: on top of cost. MRP = Rate × (1 + buffer) — e.g. 650 + 53% = 995. Type it and the MRP is worked out.'],
+  // The retail end of the same MRP. Not on the supplier's bill — nobody prints
+  // your shelf price for you — but set here the product is born priced instead
+  // of landing in Inventory with nothing on it. Kept well clear of the purchase
+  // discount above: same MRP, two different percentages, never the same number.
+  ['sale_discount_pct', 'Sale Disc %', true, 96, 'Off MRP for the SHOP. Nothing to do with the supplier discount. Type a sell price instead and this fills itself.'],
+  ['sale_price', 'Sell Price', true, 92, 'What you CHARGE: MRP less the sale discount — e.g. 995 − 20% = 796. Type it and its % follows.'],
+  ['taxable_value', 'Taxable', true, 90, 'Line total. The Amount, unless the invoice states its own.'],
+  ['amount', 'Amount', true, 90, 'Line total: Qty × Rate. Type an amount and the rate is worked back out of it.'],
 ]
+const ITEM_CALC = new Set(['rate', 'discount_pct', 'buffer_pct', 'mrp', 'amount',
+  'taxable_value', 'sale_discount_pct', 'sale_price'])
+
 function LineItems({ items, setItems }) {
-  const upd = (i, k, v) => { const c = items.map((x) => ({ ...x })); c[i][k] = num(v); setItems(c) }
+  // the edited field is the input; recalcLine moves only what depends on it
+  const upd = (i, k, v) => setItems(items.map((x, j) =>
+    (j === i ? recalcLine({ ...x, [k]: num(v) }, k, x) : { ...x })))
   const addRow = () => setItems([...items, { description: '', qty: null, rate: null, amount: null, uom: 'PCS' }])
+  // A line read off an invoice arrives with an MRP and a Rate and no buffer —
+  // the bill states a discount, never a markup. The buffer is that same gap
+  // read the other way, so it is shown from the two prices rather than left
+  // blank until somebody types in the column to find out what is already true.
+  const cell = (it, k) => {
+    if (k === 'buffer_pct' && (it.buffer_pct == null || it.buffer_pct === '')) {
+      const b = bufferFrom(nf(it.mrp), nf(it.rate))
+      return b == null ? '' : b
+    }
+    return it[k] ?? ''
+  }
   const delRow = (i) => setItems(items.filter((_, j) => j !== i))
   const qtySum = items.reduce((s, x) => s + (+x.qty || 0), 0)
   const amtSum = items.reduce((s, x) => s + (+(x.taxable_value ?? x.amount) || 0), 0)
+  // The per-piece gap between MRP and cost, taken out to the line — the one
+  // place the whole-invoice figure is wanted. Derived from the two prices rather
+  // than from a stored difference, so it agrees with the columns on screen even
+  // on a line where nothing was typed into the pricing at all.
+  const discSum = items.reduce((s, x) => {
+    const gap = (+x.mrp || 0) - (+x.rate || 0)
+    return s + (gap > 0 ? gap * (+x.qty || 0) : 0)
+  }, 0)
   return (
     <div>
-      <div style={{ overflowX: 'auto' }}>
-      <table className="items" style={{ minWidth: 990 }}>
-        <thead><tr>{ITEM_COLS.map(([k, l, , w]) => <th key={k} style={{ minWidth: w }}>{l}</th>)}<th></th></tr></thead>
+      <div className="tablewrap">
+      <table className="items" style={{ minWidth: 1310 }}>
+        <thead><tr>{ITEM_COLS.map(([k, l, , w, tip]) =>
+          <th key={k} style={{ minWidth: w }} title={tip}
+            className={ITEM_CALC.has(k) ? 'calc' : undefined}>{l}{tip ? ' ƒ' : ''}</th>)}<th></th></tr></thead>
         <tbody>
           {items.map((it, i) => (
             <tr key={i}>
-              {ITEM_COLS.map(([k, , isNum]) => (
-                <td key={k} className={isNum ? 'num' : ''}>
-                  <input value={it[k] ?? ''} onChange={(e) => upd(i, k, e.target.value)} />
+              {ITEM_COLS.map(([k, , isNum, , tip]) => (
+                <td key={k} className={(isNum ? 'num' : '') + (ITEM_CALC.has(k) ? ' calc' : '')}
+                  title={tip}>
+                  <input value={cell(it, k)} onChange={(e) => upd(i, k, e.target.value)} />
                 </td>
               ))}
               <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => delRow(i)}>×</button></td>
@@ -389,6 +762,8 @@ function LineItems({ items, setItems }) {
       <div className="items-foot">
         <span>{items.length} lines</span>
         <span>Σ qty <b>{qtySum.toLocaleString('en-IN')}</b></span>
+        {discSum > 0 && <span title="Σ ((MRP − Rate) × Qty) — the whole invoice's gap between printed price and cost">
+          Σ MRP − cost <b>{money(discSum)}</b></span>}
         <span>Σ value <b>{money(amtSum)}</b></span>
         <button className="btn" style={{ padding: '3px 10px', marginLeft: 'auto' }} onClick={addRow}>+ add line</button>
       </div>
@@ -452,6 +827,28 @@ function LrCandidates({ info, busy, onLink, onClose }) {
 }
 
 // ---------- review panel ----------
+//
+// Four tabs, one open at a time, laid out horizontally above the fields. The
+// screen used to be seven stacked panels: reviewing a bill meant scrolling past
+// six of them to reach the seventh, and the invoice image beside it scrolled out
+// of reach on the way — which is the one thing a review screen cannot afford,
+// since every field on it is being checked against that image.
+//
+// `paths` is what each tab OWNS, and it earns its keep twice: it counts the
+// fields inside a closed tab that are flagged for review (a hidden warning is a
+// warning that does not exist), and it is the single place that says where a
+// field lives, so a field added to a panel cannot go uncounted.
+const REVIEW_TABS = [
+  { key: 'party', label: 'Supplier & Buyer', paths: ['supplier.', 'buyer.'],
+    hint: 'Who sold it and who is billed — including the supplier’s bank' },
+  { key: 'invoice', label: 'Invoice & Transport', paths: ['invoice.'],
+    hint: 'Invoice numbers and dates, e-invoice, e-way bill and the consignment' },
+  { key: 'money', label: 'Line Items, Taxes & Totals', paths: ['line_items', 'taxes.', 'totals.'],
+    hint: 'The goods and the arithmetic — one calculation, one panel' },
+  { key: 'grn', label: 'GRN & Notes', paths: ['meta.'],
+    hint: 'The handwritten GRN number, who received it, and anything else' },
+]
+
 function Review({ docId, onSaved, onCreateGrn, toast }) {
   const [doc, setDoc] = useState(null)
   const [data, setData] = useState(null)
@@ -460,9 +857,17 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
   const [train, setTrain] = useState(true)
   const [saving, setSaving] = useState(false)
   const [lrCands, setLrCands] = useState(null)   // register rows offered to link
+  // which panel is open. Reset per document below: opening the next invoice on
+  // the tab you happened to leave the last one on is how a field gets skipped.
+  const [tab, setTab] = useState('party')
+  // the invoice photograph, foldable. Remembered across documents and sessions
+  // (useMinimized persists it) — how much room someone wants for the image is a
+  // standing preference about how they work, not a per-invoice decision.
+  const [imgOpen, toggleImg] = useMinimized('rev.image', true)
 
   useEffect(() => {
     if (!docId) return
+    setTab('party')
     api.getDocument(docId).then((d) => {
       setDoc(d.document)
       setData(structuredClone(d.extraction?.data || {}))
@@ -492,9 +897,38 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
   }
   const f = (path, label, opts = {}) => (
     <Field label={label} value={get(path)} flagged={!!flags[path]} wide={opts.wide}
-      source={fromLr(path)} date={opts.date}
+      source={fromLr(path)} date={opts.date} calc={opts.calc} note={opts.note}
       onChange={(v) => setData(setPath(data, path, opts.raw ? v : num(v)))} />
   )
+  // A tax field, with its opposite number kept in step: type a rate and the
+  // amount appears, type an amount and the rate appears. The totals follow both,
+  // so the foot of the invoice is never left disagreeing with the block above it.
+  const ft = (key, label, opts = {}) => (
+    <Field label={label} value={tax[key]} flagged={!!flags['taxes.' + key]}
+      calc={opts.calc} note={opts.note}
+      onChange={(v) => {
+        const taxes = recalcTaxes({ ...tax, [key]: num(v) }, taxBase(data), key)
+        const next = { ...data, taxes }
+        setData({ ...next, totals: recalcTotals(next) })
+      }} />
+  )
+  // Recompute the whole foot from the lines up. Explicit, and never automatic on
+  // load: this screen reviews what was read off a photograph, and an arrival that
+  // quietly restated its own figures would hide the very disagreement the checks
+  // above are reporting.
+  const recalcAll = () => {
+    const items = (data.line_items || []).map((it) => recalcLine(it, 'qty'))
+    let next = { ...data, line_items: items }
+    const base = taxBase(next)
+    let taxes = { ...(next.taxes || {}) }
+    for (const [rk, ak] of TAX_PAIRS) {
+      if (nf(taxes[rk])) taxes = recalcTaxes(taxes, base, rk)
+      else if (nf(taxes[ak])) taxes = recalcTaxes(taxes, base, ak)
+    }
+    next = { ...next, taxes }
+    setData({ ...next, totals: recalcTotals(next) })
+    toast('⟲ Recalculated from the lines up — check it against the image before saving', 'ok')
+  }
   // a date read off the page: same review flags and LR-source badge as any other
   // field, but picked from a calendar instead of retyped
   const fd = (path, label) => f(path, label, { raw: true, date: true })
@@ -565,7 +999,27 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
 
   return (
     <div className="main">
-      <div className="viewer"><img src={api.imageUrl(docId, doc?.content_hash)} alt="invoice" /></div>
+      {/* The image and the fields compete for one screen, and which one needs the
+          room changes with the job: checking a GSTIN against a photograph wants
+          the image, keying a twelve-size breakdown wants the table. So it folds
+          away — to the same 36mm rail the lists use, carrying its own label,
+          because the way back has to be visible from where the image went. */}
+      <div className={'viewer' + (imgOpen ? '' : ' collapsed')}>
+        {imgOpen ? (
+          <>
+            <button className="sidehide" onClick={toggleImg}
+              title="Hide the invoice image — the screen keeps this setting">«</button>
+            <div className="viewerscroll">
+              <img src={api.imageUrl(docId, doc?.content_hash)} alt="invoice" />
+            </div>
+          </>
+        ) : (
+          <button className="siderail" onClick={toggleImg} title="Show the invoice image">
+            <span className="chev" aria-hidden="true">»</span>
+            <span className="raillabel">Invoice image</span>
+          </button>
+        )}
+      </div>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div className="editor">
           <div className={'warnbox ' + (warnings.filter((w)=>!w.includes('OCR')&&!w.includes('vision')&&!w.includes('sample')).length ? '' : 'clean')} style={{ marginBottom: 20 }}>
@@ -575,7 +1029,33 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
             {warnings.length ? <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul> : null}
           </div>
 
-          <Section id="rev.supplier" title="Supplier">
+          {/* Four tabs, one open at a time. Seven stacked panels made the screen a
+              long vertical scroll in which the fields being checked and the
+              invoice image were rarely on screen together — and a review done by
+              scrolling is a review done from memory.
+              The risk this trades for is real and handled: a flagged field inside
+              a closed tab is invisible, so each tab carries the count of its own
+              fields needing review, and the checks box above stays put. */}
+          <div className="revtabs" role="tablist">
+            {REVIEW_TABS.map((t) => {
+              const n = Object.keys(flags).filter(
+                (k) => t.paths.some((p) => k.startsWith(p))).length
+              return (
+                <button key={t.key} role="tab" aria-selected={tab === t.key}
+                  className={'revtab' + (tab === t.key ? ' on' : '') + (n ? ' flagged' : '')}
+                  onClick={() => setTab(t.key)}
+                  title={n ? `${n} field(s) here need review` : t.hint}>
+                  {t.label}
+                  {n ? <span className="revtab-n" title={`${n} field(s) need review`}>⚠ {n}</span> : null}
+                </button>
+              )
+            })}
+          </div>
+
+          {tab === 'party' && (
+          <div className="section">
+            <h4>Supplier &amp; Buyer</h4>
+            <h5>Supplier</h5>
             <div className="grid">
               {f('supplier.name', 'Name', { raw: true })}
               {f('supplier.legal_name', 'Legal / Trading Name', { raw: true })}
@@ -589,27 +1069,39 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
               {f('supplier.manufacturer', 'Manufacturer / MFG by', { raw: true })}
               {f('supplier.address', 'Address', { raw: true, wide: true })}
             </div>
-          </Section>
-
-          <Section id="rev.supplier-bank" title="Supplier Bank">
-            <div className="grid">
-              {f('supplier.bank.name', 'Bank Name', { raw: true })}
-              {f('supplier.bank.account_no', 'Account No', { raw: true })}
-              {f('supplier.bank.ifsc', 'IFSC', { raw: true })}
-              {f('supplier.bank.branch', 'Branch', { raw: true })}
+            {/* the bank and the buyer are short blocks — side by side they cost
+                one screen between them instead of two */}
+            <div className="moneysplit">
+              <div>
+                <h5>Supplier Bank</h5>
+                <div className="grid">
+                  {f('supplier.bank.name', 'Bank Name', { raw: true })}
+                  {f('supplier.bank.account_no', 'Account No', { raw: true })}
+                  {f('supplier.bank.ifsc', 'IFSC', { raw: true })}
+                  {f('supplier.bank.branch', 'Branch', { raw: true })}
+                </div>
+              </div>
+              <div>
+                <h5>Buyer (bill to)</h5>
+                <div className="grid">
+                  {f('buyer.name', 'Name', { raw: true })}
+                  {f('buyer.gstin', 'GSTIN', { raw: true })}
+                  {f('buyer.state', 'State', { raw: true })}
+                  {f('buyer.address', 'Address', { raw: true, wide: true })}
+                </div>
+              </div>
             </div>
-          </Section>
+          </div>
+          )}
 
-          <Section id="rev.buyer-bill-to" title="Buyer (bill to)">
-            <div className="grid">
-              {f('buyer.name', 'Name', { raw: true })}
-              {f('buyer.gstin', 'GSTIN', { raw: true })}
-              {f('buyer.state', 'State', { raw: true })}
-              {f('buyer.address', 'Address', { raw: true, wide: true })}
-            </div>
-          </Section>
-
-          <Section id="rev.invoice" title="Invoice">
+          {tab === 'invoice' && (
+          <div className="section">
+            <h4>Invoice &amp; Transport
+              <button className="h4btn" disabled={saving} onClick={fetchFromLr}
+                title="Fill LR No, LR Date, Transporter and Book City from the matching LR register row">
+                ⟲ fetch from LR register</button>
+            </h4>
+            <h5>Invoice</h5>
             <div className="grid">
               {f('invoice.number', 'Invoice No', { raw: true })}
               {fd('invoice.date', 'Date')}
@@ -622,14 +1114,7 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
               {f('invoice.agent', 'Agent', { raw: true })}
               {f('invoice.broker', 'Broker', { raw: true })}
             </div>
-          </Section>
-
-          <div className="section">
-            <h4>E-invoice &amp; Transport
-              <button className="h4btn" disabled={saving} onClick={fetchFromLr}
-                title="Fill LR No, LR Date, Transporter and Book City from the matching LR register row">
-                ⟲ fetch from LR register</button>
-            </h4>
+            <h5>E-invoice &amp; Transport</h5>
             <div className="grid">
               {f('invoice.irn', 'IRN', { raw: true, wide: true })}
               {f('invoice.ack_no', 'ACK No', { raw: true })}
@@ -646,46 +1131,72 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
             {lrCands && <LrCandidates info={lrCands} busy={saving}
               onLink={linkLrRow} onClose={() => setLrCands(null)} />}
           </div>
+          )}
 
-          <Section id="rev.line-items" title="Line Items">
-            <LineItems items={data.line_items || []} setItems={(it) => setData({ ...data, line_items: it })} />
-          </Section>
+          {/* Lines, taxes and totals are ONE calculation, so they are one panel.
+              Split across three collapsed accordions, the arithmetic that ties
+              them together was invisible: you could not see a rate change reach
+              the grand total without opening two more sections, and a tax typed
+              against the wrong taxable value looked perfectly fine. */}
+          {tab === 'money' && (
+          <div className="section money">
+            <h4>Line Items, Taxes &amp; Totals
+              <span className="calcbase" title="The figure every tax rate below is charged on">
+                taxable base ₹ {money(taxBase(data))}</span>
+              <button className="h4btn" onClick={recalcAll}
+                title="Recompute rates, taxes and totals from the line items up. Never runs on its own — check the result against the image.">
+                ⟲ recalculate</button>
+            </h4>
+            <LineItems items={data.line_items || []}
+              setItems={(it) => {
+                const next = { ...data, line_items: it }
+                setData({ ...next, totals: recalcTotals(next) })
+              }} />
 
-          <Section id="rev.taxes" title="Taxes">
-            <div className="grid">
-              {f('taxes.cgst_rate', 'CGST %')}
-              {f('taxes.cgst_amount', 'CGST Amount')}
-              {f('taxes.sgst_rate', 'SGST %')}
-              {f('taxes.sgst_amount', 'SGST Amount')}
-              {f('taxes.igst_rate', 'IGST %')}
-              {f('taxes.igst_amount', 'IGST Amount')}
-              {f('taxes.tds_amount', 'TDS')}
-              {f('taxes.special_discount', 'Special Discount')}
-              {f('taxes.other_charges', 'Other Charges')}
-              {f('taxes.freight', 'Freight')}
-              {f('taxes.round_off', 'Round Off')}
+            <div className="moneysplit">
+              <div>
+                <h5>Taxes</h5>
+                <div className="grid">
+                  {ft('cgst_rate', 'CGST %', { calc: 'Half of an intra-state levy — SGST follows it.' })}
+                  {ft('cgst_amount', 'CGST Amount', { calc: 'CGST % × taxable base. Type an amount to set the %.' })}
+                  {ft('sgst_rate', 'SGST %', { calc: 'The other half — mirrors CGST unless you set it apart.' })}
+                  {ft('sgst_amount', 'SGST Amount', { calc: 'SGST % × taxable base. Type an amount to set the %.' })}
+                  {ft('igst_rate', 'IGST %', { calc: 'Inter-state levy, charged instead of CGST + SGST.' })}
+                  {ft('igst_amount', 'IGST Amount', { calc: 'IGST % × taxable base. Type an amount to set the %.' })}
+                  {ft('special_discount_pct', 'Special Discount %', { calc: 'What the discount below comes to as a percentage.' })}
+                  {ft('special_discount', 'Special Discount', { calc: '% × taxable base. Type an amount to see its %. Deducted from the grand total.' })}
+                  {ft('other_charges', 'Other Charges')}
+                  {ft('freight', 'Freight')}
+                  {ft('round_off', 'Round Off')}
+                  {ft('tds_amount', 'TDS', { note: 'Deducted when the bill is paid, not from the invoice total.' })}
+                </div>
+              </div>
+              <div>
+                <h5>Totals</h5>
+                <div className="grid">
+                  {f('totals.total_qty', 'Total Qty', { calc: 'Σ of the Qty column.' })}
+                  {f('totals.sub_total', 'Sub Total', { calc: 'Σ of the Amount column.' })}
+                  {f('totals.taxable_total', 'Taxable Total', { calc: 'Σ of the Taxable column — what the tax rates are charged on.' })}
+                  {f('totals.tax_total', 'Tax Total', { calc: 'CGST + SGST + IGST.' })}
+                  {f('totals.grand_total', 'Grand Total', { calc: 'Taxable + tax + charges + freight − special discount + round off.' })}
+                  {f('totals.amount_in_words', 'Amount in Words', { raw: true, wide: true })}
+                </div>
+              </div>
             </div>
-          </Section>
+          </div>
+          )}
 
-          <Section id="rev.totals" title="Totals">
-            <div className="grid">
-              {f('totals.total_qty', 'Total Qty')}
-              {f('totals.sub_total', 'Sub Total')}
-              {f('totals.taxable_total', 'Taxable Total')}
-              {f('totals.tax_total', 'Tax Total')}
-              {f('totals.grand_total', 'Grand Total')}
-              {f('totals.amount_in_words', 'Amount in Words', { raw: true, wide: true })}
-            </div>
-          </Section>
-
-          <Section id="rev.grn-notes" title="GRN &amp; Notes">
+          {tab === 'grn' && (
+          <div className="section">
+            <h4>GRN &amp; Notes</h4>
             <div className="grid">
               {f('meta.grn_no', 'GRN No', { raw: true })}
               {fd('meta.grn_date', 'GRN Date')}
               {f('meta.received_by', 'Received By', { raw: true })}
               {f('meta.notes', 'Notes', { raw: true, wide: true })}
             </div>
-          </Section>
+          </div>
+          )}
         </div>
 
         <div className="actionbar">
@@ -713,13 +1224,15 @@ function Suppliers({ toast }) {
   const [q, setQ] = useState('')
   useEffect(() => { api.listSuppliers().then(setList) }, [])
   useEffect(() => { if (sel) api.getSupplier(sel).then(setDetail) }, [sel])
+  const supShown = list.filter((s) => matches(s, q, ['name', 'gstin', 'state']))
+  const supPage = usePaged(supShown, 50)
   return (
     <div className="body">
       <Sidebar id="suppliers" label="Suppliers">
         <div className="head"><h3>Suppliers · {list.length}</h3></div>
         <SearchBox value={q} onChange={setQ} placeholder="Search name, GSTIN, state…" />
         <div className="list">
-          {list.filter((s) => matches(s, q, ['name', 'gstin', 'state'])).map((s) => (
+          {supPage.slice.map((s) => (
             <div key={s.id} className={'sup-row' + (sel === s.id ? ' sel' : '')} onClick={() => setSel(s.id)}>
               <div className="t">{s.name}</div>
               <div className="m">
@@ -729,6 +1242,7 @@ function Suppliers({ toast }) {
             </div>
           ))}
         </div>
+        <Pager {...supPage} noun="supplier" />
       </Sidebar>
       {detail ? (
         <div className="sup-detail">
@@ -749,7 +1263,7 @@ function Suppliers({ toast }) {
               <div className="k">Detect by GSTIN</div><div className="mono">{detail.profile.detect_gstin || '—'}</div>
               <div className="k">Confirmed samples</div><div>{detail.profile.sample_count}</div>
             </div>
-          ) : <p className="small">No profile yet. Confirm one of this supplier's invoices with “Train” enabled to teach the system its format — after that, new invoices from them are auto-recognised and extracted with this profile.</p>}
+          ) : <p className="small">No profile yet.</p>}
         </div>
       ) : <div className="empty">Select a supplier to see its learned format.</div>}
     </div>
@@ -759,13 +1273,26 @@ function Suppliers({ toast }) {
 // ---------- purchases / GRN ----------
 // The attributes that make a breakdown row its own stock item — same set the phone
 // detail form and the QR payload carry. [key, label, column width]
+// The stock master's attribute columns (Attributes Reference.xlsx) less PRODUCT,
+// which is the category and has its own cell. Brand leads: it is what the eye
+// reaches for on a rack, and it is identity — an ESSA t-shirt and a YUVA t-shirt
+// in the same size are two stock items. Every one of these becomes part of the
+// variant's identity, its label and its QR.
 const SPLIT_ATTRS = [
-  ['size', 'Size', 90], ['color', 'Colour', 100], ['material', 'Material', 100],
-  ['pattern', 'Pattern', 100], ['fit', 'Fit', 85], ['product_type', 'Type', 90],
+  ['brand', 'Brand', 105], ['size', 'Size', 90], ['color', 'Colour', 100],
+  ['material', 'Material', 100], ['pattern', 'Pattern', 100], ['fit', 'Fit', 95],
+  ['style', 'Style', 105], ['sleeve', 'Sleeve', 90], ['product_type', 'Type', 100],
   ['design_no', 'Design No', 95],
 ]
-const SPLIT_MONEY = [['qty', 'Qty', 70], ['rate', 'Rate', 85], ['mrp', 'MRP', 85],
-  ['sale_price', 'Sale price', 90], ['sale_discount_pct', 'Discount %', 90]]
+//: The one figure that is genuinely PER ROW: how many of that variant arrived.
+//: It is the whole point of the breakdown, so it stays in the grid.
+const SPLIT_QTY = [['qty', 'Qty', 70]]
+// Money is NOT here. It used to be four more columns per row — rate, MRP,
+// discount %, sale price — which made a grid of ten attributes into a 1,700px
+// scroll, and every row of it carried the same four figures anyway: a bundle
+// broken into sizes is one product at one price in several sizes. It lives on
+// the LINE now, beside the rate and amount it is worked out against, and a
+// variant with none of its own takes the line's when the product is created.
 const blankVariant = (rate, category) => ({ ...Object.fromEntries(SPLIT_ATTRS.map(([k]) => [k, ''])),
   category: category || '', qty: '', rate: rate ?? '', mrp: '', sale_price: '', sale_discount_pct: '' })
 // quantities are floats — compare with the same tolerance the server posts with
@@ -799,10 +1326,12 @@ function Purchases({ selId, setSelId, toast }) {
   const [shortFor, setShortFor] = useState(null)   // line id whose shortage is open
   const [shrows, setShrows] = useState([])         // editable shortage rows
   const [shortOpts, setShortOpts] = useState({ reasons: [] })
+  const [units, setUnits] = useState({ types: [], rules: [] })   // unit master
   const refresh = useCallback(() => api.listPurchases().then(setList), [])
   useEffect(() => { refresh() }, [refresh])
   useEffect(() => { if (selId) api.getPurchase(selId).then(setGrn); else setGrn(null) }, [selId])
   useEffect(() => { api.productOptions().then(setOpts).catch(() => {}) }, [])
+  useEffect(() => { api.unitTypes().then(setUnits).catch(() => {}) }, [])
   useEffect(() => { api.categories().then((c) => setCats((c.items || []).map((i) => i.name))).catch(() => {}) }, [])
   useEffect(() => { api.shortageOptions().then(setShortOpts).catch(() => {}) }, [])
   useEffect(() => { setSplitFor(null); setSrows([]); setShortFor(null); setShrows([]) }, [selId])
@@ -822,7 +1351,11 @@ function Purchases({ selId, setSelId, toast }) {
       const r = await api.postGrn(selId)
       const sizes = r.size_rows ? ` · ${r.size_rows} size row(s)` : ''
       const short = r.short_qty ? ` · ${r.short_qty} short (₹ ${money(r.short_value)} to claim)` : ''
-      toast(`✓ Posted to inventory · ${r.products_created} new, ${r.products_updated} updated${sizes}${short}`, 'ok')
+      // a receipt that turned dozens into pairs has to say so — otherwise the
+      // stock figure looks like it lost half of what was billed
+      const conv = r.converted?.length ? `\n${r.converted.join('\n')}` : ''
+      const labels = r.pieces ? ` · ${r.pieces} QR label(s)` : ''
+      toast(`✓ Posted to inventory · ${r.products_created} new, ${r.products_updated} updated${sizes}${labels}${short}${conv}`, 'ok')
       reload()
     } catch (e) { toast('Post failed: ' + (e.detail || e.message), 'err') }
   }
@@ -902,21 +1435,89 @@ function Purchases({ selId, setSelId, toast }) {
       Object.keys(r).forEach((k) => { if (s[k] != null) r[k] = s[k] })
       return r
     }
+    if (l.splits.length) { setSrows(l.splits.map(from)); return }
     // a new row inherits the line's category (or the mapping it would get), so the
     // common case — one category, several sizes — needs no repetition
-    setSrows(l.splits.length ? l.splits.map(from)
-      : [blankVariant(l.rate, l.category || l.category_suggestion?.best)])
+    const blank = () => blankVariant(l.rate, l.category || l.category_suggestion?.best)
+    // The supplier printed the mix in the size column — "30:2, 32:4, 34:4, 36:2"
+    // is the count already done by whoever packed the carton. Re-keying it here
+    // is how it gets keyed wrong, so it arrives filled in and the operator checks
+    // it rather than types it. Nothing is saved until they press Save.
+    const run = l.size_breakdown
+    if (run?.rows?.length) {
+      setSrows(run.rows.map((r) => ({
+        ...blank(), size: String(r.size), qty: String(r.qty),
+        mrp: l.mrp ?? '', sale_price: l.sale_price ?? '',
+        sale_discount_pct: l.sale_discount_pct ?? '',
+      })))
+      toast(run.matches
+        ? `↳ ${run.rows.length} sizes read off the invoice — ${run.total} of ${receivedQty(l)}, adds up ✓`
+        : `↳ ${run.rows.length} sizes read off the invoice — ${run.why || 'check the quantities'}`,
+        run.matches ? 'ok' : 'warn')
+      return
+    }
+    setSrows([blank()])
   }
   const setLineCat = async (l, name) => {
     try { await api.editLine(l.id, { category: name }); await reload() }
     catch (e) { toast(e.detail || 'Could not set the category', 'err') }
   }
-  const updSrow = (i, k, v) => setSrows(srows.map((r, j) => (j === i ? { ...r, [k]: v } : r)))
+  // Retail pricing, on the LINE beside the rate and the amount it belongs with.
+  // It used to be four columns repeated down the breakdown grid, which is a
+  // strange place for it: a bundle broken into sizes is one product at one price
+  // in several sizes, and the server has always read a blank on a variant as
+  // "the line's" anyway. One place to type it, one place to correct it.
+  //
+  // The three move each other exactly as they do on the invoice review screen —
+  // MRP − Discount % = Sale price, in whichever direction was typed — so the
+  // whole trio is worked out here and sent together.
+  const setLinePrice = async (l, k, v) => {
+    const row = recalcSale({ mrp: l.mrp ?? '', sale_price: l.sale_price ?? '',
+                             sale_discount_pct: l.sale_discount_pct ?? '', [k]: v }, k)
+    const num = (x) => (x === '' || x == null ? null : (Number.isNaN(+x) ? null : +x))
+    try {
+      await api.editLine(l.id, { mrp: num(row.mrp), sale_price: num(row.sale_price),
+                                 sale_discount_pct: num(row.sale_discount_pct) })
+      await reload()
+    } catch (e) { toast(e.detail || 'Could not set the price', 'err') }
+  }
+  // What one of these IS — piece, pair, dozen. It decides how the billed quantity
+  // converts into stock and therefore how many QR labels the receipt produces, so
+  // it is set here, on the line, before anything is posted. The choice is
+  // remembered against the wording: say "pillow cover = PAIR" once and the next
+  // invoice arrives already counted in pairs.
+  const setLineUnit = async (l, code) => {
+    try {
+      const line = await api.editLine(l.id, { unit_type: code })
+      await reload()
+      toast(code
+        ? `✓ Counted in ${code} — ${line.unit?.explain || ''}`
+        : '✓ Back to automatic — the unit is read off the description', 'ok')
+    } catch (e) { toast(e.detail || 'Could not set the unit', 'err') }
+  }
+  // MRP − Discount % = Sale price, in whichever direction was typed. Only the
+  // three retail fields move each other; the purchase rate and the attributes
+  // are left exactly as entered.
+  const updSrow = (i, k, v) => setSrows(srows.map((r, j) =>
+    (j === i ? recalcSale({ ...r, [k]: v }, k) : r)))
   const splitSum = srows.reduce((s, r) => s + (+r.qty || 0), 0)
   const saveSplit = async (l, rows) => {
     try {
-      await api.setLineSplits(l.id, rows)
+      // Price is the LINE's, in one place, and the breakdown is a count of what
+      // arrived. So the rows go up carrying no price at all: the server reads a
+      // blank as "the line's" (see _create_product — the variant's own where it
+      // has any, otherwise the line's). Stripping it rather than leaving what an
+      // older breakdown saved is the point — a stale figure on a row would win
+      // over the MRP someone has just corrected on the line, silently.
+      const priced = rows.map((r) => {
+        const { rate, mrp, sale_price: _sp, sale_discount_pct: _sd, ...rest } = r
+        return rest
+      })
+      await api.setLineSplits(l.id, priced)
       setSplitFor(null); setSrows([])
+      // open the line you have just broken down: the rows that appear are the
+      // result of the edit, and folding them away would hide the answer
+      setOpenSplits((m) => ({ ...m, [l.id]: rows.length > 0 }))
       await reload()
       toast(rows.length ? `✓ ${l.description || 'Line'} broken into ${rows.length} item(s)` : '✓ Breakdown cleared', 'ok')
     } catch (e) { toast(e.detail || 'Could not save the breakdown', 'err') }
@@ -945,7 +1546,41 @@ function Purchases({ selId, setSelId, toast }) {
   }
   const shown = list.filter(inScope)
     .filter((p) => matches(p, q, ['supplier_name', 'invoice_number', 'status']))
+  const grnPage = usePaged(shown, 50)
   const [pcat, setPcat] = useState({})             // in-progress category per line id
+  // Which lines are showing their variant rows. A breakdown of a dozen sizes is
+  // a dozen rows under one line, each as tall as its attribute list — enough to
+  // push the next line off the screen. Folded away by default: the `split · N`
+  // badge already says they are there, and this is what opens them for a look.
+  const [openSplits, setOpenSplits] = useState({})
+  const splitsShown = (l) => !!openSplits[l.id]
+  const splitToggle = (l) => (l.splits.length ? (
+    <button className="btn splittoggle" onClick={() => setOpenSplits((m) => ({ ...m, [l.id]: !m[l.id] }))}
+      title={splitsShown(l) ? 'Fold the breakdown rows away'
+        : `Show the ${l.splits.length} row(s) this line breaks into`}>
+      {splitsShown(l) ? '▾' : '▸'} {l.splits.length}
+    </button>
+  ) : null)
+  // in-progress price per line, keyed "lineId:field" — the same hold-then-save
+  // the category cell uses, so a three-digit MRP is one PATCH and not three
+  const [pprice, setPprice] = useState({})
+  const priceCell = (l, k, tip) => {
+    const key = `${l.id}:${k}`
+    return (
+      <td className={'num' + (tip ? ' calc' : '')} title={tip}>
+        {editable ? (
+          <input value={pprice[key] ?? (l[k] ?? '')} placeholder="—"
+            onChange={(e) => setPprice((p) => ({ ...p, [key]: e.target.value }))}
+            onBlur={() => {
+              const v = pprice[key]
+              setPprice((p) => { const c = { ...p }; delete c[key]; return c })
+              if (v !== undefined && String(v) !== String(l[k] ?? '')) setLinePrice(l, k, v)
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} />
+        ) : (l[k] != null ? (k === 'sale_discount_pct' ? `${+l[k]}%` : money(l[k])) : '—')}
+      </td>
+    )
+  }
   return (
     <div className="body">
       <Sidebar id="grn" label="GRNs">
@@ -963,7 +1598,7 @@ function Purchases({ selId, setSelId, toast }) {
           {list.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>No GRNs yet. Open a confirmed document and click “Create GRN”.</div>}
           {list.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
             Nothing matches. {q ? 'Clear the search' : 'Try “All”'} to see the other {list.length} receipt(s).</div>}
-          {shown.map((p) => (
+          {grnPage.slice.map((p) => (
             <div key={p.id} className={'doc-row' + (selId === p.id ? ' sel' : '')} onClick={() => setSelId(p.id)}>
               <div className="t">{p.supplier_name || 'GRN #' + p.id}</div>
               <div className="m">
@@ -979,6 +1614,7 @@ function Purchases({ selId, setSelId, toast }) {
             </div>
           ))}
         </div>
+        <Pager {...grnPage} noun="receipt" />
       </Sidebar>
       {grn ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -995,25 +1631,27 @@ function Purchases({ selId, setSelId, toast }) {
             </div>
             <Section id="grn.lines" title="Lines → inventory match"
               summary={`${grn.lines.length} line(s) · ${grn.new_products} new product(s)`}>
-              <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
-                A bundle line (e.g. 250 pcs billed as one row) can be <b>broken down by
-                attributes</b> — size, colour, material, pattern, fit, type, design no. Each
-                distinct combination becomes its own product with its own QR, priced and
-                dispatched on its own. Set <b>Category</b> here and the products are created
-                already mapped, instead of arriving “unmapped” in Inventory.
-                {' '}Anything billed that <b>wasn’t in the box</b> goes under <b>Shortage</b> —
-                it stays out of stock, the invoice keeps its own quantity, and the gap becomes
-                a claim the debit note is built from.
-              </div>
               {/* the category master, shared by the line cells and the breakdown editor */}
               <datalist id="essa-cats">{cats.map((c) => <option key={c} value={c} />)}</datalist>
+              <div className="tablewrap">
               <table className="items">
                 <thead><tr><th>Product</th><th>QR code</th><th>Description</th>
                   <th style={{ minWidth: 150 }}>Category</th><th>HSN</th>
                   <th style={{ textAlign: 'right' }} title="What the supplier invoiced">Billed</th>
-                  <th style={{ textAlign: 'right' }} title="What actually came out of the boxes — this is what becomes stock">Received</th>
+                  <th style={{ textAlign: 'right' }} title="What actually came out of the boxes">Received</th>
+                  <th style={{ minWidth: 190 }} title="What one of these is — piece, pair, dozen — and what the billed quantity becomes because of it. This is what reaches stock, and how many QR labels print.">Unit → stock</th>
                   <th style={{ textAlign: 'right' }}>Rate</th>
-                  <th style={{ textAlign: 'right' }}>Amount</th><th>Match</th>
+                  <th style={{ textAlign: 'right' }}>Amount</th>
+                  {/* The retail trio, beside the purchase figures it is worked
+                      out against. Typed once on the line; every variant of a
+                      breakdown takes it from here. */}
+                  <th style={{ textAlign: 'right', minWidth: 78 }}
+                    title="What the supplier printed as the retail price">MRP</th>
+                  <th style={{ textAlign: 'right', minWidth: 88 }} className="calc"
+                    title="Off MRP. Type a sale price instead and this fills itself.">Discount % ƒ</th>
+                  <th style={{ textAlign: 'right', minWidth: 88 }} className="calc"
+                    title="MRP less the discount — e.g. 995 − 20% = 796. Type it and the discount % follows.">Sale price ƒ</th>
+                  <th>Match</th>
                   {editable && <th></th>}</tr></thead>
                 <tbody>
                   {grn.lines.map((l) => (
@@ -1057,8 +1695,36 @@ function Purchases({ selId, setSelId, toast }) {
                               + (l.excess_qty ? `, ${l.excess_qty} extra` : '') + ` → ${l.received_qty} into stock`
                             : 'All of it arrived'}>
                           {l.received_qty != null ? l.received_qty : l.qty}</td>
+                        {/* the conversion, shown before it is committed: a dozen
+                            pillow covers is six pairs and six labels, and nobody
+                            should find that out after posting */}
+                        <td>
+                          {editable ? (
+                            <select className="mono" style={{ fontSize: 11, width: '100%' }}
+                              value={l.unit_type || ''} disabled={l.unit?.locked}
+                              title={l.unit?.why || ''}
+                              onChange={(e) => setLineUnit(l, e.target.value)}>
+                              <option value="">auto{l.unit ? ` · ${l.unit.unit_type}` : ''}</option>
+                              {(units.types || []).map((t) => (
+                                <option key={t.code} value={t.code}>
+                                  {t.code}{t.pieces > 1 ? ` · ${t.pieces} pcs` : ''}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className="mono" style={{ fontSize: 11 }}>
+                              {l.unit?.unit_type || l.uom || 'PCS'}</span>
+                          )}
+                          {l.unit && (
+                            <div className="small" title={l.unit.why}
+                              style={{ marginTop: 3, color: l.unit.whole ? 'var(--muted)' : 'var(--warn)' }}>
+                              {l.unit.explain}</div>
+                          )}
+                        </td>
                         <td style={{ textAlign: 'right' }}>{money(l.rate)}</td>
                         <td style={{ textAlign: 'right' }}>{money(l.amount)}</td>
+                        {priceCell(l, 'mrp')}
+                        {priceCell(l, 'sale_discount_pct', 'Off MRP. Type a sale price instead and this fills itself.')}
+                        {priceCell(l, 'sale_price', 'MRP less the discount. Type it and the discount % follows.')}
                         <td>{l.splits.length
                           ? <span className={'badge ' + (l.split_balanced ? 'confirmed' : 'review')}
                               title={(l.split_balanced ? 'Breakdown adds up to what was received'
@@ -1066,16 +1732,31 @@ function Purchases({ selId, setSelId, toast }) {
                                 + ' — this bundle line does not receive stock itself; the rows below do'}>
                               split · {l.splits.length}{l.split_balanced ? '' : ' ⚠'}</span>
                           : <span className={'badge ' + (l.is_new_product ? 'review' : 'confirmed')}>
-                              {l.is_new_product ? 'new' : 'matched'}</span>}</td>
+                              {l.is_new_product ? 'new' : 'matched'}</span>}
+                          {/* a posted GRN has no actions column, so the fold
+                              control rides with the badge that counts them */}
+                          {!editable && splitToggle(l)}</td>
                         {editable && (
                           <td style={{ whiteSpace: 'nowrap' }}>
-                            <button className="btn" style={{ padding: '2px 8px' }} onClick={() => (splitFor === l.id ? setSplitFor(null) : openSplit(l))}
-                              title="Break the bundle into what actually arrived — size, colour, material…">
-                              {splitFor === l.id ? 'Close' : l.splits.length ? 'Edit breakdown' : 'Break down'}</button>
+                            <button className={'btn' + (!l.splits.length && l.size_breakdown?.rows?.length ? ' primary' : '')}
+                              style={{ padding: '2px 8px' }}
+                              onClick={() => (splitFor === l.id ? setSplitFor(null) : openSplit(l))}
+                              title={!l.splits.length && l.size_breakdown?.rows?.length
+                                ? `The invoice already carries the mix — ${l.size_breakdown.rows
+                                    .map((r) => `${r.size} → ${r.qty}`).join(', ')}`
+                                  + `\nTotal ${l.size_breakdown.total} of ${receivedQty(l)} received.`
+                                  + '\nClick to open it filled in, ready to check.'
+                                : 'Break the bundle into what actually arrived — size, colour, material…'}>
+                              {splitFor === l.id ? 'Close'
+                                : l.splits.length ? 'Edit breakdown'
+                                : l.size_breakdown?.rows?.length
+                                  ? `Break down · ${l.size_breakdown.rows.length} sizes`
+                                  : 'Break down'}</button>
                             <button className="btn" style={{ padding: '2px 8px', marginLeft: 4 }}
                               onClick={() => (shortFor === l.id ? setShortFor(null) : openShortage(l))}
                               title="Record what the supplier billed and the boxes didn't hold — it stays out of stock and becomes a claim">
                               {shortFor === l.id ? 'Close' : l.has_shortage ? '⚠ Shortage' : 'Shortage'}</button>
+                            {splitToggle(l)}
                             {!l.splits.length && (
                               <button className="btn" style={{ padding: '2px 8px', marginLeft: 4 }} onClick={() => scanInto(l, null)}
                                 title="Scan a QR code to pin this line to an existing product">⌗ QR</button>
@@ -1100,8 +1781,14 @@ function Purchases({ selId, setSelId, toast }) {
                           <td style={{ textAlign: 'right' }}>—</td>
                           <td style={{ textAlign: 'right', color: 'var(--warn)' }}>
                             {s.kind === 'excess' ? '+' : '−'}{s.qty}</td>
+                          {/* a shortage is counted in the BILLED unit — it is a
+                              fact about the invoice, not about the stock unit */}
+                          <td className="small" style={{ color: 'var(--muted)' }}>
+                            {s.kind === 'excess' ? 'into stock with the rest' : 'never converted'}</td>
                           <td style={{ textAlign: 'right' }}>{money(s.rate)}</td>
                           <td style={{ textAlign: 'right' }}>{s.claimable ? money(s.amount) : '—'}</td>
+                          {/* goods that never arrived have no retail price to state */}
+                          <td colSpan={3} />
                           {/* claiming or waiving is a decision for AFTER the goods are
                               booked in, so it lives on the posted GRN — while the GRN is
                               still a draft the shortage itself is what is being edited */}
@@ -1121,15 +1808,15 @@ function Purchases({ selId, setSelId, toast }) {
                         </tr>
                       ))}
 
-                      {/* saved variant rows — one product each once posted */}
-                      {splitFor !== l.id && l.splits.map((s) => (
+                      {/* saved variant rows — one product each once posted.
+                          Folded away unless this line's toggle is open. */}
+                      {splitFor !== l.id && splitsShown(l) && l.splits.map((s) => (
                         <tr key={s.id} style={{ background: 'var(--panel-2)' }}>
                           <td className="mono" style={{ color: 'var(--muted)' }}>{s.product_sku || '—'}</td>
                           <td className="mono">{s.product_barcode || s.code || <span style={{ color: 'var(--muted)' }}>on post</span>}</td>
-                          <td style={{ paddingLeft: 22 }}>↳ <b>{s.label}</b>
-                            {s.mrp != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>MRP {money(s.mrp)}</span>}
-                            {s.sale_price != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>sale {money(s.sale_price)}</span>}
-                            {s.sale_discount_pct != null && <span className="small" style={{ marginLeft: 8, color: 'var(--muted)' }}>−{s.sale_discount_pct}%</span>}</td>
+                          {/* the prices used to be repeated here as chips; they
+                              have columns of their own now, beside the line's */}
+                          <td style={{ paddingLeft: 22 }}>↳ <b>{s.label}</b></td>
                           <td className="mono" style={{ fontSize: 11 }}>{s.category || l.category
                             || <span style={{ color: 'var(--muted)' }}>auto</span>}</td>
                           <td>{l.hsn}</td>
@@ -1137,8 +1824,23 @@ function Purchases({ selId, setSelId, toast }) {
                               billed it separately, so there is nothing under "Billed" */}
                           <td style={{ textAlign: 'right', color: 'var(--muted)' }}>—</td>
                           <td style={{ textAlign: 'right' }}>{s.qty}</td>
+                          <td className="small" title={s.unit?.why}
+                            style={{ color: s.unit && !s.unit.whole ? 'var(--warn)' : 'var(--muted)' }}>
+                            {s.unit?.explain || '—'}</td>
                           <td style={{ textAlign: 'right' }}>{money(s.rate)}</td>
                           <td style={{ textAlign: 'right' }}>{money(s.amount)}</td>
+                          {/* a variant prices off its line unless it was saved
+                              with one of its own — the same fallback the server
+                              applies when it creates the product */}
+                          {['mrp', 'sale_discount_pct', 'sale_price'].map((k) => {
+                            const own = s[k] != null
+                            const v = own ? s[k] : l[k]
+                            return (
+                              <td key={k} className="num" style={{ color: own ? undefined : 'var(--muted)' }}
+                                title={own ? 'Set on this variant' : 'From the line'}>
+                                {v == null ? '—' : k === 'sale_discount_pct' ? `${+v}%` : money(v)}</td>
+                            )
+                          })}
                           <td>{s.product_id
                             ? <span className="badge confirmed">{s.is_new_product ? 'created' : 'matched'}</span>
                             : <span className="badge review">new</span>}</td>
@@ -1158,8 +1860,9 @@ function Purchases({ selId, setSelId, toast }) {
                         const over = missing > (+l.qty || 0) + 0.001
                         return (
                           <tr>
-                            <td colSpan={editable ? 11 : 10} style={{ background: 'var(--warn-bg)', padding: '12px 14px' }}>
-                              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
+                            <td colSpan={editable ? 15 : 14} style={{ background: 'var(--warn-bg)', padding: '12px 14px' }}>
+                              <div className="rowedit-bar"
+                                style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 4 }}>
                                 <b>Shortage on “{l.description}”</b>
                                 <span className="small" style={{ color: over ? 'var(--danger)' : missing ? 'var(--warn)' : 'var(--muted)' }}>
                                   {over ? `${missing} short of only ${l.qty} billed — more than the invoice`
@@ -1168,13 +1871,8 @@ function Purchases({ selId, setSelId, toast }) {
                                       {extra ? ` · ${extra} extra` : ''}</>}
                                 </span>
                               </div>
-                              <div className="small" style={{ color: 'var(--muted)', marginBottom: 10 }}>
-                                Normally keyed on the phone by whoever opens the cartons — they are the
-                                only ones who can know it. Recorded here, the missing units stay <b>out of
-                                stock</b>, the invoice keeps its own quantity so payables still reconcile,
-                                and the gap becomes a claim the debit note is built from.
-                              </div>
-                              <table className="items" style={{ margin: 0 }}>
+                              <div className="tablewrap">
+                              <table className="items entry" style={{ margin: 0 }}>
                                 <thead><tr>
                                   <th style={{ minWidth: 230 }}>What happened</th>
                                   <th style={{ minWidth: 90, textAlign: 'right' }}>Qty</th>
@@ -1206,12 +1904,13 @@ function Purchases({ selId, setSelId, toast }) {
                                   </tr>
                                 ))}</tbody>
                               </table>
+                              </div>
                               <datalist id="essa-short-reasons">
                                 {(shortOpts.reasons || []).map((v) => <option key={v} value={v} />)}
                               </datalist>
-                              <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
+                              <div className="rowedit-bar"
+                                style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
                                 <button className="btn" onClick={() => setShrows([...shrows, blankShortage()])}>+ add row</button>
-                                <div style={{ flex: 1 }} />
                                 {l.has_shortage && (
                                   <button className="btn" onClick={() => saveShortage(l, [])}
                                     title="No shortage after all — the whole billed quantity is expected in stock again">
@@ -1229,19 +1928,30 @@ function Purchases({ selId, setSelId, toast }) {
                       {/* attribute-breakdown editor */}
                       {splitFor === l.id && (
                         <tr>
-                          <td colSpan={editable ? 11 : 10} style={{ background: 'var(--panel-2)', padding: '12px 14px' }}>
-                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+                          <td colSpan={editable ? 15 : 14} style={{ background: 'var(--panel-2)', padding: '12px 14px' }}>
+                            <div className="rowedit-bar"
+                              style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
                               <b>Breakdown of “{l.description}”</b>
                               {/* the target is what ARRIVED — once a shortage is recorded the
                                   rows only have to reach that, which is the point of recording it */}
-                              <span className="small" style={{ color: sameQty(splitSum, receivedQty(l)) ? 'var(--ok)' : 'var(--muted)' }}>
-                                {splitSum} of {receivedQty(l)} assigned
-                                {l.has_shortage ? ` (${l.qty} billed, ${l.missing_qty} short)` : ''}
-                                {sameQty(splitSum, receivedQty(l)) ? ' ✓' : ` · ${round3(receivedQty(l) - splitSum)} left`}
-                              </span>
-                              <span className="small" style={{ color: 'var(--muted)' }}>
-                                — fill only the attributes that differ; each row becomes one product
-                              </span>
+                              {/* the running check. It is the breakdown, not the
+                                  billed bundle, that decides what exists — so it
+                                  has to account for every piece before any of
+                                  them gets a SKU and a QR */}
+                              {(() => {
+                                const left = round3(receivedQty(l) - splitSum)
+                                const ok = sameQty(splitSum, receivedQty(l))
+                                return (
+                                  <span className="small" style={{ color: ok ? 'var(--ok)' : 'var(--warn)', fontWeight: 600 }}>
+                                    {splitSum} of {receivedQty(l)} assigned
+                                    {l.has_shortage ? ` (${l.qty} billed, ${l.missing_qty} short)` : ''}
+                                    {ok ? ' ✓'
+                                      : left > 0
+                                        ? ` · ${left} piece${left === 1 ? '' : 's'} remaining. Please complete the size breakdown before posting to inventory.`
+                                        : ` · ${-left} piece${left === -1 ? '' : 's'} more than were received — remove them before posting.`}
+                                  </span>
+                                )
+                              })()}
                               {/* the moment someone notices the sizes don't add up: "the rest
                                   never came" is an answer, and it must be easier than inventing
                                   the difference to make the total work */}
@@ -1253,12 +1963,13 @@ function Purchases({ selId, setSelId, toast }) {
                                 </button>
                               )}
                             </div>
-                            <div style={{ overflowX: 'auto' }}>
-                              <table className="items" style={{ margin: 0, minWidth: 1340 }}>
+                            <div className="tablewrap">
+                              <table className="items entry" style={{ margin: 0, minWidth: 1250 }}>
                                 <thead><tr>
                                   {SPLIT_ATTRS.map(([k, label, w]) => <th key={k} style={{ minWidth: w }}>{label}</th>)}
                                   <th style={{ minWidth: 150 }}>Category</th>
-                                  {SPLIT_MONEY.map(([k, label, w]) => <th key={k} style={{ minWidth: w, textAlign: 'right' }}>{label}</th>)}
+                                  {SPLIT_QTY.map(([k, label, w]) =>
+                                    <th key={k} style={{ minWidth: w, textAlign: 'right' }}>{label}</th>)}
                                   <th></th></tr></thead>
                                 <tbody>{srows.map((r, i) => (
                                   <tr key={i}>
@@ -1269,9 +1980,10 @@ function Purchases({ selId, setSelId, toast }) {
                                     <td><input list="essa-cats" className="mono" style={{ fontSize: 11 }}
                                       placeholder={l.category || 'auto'} value={r.category}
                                       onChange={(e) => updSrow(i, 'category', e.target.value)} /></td>
-                                    {SPLIT_MONEY.map(([k]) => (
-                                      <td key={k} className="num"><input value={r[k]}
-                                        onChange={(e) => updSrow(i, k, e.target.value)} /></td>
+                                    {SPLIT_QTY.map(([k]) => (
+                                      <td key={k} className="num">
+                                        <input value={r[k]}
+                                          onChange={(e) => updSrow(i, k, e.target.value)} /></td>
                                     ))}
                                     <td><button className="btn" style={{ padding: '2px 7px' }} title="Remove this row"
                                       onClick={() => setSrows(srows.filter((_, j) => j !== i))}>×</button></td>
@@ -1285,13 +1997,24 @@ function Purchases({ selId, setSelId, toast }) {
                                 {(opts[k] || []).map((v) => <option key={v} value={v} />)}
                               </datalist>
                             ))}
-                            <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
-                              <button className="btn" onClick={() => setSrows([...srows,
-                                blankVariant(l.rate, srows[srows.length - 1]?.category || l.category || l.category_suggestion?.best)])}>+ add row</button>
+                            <div className="rowedit-bar"
+                              style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
+                              {/* a new row joins the price the bar above already
+                                  set — otherwise adding one would drop the whole
+                                  breakdown to "mixed" and blank the bar */}
+                              <button className="btn" onClick={() => {
+                                const last = srows[srows.length - 1]
+                                const row = blankVariant(l.rate,
+                                  last?.category || l.category || l.category_suggestion?.best)
+                                setSrows([...srows, last
+                                  ? { ...row, rate: last.rate, mrp: last.mrp,
+                                      sale_price: last.sale_price,
+                                      sale_discount_pct: last.sale_discount_pct }
+                                  : row])
+                              }}>+ add row</button>
                               <button className="btn" title="Copy the last row's attributes into a new row — change just what differs"
                                 disabled={!srows.length}
                                 onClick={() => setSrows([...srows, { ...srows[srows.length - 1], qty: '' }])}>⧉ duplicate last</button>
-                              <div style={{ flex: 1 }} />
                               {l.splits.length > 0 && (
                                 <button className="btn" onClick={() => saveSplit(l, [])}
                                   title="Remove the breakdown — the line posts as one product again">Clear breakdown</button>
@@ -1307,6 +2030,7 @@ function Purchases({ selId, setSelId, toast }) {
                   ))}
                 </tbody>
               </table>
+              </div>
               <div className="items-foot"><span>{grn.lines.length} lines</span>
                 {shortage.claimable_qty > 0 && (
                   <span style={{ color: 'var(--warn)' }}>
@@ -1324,7 +2048,7 @@ function Purchases({ selId, setSelId, toast }) {
                 ? `Posted. ⚠ ${shortage.open_qty} unit(s) short — ₹ ${money(shortage.open_value)} still to claim. Raise it in Returns, or waive it on the row.`
                 : 'Posted — stock has been updated in Inventory. Unpost to correct it, then post again.'
               : unbalanced
-                ? `⚠ ${unbalanced} line(s) have a breakdown that doesn’t add up to what was received — fix them, or record what didn’t arrive as a shortage.`
+                ? `⚠ ${unbalanced} line(s): please complete the size breakdown before posting to inventory — every piece has to be placed, or recorded as a shortage if it never arrived.`
                 : shortage.claimable_qty > 0
                   ? `Posting takes in ${grn.lines.reduce((n, l) => n + receivedQty(l), 0)} unit(s). The ${shortage.claimable_qty} short stay out of stock and become a claim against the supplier.`
                   : 'Posting creates new products, adds inward stock, and updates weighted-average cost.'}</span>
@@ -1347,8 +2071,9 @@ function Purchases({ selId, setSelId, toast }) {
 // Shown read-only on the product panel: these are keyed on the GRN breakdown and
 // corrected in the phone app, never re-typed here.
 const PRODUCT_ATTRS = [
-  ['size', 'Size'], ['color', 'Colour'], ['material', 'Material'], ['pattern', 'Pattern'],
-  ['fit', 'Fit'], ['product_type', 'Type'], ['design_no', 'Design No'],
+  ['brand', 'Brand'], ['size', 'Size'], ['color', 'Colour'], ['material', 'Material'],
+  ['pattern', 'Pattern'], ['fit', 'Fit'], ['style', 'Style'], ['sleeve', 'Sleeve'],
+  ['product_type', 'Type'], ['design_no', 'Design No'],
   ['sale_price', 'Sale price'], ['sale_discount_pct', 'Discount %'],
 ]
 function Inventory({ toast }) {
@@ -1392,6 +2117,8 @@ function Inventory({ toast }) {
     }
   }
   const reloadUnits = async () => { if (units) setUnits(await api.productUnits(units.product.id)) }
+  // up to 500 piece codes under one SKU — see units.MAX_PER_RECEIPT
+  const unitPage = usePaged(units?.units || [], 100)
   // printing is recorded, so the sheet has to be reloaded to show the new counts
   const printUnits = (ids) => {
     if (units?.can_print === false) { toast(units.print_block, 'err'); return }
@@ -1410,7 +2137,7 @@ function Inventory({ toast }) {
   const [scan, setScan] = useState('')
   const lookup = async (code) => {
     const c = (code ?? scan).trim(); if (!c) return
-    try { const p = await api.lookupByCode(c); await open(p.id); setScan(''); toast(`✓ ${p.sku} · ${p.description}`, 'ok') }
+    try { const p = await api.lookupByCode(c); await open(p.id); setScan(''); toast(`✓ ${p.sku} · ${p.name || p.description}`, 'ok') }
     catch (err) { toast(err.detail || `No product for “${c}”`, 'err') }
   }
   // --- inventory integrity: what is stock, and what only looks like it ---
@@ -1456,6 +2183,8 @@ function Inventory({ toast }) {
     .filter((p) => !catFilter || (p.category || '').toLowerCase().includes(catFilter.toLowerCase()))
     .filter((p) => !supFilter || (p.supplier_name || '').toLowerCase().includes(supFilter.toLowerCase()))
     .filter((p) => matches(p, q, ['sku', 'barcode', 'description', 'hsn', 'supplier_name', 'category', 'size']))
+  // inventory gains a row per variant received, so it outgrows a screen quickly
+  const invPage = usePaged(visible, 50)
   const printLabels = () => {
     if (!products.length) { toast('No products yet — post a GRN to create products first.', 'err'); return }
     if (labelCount === 0) { toast('No detailed products yet. Detail products first, or switch to “All products”.', 'err'); return }
@@ -1519,12 +2248,6 @@ function Inventory({ toast }) {
         {scanRep && !scanRep.clean && (
           <div className="section" style={{ borderColor: 'var(--danger)', marginBottom: 14 }}>
             <h4 style={{ color: 'var(--danger)' }}>⚠ Inventory mismatch detected</h4>
-            <div className="small" style={{ color: 'var(--muted)', margin: '-4px 0 10px' }}>
-              Stock is only ever created by posting a GRN, so a record that traces back to
-              no posted GRN is not stock. These are hidden from Inventory, excluded from the
-              valuation and blocked from printing labels — a stale code carries a real-looking
-              QR and scans like any other, so it can’t be left in circulation.
-            </div>
             <table className="items" style={{ margin: 0 }}>
               <thead><tr><th>What</th><th style={{ textAlign: 'right' }}>Count</th><th>Meaning</th></tr></thead>
               <tbody>
@@ -1565,12 +2288,13 @@ function Inventory({ toast }) {
             </div>
           </div>
         )}
+        <div className="tablewrap">
         <table className="items">
-          <thead><tr><th style={{ width: 46 }}>QR</th><th>SKU</th><th>Description</th><th>Size</th><th>Category</th><th>HSN</th><th>Supplier</th>
+          <thead><tr><th style={{ width: 46 }}>QR</th><th>SKU</th><th>Product</th><th>Size</th><th>Category</th><th>HSN</th><th>Supplier</th>
             <th style={{ textAlign: 'right' }}>Stock</th><th style={{ textAlign: 'right' }}>Avg cost</th>
             <th style={{ textAlign: 'right' }}>Value</th></tr></thead>
           <tbody>
-            {visible.map((p) => (
+            {invPage.slice.map((p) => (
               <tr key={p.id} style={{ cursor: 'pointer', background: detail?.id === p.id ? 'var(--panel-2)' : '' }} onClick={() => open(p.id)}>
                 {/* The real QR, small enough for a list and still scannable off the
                     screen. `lazy` keeps a long list from firing a request per row. */}
@@ -1580,7 +2304,16 @@ function Inventory({ toast }) {
                     style={{ width: 34, height: 34, display: 'block', background: '#fff', borderRadius: 3, padding: 1 }} />
                 </td>
                 <td className="mono" style={{ color: 'var(--muted)' }}>{p.sku}</td>
-                <td>{p.description}</td>
+                {/* What it IS leads; what the supplier's bill called it sits
+                    under it. "TISSOT Lycra" is a mill's wording and names
+                    nothing anyone picks off a shelf — see display_name. */}
+                <td>
+                  <div>{p.name || p.description}</div>
+                  {p.description && p.description !== (p.name || '') && (
+                    <div className="small" style={{ color: 'var(--muted)' }}
+                      title="What the supplier's invoice called it">{p.description}</div>
+                  )}
+                </td>
                 {/* sizes split off one bundle line share a description — the size is what tells them apart */}
                 <td>{p.size || '—'}</td>
                 <td className="mono" style={{ fontSize: 11 }}>{p.category
@@ -1607,6 +2340,8 @@ function Inventory({ toast }) {
             ))}
           </tbody>
         </table>
+        </div>
+        <Pager {...invPage} noun="product" />
         {/* A list shortened by a filter must say so, or it reads as stock that
             has gone missing — the one misreading this screen cannot afford. */}
         {products.length > 0 && (
@@ -1629,12 +2364,18 @@ function Inventory({ toast }) {
           <div className="piece-card" onClick={(e) => e.stopPropagation()}>
             <div className="piece-head">
               <b className="mono">{units.product.sku}</b>
-              <span>{units.product.description}</span>
+              <span>{units.product.name || units.product.description}</span>
               <span className="small">
                 {[units.product.size, units.product.color].filter(Boolean).join(' · ')}
               </span>
+              {/* one code per stock unit. For a pair product that unit IS two
+                  garments, so the panel says how many pieces are behind it —
+                  otherwise "6 codes, 12 pillow covers" reads as a shortfall */}
               <span style={{ marginLeft: 'auto' }} className="small">
-                {units.count} piece{units.count === 1 ? '' : 's'} of {units.product.stock_qty} {units.product.uom} in stock
+                {units.count} code{units.count === 1 ? '' : 's'} for {units.product.stock_qty} {units.product.uom} in stock
+                {units.product.pieces_per_unit > 1
+                  ? ` · 1 ${units.product.unit_type} = ${units.product.pieces_per_unit} pcs`
+                  : ''}
               </span>
               <button className="btn" onClick={() => setUnits(null)}>✕</button>
             </div>
@@ -1659,7 +2400,7 @@ function Inventory({ toast }) {
                 </p>
               ) : (
                 <div className="piece-grid">
-                  {units.units.map((u) => {
+                  {unitPage.slice.map((u) => {
                     // a dead code is indistinguishable from a live one — same format,
                     // same QR, same product — so it has to be marked, not left to the eye
                     const dead = u.state && u.state !== 'posted'
@@ -1686,6 +2427,7 @@ function Inventory({ toast }) {
                   })}
                 </div>
               )}
+              <Pager {...unitPage} noun="piece code" />
             </div>
 
             <div className="piece-foot">
@@ -1738,7 +2480,12 @@ function Inventory({ toast }) {
                 the GRN, correct it there and post again — one place, one truth. */}
             <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '0 0 10px' }}>Product</h4>
             <div className="kv">
-              <div className="k">Description</div><div><b>{detail.description}</b></div>
+              {/* the name is the category; the supplier's wording keeps its own
+                  row rather than the name's, because it is still what a re-buy
+                  is matched on and it belongs to the invoice, not to us */}
+              <div className="k">Name</div><div><b>{detail.name || detail.description}</b></div>
+              <div className="k">On the invoice</div>
+              <div style={{ color: 'var(--text-2)' }}>{detail.description || '—'}</div>
               <div className="k">HSN</div><div>{detail.hsn || '—'}</div>
               <div className="k">UOM</div><div>{detail.uom || '—'}</div>
               <div className="k">MRP</div><div>{detail.mrp != null ? '₹ ' + money(detail.mrp) : '—'}</div>
@@ -1747,10 +2494,6 @@ function Inventory({ toast }) {
                 ? <>{detail.category}{detail.category_section && <span style={{ color: 'var(--muted)' }}> · {detail.category_section}</span>}</>
                 : <span className="badge review" title="No confident match from the description — set it on the GRN line and re-post">unmapped</span>}</div>
               <div className="k">Supplier</div><div>{detail.supplier_name || '—'}</div>
-            </div>
-            <div className="small" style={{ color: 'var(--muted)', margin: '8px 0 0' }}>
-              Set on the invoice and the <b>GRN</b>. To correct any of it, open the GRN,
-              press <b>↺ Unpost</b>, fix the line and post again.
             </div>
 
             <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '18px 0 8px' }}>
@@ -1767,10 +2510,11 @@ function Inventory({ toast }) {
                 )
               })}
             </div>
-            <div className="small" style={{ color: 'var(--muted)', marginBottom: 4 }}>
-              Set on the <b>GRN breakdown</b> when the goods are received, and updated in the
-              phone app{detail.detailed_by ? <> — last detailed by <b>{detail.detailed_by}</b></> : ''}.
-            </div>
+            {detail.detailed_by && (
+              <div className="small" style={{ color: 'var(--muted)', marginBottom: 4 }}>
+                Last detailed by <b>{detail.detailed_by}</b>
+              </div>
+            )}
 
             <div className="kv" style={{ margin: '18px 0' }}>
               <div className="k">Current stock</div><div><b>{detail.stock_qty}</b> {detail.uom}</div>
@@ -1789,8 +2533,7 @@ function Inventory({ toast }) {
                 </div>
                 {detail.barcode && (
                   <div className="small" style={{ marginTop: 6, color: 'var(--muted)' }}>
-                    Supplier's printed code: <span className="mono">{detail.barcode}</span> — kept so a
-                    re-buy matches this product, not printed on our label.
+                    Supplier's printed code: <span className="mono">{detail.barcode}</span>
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
@@ -1801,7 +2544,7 @@ function Inventory({ toast }) {
             ) : detail.detailed ? (
               <button className="btn primary" onClick={genBarcode}>Generate SKU + QR</button>
             ) : (
-              <p className="small">The SKU and its QR are assigned automatically once all product details are set (via the mobile detail form), or generate them manually after detailing.</p>
+              <p className="small">No SKU or QR yet.</p>
             )}
 
             <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '0 0 8px' }}>Adjust stock</h4>
@@ -1828,7 +2571,7 @@ function Inventory({ toast }) {
                 <div className="k">Discount %</div><div>{detail.sale_discount_pct != null ? detail.sale_discount_pct + '%' : '—'}</div>
                 <div className="k">By</div><div>{detail.detailed_by || '—'}{detail.detailed_at ? ' · ' + detail.detailed_at.slice(0, 10) : ''}</div>
               </div>
-            ) : <p className="small">Not yet detailed. Use the ESSA Warehouse mobile app to record color, size, material, MRP, sale price, etc.</p>}
+            ) : <p className="small">Not yet detailed.</p>}
 
             <h4 style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', margin: '18px 0 8px' }}>Stock movements</h4>
             <table className="items"><thead><tr><th>Kind</th><th style={{ textAlign: 'right' }}>Qty</th>
@@ -1973,10 +2716,6 @@ function ProductCardModal({ product, onClose }) {
             </div>
           </div>
         </div>
-        <div className="piece-foot">
-          <span className="small">Scanning this QR anywhere in the app resolves to this product — it carries
-            the whole record, so it reads with no network too.</span>
-        </div>
       </div>
     </div>
   )
@@ -2016,6 +2755,131 @@ function ScanBox({ onScan, placeholder, label }) {
   )
 }
 
+// ---------- picking many products at once ----------
+// The dropdown on a dispatch row answers one question — "which product is THIS
+// line?" — and answers it once per line. A note carrying twenty products was
+// twenty blank rows and twenty hunts down the same list, which is where the time
+// on this screen went. This is that list as a tick sheet: filter it, tick what is
+// going, correct the quantities, and the rows arrive already filled in.
+//
+// Two rules it keeps, both so that nothing you have already typed can be undone
+// from in here:
+//   * it only ADDS. A product already on the note is listed and disabled rather
+//     than dropped from the list, so "where is it?" is answered on screen.
+//   * quantity starts at the whole of what is on hand, because dispatching a
+//     line usually means dispatching the line — and it is a text box, not a
+//     figure that is committed to.
+// Stock it cannot dispatch is not offered at all: a row for something with none
+// on hand can only be refused at posting time.
+function ProductPicker({ products, already, onAdd, onClose }) {
+  const [q, setQ] = useState('')
+  const [picked, setPicked] = useState({})        // product_id -> qty, as typed
+  const here = new Set((already || []).map(Number))
+  const shown = products.filter((p) => (+p.stock_qty || 0) > 0)
+    .filter((p) => matches(p, q, ['description', 'sku', 'size', 'color', 'category']))
+  const chosen = Object.keys(picked)
+  const units = chosen.reduce((n, k) => n + (+picked[k] || 0), 0)
+
+  // What the header tick acts on: the rows ON SCREEN that are not already on the
+  // note. So "pillow" then tick-all is "every pillow cover", not the warehouse —
+  // and un-ticking it leaves anything picked under an earlier search alone,
+  // because taking away a choice the filter is hiding is the one thing a tick
+  // box must not do quietly. The footer count is what tells you they are there.
+  const selectable = shown.filter((p) => !here.has(+p.id))
+  const allOn = selectable.length > 0 && selectable.every((p) => p.id in picked)
+  const someOn = selectable.some((p) => p.id in picked)
+
+  const toggle = (p) => setPicked((m) => {
+    const next = { ...m }
+    if (p.id in next) delete next[p.id]
+    else next[p.id] = String(p.stock_qty)
+    return next
+  })
+  const toggleAll = () => setPicked((m) => {
+    const next = { ...m }
+    selectable.forEach((p) => {
+      if (allOn) delete next[p.id]
+      else if (!(p.id in next)) next[p.id] = String(p.stock_qty)
+    })
+    return next
+  })
+  const add = () => {
+    const rows = chosen
+      .map((k) => ({ product_id: String(k), qty: String(+picked[k] || 0) }))
+      .filter((r) => +r.qty > 0)
+    if (rows.length) onAdd(rows)
+  }
+
+  return (
+    <div className="piece-wrap" onClick={onClose}>
+      <div className="piece-card" style={{ maxWidth: 880 }} onClick={(e) => e.stopPropagation()}>
+        <div className="piece-head">
+          <b>Add products</b>
+          <span className="small" style={{ color: 'var(--muted)' }}>{shown.length} in stock</span>
+          <button className="btn" style={{ marginLeft: 'auto' }} onClick={onClose}>✕</button>
+        </div>
+        <div className="piece-body">
+          <SearchBox value={q} onChange={setQ} placeholder="Search product / SKU / size / colour…" />
+          <div className="tablewrap" style={{ marginTop: 10 }}>
+            <table className="items entry">
+              <thead><tr>
+                <th style={{ width: 30 }}>
+                  {/* half-ticked when only some of the shown rows are chosen —
+                      a box that reads "none" over a part-selection is a lie */}
+                  <input type="checkbox" checked={allOn} disabled={!selectable.length}
+                    ref={(el) => { if (el) el.indeterminate = !allOn && someOn }}
+                    onChange={toggleAll}
+                    title={allOn ? 'Clear the ones shown'
+                      : `Tick all ${selectable.length} shown`} />
+                </th><th>Product</th><th>Category</th>
+                <th style={{ textAlign: 'right', width: 90 }}>On hand</th>
+                <th style={{ textAlign: 'right', width: 110 }}>Qty</th>
+              </tr></thead>
+              <tbody>{shown.map((p) => {
+                const on = p.id in picked
+                const got = here.has(+p.id)
+                return (
+                  <tr key={p.id} style={{ opacity: got ? 0.5 : 1, cursor: got ? 'default' : 'pointer' }}
+                    onClick={() => { if (!got) toggle(p) }}
+                    title={got ? 'Already on this note — change the quantity on the row itself' : ''}>
+                    <td><input type="checkbox" checked={on} disabled={got} readOnly /></td>
+                    <td>
+                      <div>{p.name || p.description}</div>
+                      <span className="small mono" style={{ color: 'var(--muted)' }}>
+                        {p.sku}{p.size ? ' · ' + p.size : ''}{p.color ? ' · ' + p.color : ''}
+                        {got ? ' · on this note' : ''}</span>
+                    </td>
+                    <td className="small">{p.category || '—'}</td>
+                    <td className="num">{p.stock_qty} {p.uom}</td>
+                    {/* the quantity box is the one place a click must not tick the row */}
+                    <td className="num" onClick={(e) => e.stopPropagation()}>
+                      <input value={picked[p.id] ?? ''} disabled={got || !on}
+                        onChange={(e) => setPicked((m) => ({ ...m, [p.id]: e.target.value }))} /></td>
+                  </tr>
+                )
+              })}</tbody>
+            </table>
+          </div>
+          {shown.length === 0 && <div className="empty" style={{ marginTop: 24 }}>
+            {q ? 'Nothing matches.' : 'No product has stock to dispatch.'}</div>}
+        </div>
+        <div className="piece-foot">
+          <span className="small">{chosen.length} selected · {round3(units)} unit(s)</span>
+          {/* the only way to drop ticks a search is currently hiding */}
+          {chosen.length > 0 && (
+            <button className="btn" style={{ padding: '2px 9px' }} onClick={() => setPicked({})}
+              title="Drop every tick, including any the search is hiding">Clear</button>
+          )}
+          <div style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={!units} onClick={add}>
+            Add{chosen.length ? ` ${chosen.length}` : ''}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---------- stock outward ----------
 function StockOutward({ toast }) {
   const [list, setList] = useState([])
@@ -2036,8 +2900,10 @@ function StockOutward({ toast }) {
   // tab going blank rather than one broken value
   const shown = list.filter((o) => scope === 'all' || o.status === scope)
     .filter((o) => matches(o, q, ['to_destination', 'code', 'status']))
+  const outPage = usePaged(shown, 50)
   const [zoom, setZoom] = useState(null)          // a product card, opened large
   const [cards, setCards] = useState({})          // product_id -> full record, for the draft rows
+  const [picking, setPicking] = useState(false)   // the tick-sheet over stock is open
   const refresh = useCallback(() => api.listOutwards().then(setList), [])
   useEffect(() => { refresh(); api.listProducts().then(setProducts) }, [refresh])
   useEffect(() => { if (sel) api.getOutward(sel).then(setForm2); function setForm2(o){ setDetail(o) } }, [sel])
@@ -2051,8 +2917,27 @@ function StockOutward({ toast }) {
     try { const c = await api.productCard(id); setCards((m) => ({ ...m, [c.product_id]: c })) }
     catch { /* a product with no card is still dispatchable — the row just stays plain */ }
   }, [cards])
+  // The same fill for a whole batch of rows. Deduped against what is already
+  // held BEFORE the requests go out: loadCard in a loop reads one stale `cards`
+  // and asks the server for the same record as many times as it is called.
+  const loadCards = useCallback(async (ids) => {
+    const want = [...new Set(ids.map(Number))].filter((id) => id && !cards[id])
+    await Promise.all(want.map(async (id) => {
+      try { const c = await api.productCard(id); setCards((m) => ({ ...m, [c.product_id]: c })) }
+      catch { /* as above — the row still dispatches, it just stays plain */ }
+    }))
+  }, [cards])
 
   const addLine = () => setForm({ ...form, lines: [...form.lines, { product_id: '', qty: 1 }] })
+  // Rows arriving from the picker. They land on the END of the note, and a blank
+  // row left over from "+ add item" is consumed rather than left sitting under
+  // them looking like an item nobody finished choosing.
+  const addPicked = (rows) => {
+    setForm((f) => ({ ...f, lines: [...f.lines.filter((l) => l.product_id), ...rows] }))
+    setPicking(false)
+    loadCards(rows.map((r) => r.product_id))
+    toast(`✓ ${rows.length} product${rows.length === 1 ? '' : 's'} added`, 'ok')
+  }
   const updLine = (i, k, v) => {
     const l = form.lines.map(x => ({ ...x })); l[i][k] = v; setForm({ ...form, lines: l })
     if (k === 'product_id') loadCard(v)
@@ -2118,7 +3003,7 @@ function StockOutward({ toast }) {
         <div className="list">
           {list.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
             Nothing matches. Try “All” or clear the search.</div>}
-          {shown.map((o) => (
+          {outPage.slice.map((o) => (
             <div key={o.id} className={'doc-row' + (sel === o.id && !creating ? ' sel' : '')} onClick={() => { setSel(o.id); setCreating(false) }}>
               <div className="t">{o.to_destination || o.code}</div>
               <div className="m"><span className={'badge ' + (o.status === 'posted' ? 'confirmed' : 'uploaded')}>{o.status}</span>
@@ -2126,6 +3011,7 @@ function StockOutward({ toast }) {
             </div>
           ))}
         </div>
+        <Pager {...outPage} noun="dispatch" nouns="dispatches" />
       </Sidebar>
       {creating ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -2142,12 +3028,8 @@ function StockOutward({ toast }) {
                 </select></div>
             </div>
             <Section id="outward.new-items" title="Items to dispatch" style={{ marginTop: 18 }}>
-              <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
-                Scan the garment’s QR (or a piece label) to add it — the full record
-                appears below, so the size and colour going into the box are the ones
-                on the note. Scanning the same item again adds one more.
-              </div>
               <ScanBox onScan={addScanned} placeholder="Scan a QR / piece label / SKU to add…" />
+              <div className="tablewrap">
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ width: 230 }}>Or pick from inventory</th>
@@ -2167,7 +3049,7 @@ function StockOutward({ toast }) {
                         style={{ width: '100%', background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 5, padding: '5px' }}>
                         <option value="">— select product —</option>
                         {products.map(p => <option key={p.id} value={p.id}>
-                          {p.description}{p.size ? ' · ' + p.size : ''}{p.color ? ' · ' + p.color : ''} (stock {p.stock_qty})</option>)}
+                          {p.name || p.description}{p.size ? ' · ' + p.size : ''}{p.color ? ' · ' + p.color : ''} (stock {p.stock_qty})</option>)}
                       </select></td>
                       <td className="num"><input value={l.qty} onChange={(e) => updLine(i, 'qty', e.target.value)} /></td>
                       <td style={{ textAlign: 'right', color: short ? 'var(--danger)' : undefined }}
@@ -2178,7 +3060,13 @@ function StockOutward({ toast }) {
                   )
                 })}</tbody>
               </table>
-              <button className="btn" style={{ marginTop: 8 }} onClick={addLine}>+ add item</button>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button className="btn primary" onClick={() => setPicking(true)}
+                  title="Tick several products off a list of what is in stock and add them all at once">
+                  ⊞ Pick products</button>
+                <button className="btn" onClick={addLine}>+ add item</button>
+              </div>
             </Section>
           </div>
           <div className="actionbar"><div className="spacer" />
@@ -2206,6 +3094,7 @@ function StockOutward({ toast }) {
               </div>
             )}
             <Section id="outward.items" title="Items">
+              <div className="tablewrap">
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ textAlign: 'right' }}>Qty</th>
@@ -2225,6 +3114,7 @@ function StockOutward({ toast }) {
                   </ProductRow>
                 ))}</tbody>
               </table>
+              </div>
               <div className="items-foot"><span>{detail.lines.length} items</span>
                 <span>Σ qty <b>{detail.total_qty}</b></span>
                 {detail.status === 'received' && <span>accepted <b>{detail.accepted_qty}</b></span>}
@@ -2244,6 +3134,10 @@ function StockOutward({ toast }) {
           </div>
         </div>
       ) : <div className="empty">Select an outward, or click “+ New” to dispatch stock.</div>}
+      {picking && creating && (
+        <ProductPicker products={products} onAdd={addPicked} onClose={() => setPicking(false)}
+          already={form.lines.map((l) => l.product_id)} />
+      )}
       {zoom && <ProductCardModal product={zoom} onClose={() => setZoom(null)} />}
     </div>
   )
@@ -2261,6 +3155,8 @@ function StockInward({ toast }) {
   const [q, setQ] = useState('')
   const [zoom, setZoom] = useState(null)
   const [hit, setHit] = useState(null)             // the line a scan just landed on
+  const inwPage = usePaged(
+    list.filter((o) => matches(o, q, ['to_destination', 'code', 'status'])), 50)
 
   const refresh = useCallback(() => api.listOutwards(scope).then(setList), [scope])
   useEffect(() => { refresh() }, [refresh])
@@ -2319,7 +3215,7 @@ function StockInward({ toast }) {
         <div className="list">
           {list.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
             {scope === 'posted' ? 'Nothing in transit — dispatched transfers appear here to be received.' : 'Nothing here yet.'}</div>}
-          {list.filter((o) => matches(o, q, ['to_destination', 'code', 'status'])).map((o) => (
+          {inwPage.slice.map((o) => (
             <div key={o.id} className={'doc-row' + (sel === o.id ? ' sel' : '')} onClick={() => open(o.id)}>
               <div className="t">{o.to_destination || o.code}</div>
               <div className="m"><span className={'badge ' + (o.status === 'received' ? 'confirmed' : 'review')}>
@@ -2330,6 +3226,7 @@ function StockInward({ toast }) {
             </div>
           ))}
         </div>
+        <Pager {...inwPage} noun="transfer" />
       </Sidebar>
       {detail ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -2353,13 +3250,10 @@ function StockInward({ toast }) {
               <div style={{ marginBottom: 14 }}>
                 <ScanBox onScan={scan} label="Count in"
                   placeholder="Scan each garment as it comes out of the box…" />
-                <div className="small" style={{ color: 'var(--muted)', marginTop: 6 }}>
-                  Every line is accepted in full unless you say otherwise — scan or type
-                  a lower figure for anything that didn’t turn up.
-                </div>
               </div>
             )}
             <Section id="inward.lines" title={editable ? 'Check the goods in' : 'Goods received'}>
+              <div className="tablewrap">
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ textAlign: 'right' }}>Sent</th>
@@ -2384,6 +3278,7 @@ function StockInward({ toast }) {
                   )
                 })}</tbody>
               </table>
+              </div>
               <div className="items-foot"><span>{detail.lines.length} items</span>
                 <span>sent <b>{detail.total_qty}</b></span>
                 <span>accepting <b>{Math.round(counted * 1000) / 1000}</b></span>
@@ -2398,8 +3293,6 @@ function StockInward({ toast }) {
                 <input value={who} onChange={(e) => setWho(e.target.value)} placeholder="who took it in" /></div>
               <DateField label="Date" width={150} value={date} onChange={setDate} />
               <div className="spacer" />
-              <span className="small">A shortfall is recorded as a transfer discrepancy — the stock already
-                left the warehouse, so settle it with a stock adjustment once it is traced.</span>
               <button className="btn primary" onClick={receive}>Receive Goods</button>
             </div>
           ) : (
@@ -2441,6 +3334,7 @@ function Payments({ toast }) {
 
   const loadSuppliers = useCallback(() => api.listSuppliers().then(setSuppliers), [])
   useEffect(() => { loadSuppliers(); api.listPayments().then(setPayments) }, [loadSuppliers])
+  const payPage = usePaged(suppliers.filter((s) => matches(s, q, ['name', 'gstin'])), 50)
   const loadSupplier = (id) => {
     setSel(id)
     api.pendingBills(id).then((b) => {
@@ -2475,13 +3369,14 @@ function Payments({ toast }) {
         <div className="head"><h3>Suppliers · payables</h3></div>
         <SearchBox value={q} onChange={setQ} placeholder="Search supplier, GSTIN…" />
         <div className="list">
-          {suppliers.filter((s) => matches(s, q, ['name', 'gstin'])).map((s) => (
+          {payPage.slice.map((s) => (
             <div key={s.id} className={'sup-row' + (sel === s.id ? ' sel' : '')} onClick={() => loadSupplier(s.id)}>
               <div className="t">{s.name}</div>
               <div className="m"><span>{s.document_count} bill(s)</span></div>
             </div>
           ))}
         </div>
+        <Pager {...payPage} noun="supplier" />
       </Sidebar>
       {sel ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -2492,6 +3387,7 @@ function Payments({ toast }) {
             </div>}
             <Section id="pay.pending-bills" title="Pending bills — select, then set cash / discount / TDS / debit">
               {bills.length === 0 ? <p className="small">No outstanding invoices for this supplier.</p> : (
+                <div className="tablewrap">
                 <table className="items">
                   <thead><tr><th></th><th>Invoice</th><th>Date</th><th style={{ textAlign: 'right' }}>Days</th>
                     <th style={{ textAlign: 'right' }}>Outstanding</th><th style={{ textAlign: 'right' }}>Cash</th>
@@ -2513,6 +3409,7 @@ function Payments({ toast }) {
                     )
                   })}</tbody>
                 </table>
+                </div>
               )}
               {totals.n > 0 && <div className="items-foot">
                 <span>{totals.n} selected</span><span>cash <b>₹{money(totals.cash)}</b></span>
@@ -2595,6 +3492,7 @@ function Returns({ toast }) {
   const editable = detail && detail.status !== 'posted'
   const shown = list.filter((r) => scope === 'all' || r.status === scope)
     .filter((r) => matches(r, q, ['supplier_name', 'invoice_number', 'code', 'status']))
+  const retPage = usePaged(shown, 50)
   const draftTotal = detail ? detail.lines.reduce((s, l) => s + (+qtys[l.id] || 0) * (l.rate || 0), 0) : 0
 
   return (
@@ -2613,7 +3511,7 @@ function Returns({ toast }) {
         <div className="list">
           {list.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
             Nothing matches. Try “All” or clear the search.</div>}
-          {shown.map((r) => (
+          {retPage.slice.map((r) => (
             <div key={r.id} className={'doc-row' + (detail?.id === r.id && !picking ? ' sel' : '')} onClick={() => openReturn(r.id)}>
               <div className="t">{r.supplier_name}</div>
               <div className="m"><span className={'badge ' + (r.status === 'posted' ? 'confirmed' : 'uploaded')}>{r.status}</span>
@@ -2622,15 +3520,11 @@ function Returns({ toast }) {
             </div>
           ))}
         </div>
+        <Pager {...retPage} noun="return" />
       </Sidebar>
       {picking ? (
         <div className="editor">
           <h2 style={{ marginTop: 0 }}>New Purchase Return — pick a reference invoice</h2>
-          <div className="small" style={{ margin: '-6px 0 12px', color: 'var(--muted)' }}>
-            An invoice with goods <b>short at receiving</b> can be claimed on its own — the
-            quantities were counted when the boxes were opened, so that debit note writes
-            itself and nobody counts again.
-          </div>
           <table className="items"><thead><tr><th>Supplier</th><th>Invoice</th><th>Date</th>
             <th style={{ textAlign: 'right' }}>Grand total</th>
             <th style={{ textAlign: 'right' }}>Short</th><th></th></tr></thead>
@@ -2663,13 +3557,10 @@ function Returns({ toast }) {
               <div className="k">Priced at</div>
               <div style={{ gridColumn: 'span 3' }}>
                 <span className="badge confirmed">{detail.cost_basis_label || 'Purchase / GRN cost'}</span>
-                <span className="small" style={{ color: 'var(--muted)', marginLeft: 8 }}>
-                  what the supplier billed us for these goods — not the MRP or the sale price,
-                  so the debit reconciles against their invoice.
-                </span>
               </div>
             </div>
             <Section id="return.lines" title={editable ? 'Set return quantity per line' : 'Returned lines'}>
+              <div className="tablewrap">
               <table className="items">
                 <thead><tr><th style={{ width: 46 }}>QR</th><th>Product</th><th>Batch</th>
                   <th style={{ textAlign: 'right' }}>Received</th>
@@ -2718,15 +3609,14 @@ function Returns({ toast }) {
                   )
                 })}</tbody>
               </table>
+              </div>
               <div className="items-foot">
                 <span>{detail.lines.length - (detail.shortage_lines || 0)} received item(s)</span>
                 {detail.shortage_lines > 0 && (
                   <span style={{ color: 'var(--warn)' }}>
-                    ⚠ {detail.shortage_lines} shortage claim(s) · goods that never arrived, already counted
-                    at the dock — posting these reduces the payable and moves no stock
+                    ⚠ {detail.shortage_lines} shortage claim(s)
                   </span>
                 )}
-                <span>a bundle broken down at GRN comes back as its variants — each at its own received cost</span>
               </div>
             </Section>
           </div>
@@ -2735,8 +3625,6 @@ function Returns({ toast }) {
               <div className="field" style={{ width: 180 }}><label>Reason</label><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. damaged / wrong item" /></div>
               <DateField label="Date" width={150} value={date} onChange={setDate} />
               <div className="spacer" />
-              <span className="small">Posting reverses stock and raises a debit note against the invoice,
-                valued at the GRN cost of each item.</span>
               <button className="btn primary" onClick={post}>Post Debit Note</button>
             </div>
           )}
@@ -3077,6 +3965,8 @@ function Reports() {
     setAsking(false)
   }
   const rows = rep ? rep.rows.filter((row) => !q || rep.columns.some((c) => String(row[c] ?? '').toLowerCase().includes(q.toLowerCase()))) : []
+  // a stock or transport report over a year runs to thousands of rows
+  const repPage = usePaged(rows, 100)
   const grouped = cat.reduce((a, r) => { (a[r.group] = a[r.group] || []).push(r); return a }, {})
   const order = groups.length ? groups : Object.entries(REPORT_GROUPS).map(([k2, n]) => ({ key: k2, name: n }))
   const dateParams = (entry?.params || []).filter((p) => PARAM_LABEL[p])
@@ -3179,23 +4069,27 @@ function Reports() {
               )}
               <div className="small" style={{ padding: '8px 0', color: 'var(--muted)' }}>
                 {busy ? 'running…' : <>{rows.length} of {rep.rows.length} rows{q ? ` matching “${q}”` : ''}</>}</div>
+              <div className="tablewrap">
               <table className="items">
                 <thead><tr>{rep.columns.map(c => <th key={c} style={{ textAlign: typeof rep.rows[0]?.[c] === 'number' ? 'right' : 'left' }}>{c.replace(/_/g, ' ')}</th>)}</tr></thead>
-                <tbody>{rows.map((row, i) => (
+                <tbody>{repPage.slice.map((row, i) => (
                   <tr key={i}>{rep.columns.map(c => (
                     <td key={c} className={typeof row[c] === 'number' ? 'mono' : ''} style={{ textAlign: typeof row[c] === 'number' ? 'right' : 'left' }}>
                       {typeof row[c] === 'number' ? fmt(row[c]) : (row[c] || '')}</td>
                   ))}</tr>
                 ))}</tbody>
               </table>
+              </div>
               {rep.rows.length === 0 && <p className="empty" style={{ marginTop: 40 }}>No data yet.</p>}
             </div>
+            {/* the CSV export takes the WHOLE report, not the page — a download
+                that silently stopped at row 100 would be the worst kind of wrong */}
+            <Pager {...repPage} noun="row" />
           </>
         ) : asked && !asked.report_key ? (
           <div className="empty" style={{ marginTop: 60 }}>
             No report answers that question.<br />
-            <span className="small">Pick one from the list on the left, or try a question closer to
-              what the reports cover — purchases, stock, payments, shortages, transfers, transport.</span>
+            <span className="small">Pick one from the list on the left.</span>
           </div>
         ) : <div className="empty">Loading report…</div>}
       </div>
@@ -3249,10 +4143,6 @@ function VisionSettings({ onClose, onChanged, toast }) {
           <div className="spacer" style={{ flex: 1 }} />
           <button className="btn" style={{ padding: '2px 9px' }} onClick={onClose}>×</button>
         </div>
-        <p className="small" style={{ marginTop: 0 }}>
-          With a vision model on, new invoice uploads are read directly from the image —
-          far better on photos, skew and handwriting than the offline OCR fallback.
-        </p>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0',
           padding: '10px 12px', borderRadius: 8,
@@ -3283,7 +4173,6 @@ function VisionSettings({ onClose, onChanged, toast }) {
             ) : (
               <input value={st.model || ''} disabled />
             )}
-            <div className="flagnote" style={{ color: 'var(--muted)' }}>Pick a model your key supports. A wrong model causes "NotFoundError → fell back to OCR".</div>
           </div>
         )}
 
@@ -3292,7 +4181,6 @@ function VisionSettings({ onClose, onChanged, toast }) {
             {busy ? 'Checking…' : 'Activate vision'}</button>
           {on && <button className="btn" disabled={busy} onClick={turnOff}>Turn off</button>}
           <div className="spacer" style={{ flex: 1 }} />
-          <span className="small">Key is validated with Anthropic, stored locally, never displayed.</span>
         </div>
       </div>
     </div>
@@ -3356,7 +4244,11 @@ const LR_FORM_RIGHT = [
   ['lr_entry_no', 'LR Entry No', 'ro', {}],
   ['inv_no', 'Invoice No', 'text', {}],
   ['inv_date', 'Inv Date', 'date', {}],
-  ['freight_amount', 'Fright Charge', 'charge', { flag: 'freight_applicable' }],
+  ['freight_amount', 'Freight Charge', 'charge', { flag: 'freight_applicable' }],
+  // the G. TOTAL at the foot of the LR — freight plus L.R. charge, H.C., S.T.
+  // charge and the rest. Read off the page on import; typed here when the
+  // consignment arrives with no LR copy to photograph.
+  ['freight_total', 'Total Charges', 'num', {}],
   // ours, not on their form: how the freight actually settled.
   ['paid_topay', 'Paid / ToPay', 'select', { fixed: ['TOPAY', 'PAID', 'NO'] }],
   ['item', 'Item', 'text', { wide: 1 }],
@@ -3512,9 +4404,6 @@ function LREntryForm({ editing, opts, lists, onDone, onCancel, toast, reloadOpts
           </select></div>
         <button className="btn" onClick={() => fileRef.current?.click()}>＋ Add file</button>
         <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={queueFile} />
-        <span className="small" style={{ color: 'var(--muted)' }}>
-          LR copy, weight slip, a photo of damaged bundles — kept against this consignment.
-        </span>
       </div>
       {(atts.length > 0 || pendingFiles.length > 0) && (
         <table className="items" style={{ marginTop: 10, maxWidth: 620 }}>
@@ -3605,8 +4494,14 @@ const LR_COLS = [
   ['agent', 'Agent', 120], ['inv_no', 'Inv No', 80], ['inv_date', 'Inv Date', 100],
   ['qty', 'Pieces', 60], ['amount', 'Goods Value', 95],
   ['paid_topay', 'Paid/ToPay', 80], ['freight_amount', 'Freight', 70],
+  // freight is the first line of a transporter's bill, not the bill. `charges`
+  // is the block under it (H.C., S.T. charge, …) and `freight_total` the G.
+  // TOTAL printed at its foot — what the lorry is actually paid.
+  ['freight_charges', 'Charges', 130], ['freight_total', 'Total Charges', 95],
   ['item', 'Item', 110],
 ]
+//: read off the page and totalled, never typed in this grid
+const LR_READONLY_COLS = new Set(['freight_charges'])
 //: which of those are dates — picked from a calendar, never retyped
 const LR_DATE_COLS = new Set(['recv_date', 'lr_date', 'inv_date'])
 // The SAVED register is laid out to fit one screen rather than scroll sideways.
@@ -3628,7 +4523,11 @@ const LR_REG_COLS = [
   { k: 'qty', h: 'Pieces', w: 58, num: 1 },
   { k: 'amount', h: 'Goods Value', w: 88, num: 1 },
   { k: 'paid_topay', h: 'Paid/ToPay', w: 84, edit: 1 },
-  { k: 'freight_amount', h: 'Freight', w: 78, num: 1, edit: 1 },
+  { k: 'freight_amount', h: 'Freight', w: 76, num: 1, edit: 1 },
+  // the transporter's G. TOTAL — freight plus the charge lines under it. Given
+  // its own column rather than replacing freight, because a bill of 455 made of
+  // 425 haulage and 30 sundries is two facts and a payment run needs both.
+  { k: 'freight_total', h: 'Charges', w: 82, num: 1, edit: 1 },
   { k: 'purchase_manager', h: 'Purch Mgr', w: 92 },
 ]
 // freight settlement — completed or corrected when the lorry actually delivers,
@@ -3642,6 +4541,18 @@ function LREntryView({ toast }) {
   const [saved, setSaved] = useState([])
   const refresh = useCallback(() => api.lrList().then(setSaved), [])
   useEffect(() => { refresh() }, [refresh])
+  // A consignment scanned on the warehouse phone is written to this same
+  // register, and the person who scanned it is on a dock, not at this desk — so
+  // the desk must not have to reload the page to learn a lorry arrived. Polled
+  // while the tab is on screen, and again the moment it comes back to the front.
+  // Only `saved` is replaced: an open form, a search result and a half-typed
+  // freight cell all live in their own state and are left alone.
+  useEffect(() => {
+    const tick = () => { if (document.visibilityState === 'visible') refresh().catch(() => {}) }
+    const t = setInterval(tick, 15000)
+    document.addEventListener('visibilitychange', tick)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick) }
+  }, [refresh])
 
   // --- manual entry, dropdown masters and search ---
   const [form, setForm] = useState(null)         // null = closed, {} = new, row = edit
@@ -3661,6 +4572,10 @@ function LREntryView({ toast }) {
   const [searching, setSearching] = useState(false)   // search panel open
   const [found, setFound] = useState(null)       // search results, null = not filtered
   const shown = found ? found.rows : saved
+  // the register, and the rows just read off a page — both grow without limit,
+  // and both are read a screenful at a time
+  const savedPage = usePaged(shown, 50)
+  const extractPage = usePaged(rows, 50)
   const openNew = () => { setForm({}); setRows([]) }
   const openEdit = async (r) => {
     try { setForm(await api.lrGet(r.id)) } catch { toast('Could not open that entry', 'err') }
@@ -3735,7 +4650,6 @@ function LREntryView({ toast }) {
           control someone cannot reach, a clipped sentence is only a shorter one */}
       <div className="pagehead">
         <h2>LR Entry</h2>
-        <span className="small pagesub">Import a register page and the rows are read automatically — or key one consignment in.</span>
         <div style={{ flex: 1 }} />
         <button className="btn" onClick={() => setSearching((s) => !s)}
           title="Find entries by LR / invoice number, supplier, date, rack…">🔍 Search</button>
@@ -3759,6 +4673,9 @@ function LREntryView({ toast }) {
               {' · '}Σ bundles <b>{found.totals.bundle}</b>{' · '}Σ boxes <b>{found.totals.boxes}</b>
               {' · '}Σ goods value <b>₹ {money(found.totals.amount)}</b>
               {' · '}Σ freight <b>₹ {money(found.totals.freight_amount)}</b>
+              {/* what the transporters are owed — freight plus the charge lines
+                  under it, which is the figure a payment run actually needs */}
+              {' · '}Σ transport charges <b>₹ {money(found.totals.freight_total)}</b>
             </h4>
           </div>
         )}
@@ -3780,10 +4697,12 @@ function LREntryView({ toast }) {
         {rows.length > 0 && (
           <>
             <Section id="lr.extracted" title="Extracted rows — review & save">
-              <div style={{ overflowX: 'auto' }}>
+              <div className="tablewrap">
                 <table className="items" style={{ minWidth: 1560 }}>
                   <thead><tr><th style={{ minWidth: 70 }}>Status</th>{LR_COLS.map(([k, l, w]) => <th key={k} style={{ minWidth: w }}>{l}</th>)}<th></th></tr></thead>
-                  <tbody>{rows.map((r, i) => (
+                  <tbody>{extractPage.slice.map((r) => {
+                    const i = rows.indexOf(r)
+                    return (
                     <tr key={i} style={isExact(r) ? { background: 'var(--danger-bg)', opacity: 0.6 }
                       : isDoubtful(r) ? { background: 'var(--warn-bg)' } : undefined}>
                       <td style={{ whiteSpace: 'nowrap', fontSize: 11, fontWeight: 600 }}>
@@ -3792,20 +4711,55 @@ function LREntryView({ toast }) {
                               title={'Same LR/Invoice, but these differ from the saved row:\n' +
                                 (r._diffs || []).map(f => `${f}: saved “${r._conflict_with?.[f] ?? ''}” vs this “${r[f] ?? ''}”`).join('\n')}>⚠ verify</span>
                           : <span style={{ color: 'var(--ok)' }}>new</span>}
+                        {/* a reading is not the page. When the register was written
+                            in Tamil the row says so, and every translated cell can
+                            be hovered to see exactly what the clerk wrote. */}
+                        {r.source_language && (
+                          <div style={{ color: 'var(--muted)', fontWeight: 400, marginTop: 3 }}
+                            title={`Read in ${r.source_language} and translated to English:\n`
+                              + Object.entries(r.original_values || {})
+                                .map(([f, v]) => `${f}: ${v}`).join('\n')}>
+                            🌐 {r.source_language}</div>
+                        )}
                       </td>
                       {LR_COLS.map(([k]) => {
                         const changed = isDoubtful(r) && (r._diffs || []).includes(k)
+                        const orig = r.original_values?.[k]
+                        const charges = Object.entries(r.freight_charges || {})
                         return <td key={k} style={changed ? { background: 'var(--warn-line)' } : undefined}
-                          title={changed ? `Saved row has: ${r._conflict_with?.[k] ?? '(blank)'}` : undefined}>
+                          title={changed ? `Saved row has: ${r._conflict_with?.[k] ?? '(blank)'}`
+                            : orig ? `On the page (${r.source_language || 'original'}): ${orig}`
+                            : k === 'freight_total' && charges.length
+                              ? `Freight ${r.freight_amount ?? 0}\n`
+                                + charges.map(([n, v]) => `${n} ${v}`).join('\n')
+                              : undefined}>
                           {/* vision reads a register page's dates in whatever the page
                               used; the picker both corrects them and normalises them */}
                           {LR_DATE_COLS.has(k)
                             ? <DateField inline value={r[k]} onChange={(v) => upd(i, k, v)} />
-                            : <input value={r[k] ?? ''} onChange={(e) => upd(i, k, e.target.value)} />}</td>
+                            : LR_READONLY_COLS.has(k)
+                              /* the charge lines as the LR printed them. Read, not
+                                 typed: the total beside them is the editable figure,
+                                 and two ways to change one number is one too many */
+                              ? <div className="cellsub" style={{ whiteSpace: 'normal', lineHeight: 1.5 }}>
+                                  {charges.length
+                                    ? charges.map(([n, v]) => `${n} ${v}`).join(' · ')
+                                    : <span style={{ color: 'var(--muted)' }}>—</span>}</div>
+                              : <input value={r[k] ?? ''} onChange={(e) => upd(i, k, e.target.value)} />}
+                          {orig && <div className="cellsub" style={{ direction: 'ltr' }}>🌐 {orig}</div>}
+                          {/* the page's own total is kept even when the lines
+                              disagree with it — but never silently */}
+                          {k === 'freight_total' && r.freight_note && (
+                            <div className="cellsub" style={{ color: 'var(--warn)', whiteSpace: 'normal' }}>
+                              ⚠ {r.freight_note}</div>)}</td>
                     })}<td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => del(i)}>×</button></td></tr>
-                  ))}</tbody>
+                    )
+                  })}</tbody>
                 </table>
               </div>
+              <Pager {...extractPage} noun="read row" />
+              {/* the totals are of EVERY row, not the page — a Σ that counted
+                  only what is on screen would drop as you paged through it */}
               <div className="items-foot"><span>{toSave.length} to save{nDoubtful ? ` (incl. ${nDoubtful} to verify)` : ''}{rows.length !== toSave.length ? ` · ${rows.length - toSave.length} exact dup skipped` : ''}</span><span>Σ qty <b>{qtySum}</b></span>
                 <button className="btn primary" style={{ marginLeft: 'auto' }} onClick={save}>Save {toSave.length} Entr{toSave.length === 1 ? 'y' : 'ies'}</button></div>
             </Section>
@@ -3813,14 +4767,7 @@ function LREntryView({ toast }) {
         )}
         {shown.length > 0 && (
           <Section id="lr.saved" title={`${found ? 'Search results' : 'Saved LR entries'} · ${shown.length}`} summary={`${shown.length} row(s)`}>
-            <div className="small" style={{ margin: '-6px 0 10px', color: 'var(--muted)' }}>
-              Paid/ToPay and Freight are editable in place — complete or correct them when the lorry
-              delivers and the money changes hands. <b>Open</b> any row to edit the whole entry or
-              attach the LR copy.
-              <b> Received by</b> comes from the warehouse phone app (<span className="mono">/m</span> →
-              Consignments), where whoever takes the packages in records their name.
-            </div>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="tablewrap">
               <table className="items reg">
                 <thead><tr>
                   <th style={{ width: 66 }}>Invoice</th>
@@ -3831,7 +4778,7 @@ function LREntryView({ toast }) {
                       you can DO with it sits at the end where the eye finishes */}
                   <th style={{ width: 62 }}></th>
                 </tr></thead>
-                <tbody>{shown.map((r) => (
+                <tbody>{savedPage.slice.map((r) => (
                   <tr key={r.id}>
                     <td style={{ fontSize: 11, fontWeight: 600 }}>
                       {r.mismatches && r.mismatches.length
@@ -3844,7 +4791,12 @@ function LREntryView({ toast }) {
                       const m = r.mismatches && r.mismatches.find(x => x.field === k)
                       const cls = (c.num ? 'num ' : '') + (c.mono ? 'mono' : '')
                       if (c.edit) return (
-                        <td key={k} className={cls} title="Freight settlement — editable; saves when you leave the cell">
+                        <td key={k} className={cls}
+                          title={k === 'freight_total' && Object.keys(r.freight_charges || {}).length
+                            ? 'The transporter’s G. TOTAL — editable.\n'
+                              + `Freight ${r.freight_amount ?? 0}\n`
+                              + Object.entries(r.freight_charges).map(([n, v]) => `${n} ${v}`).join('\n')
+                            : 'Freight settlement — editable; saves when you leave the cell'}>
                           <input value={cellVal(r, k)}
                             onChange={(e) => setPending({ ...pending, [cellKey(r, k)]: e.target.value })}
                             onBlur={() => commitCell(r, k)}
@@ -3860,11 +4812,15 @@ function LREntryView({ toast }) {
                       const val = c.pair
                         ? `${r[k] ?? '—'} / ${r[c.pair] ?? '—'}`
                         : (r[k] ?? '')
+                      // what the page said, when it wasn't English — kept against
+                      // the row so a reading can always be checked against it
+                      const orig = r.original_values?.[k]
                       return (
                         <td key={k} className={cls}
                           style={m ? { background: 'var(--warn-bg)' } : undefined}
-                          title={m ? `Register: ${m.register}\nInvoice: ${m.invoice}` : undefined}>
-                          <div className="cellmain">{val}{m ? ' ⚠' : ''}</div>
+                          title={m ? `Register: ${m.register}\nInvoice: ${m.invoice}`
+                            : orig ? `On the page (${r.source_language || 'original'}): ${orig}` : undefined}>
+                          <div className="cellmain">{val}{m ? ' ⚠' : ''}{orig ? ' 🌐' : ''}</div>
                           {c.sub && r[c.sub] ? <div className="cellsub">{r[c.sub]}</div> : null}
                         </td>
                       )
@@ -3882,11 +4838,12 @@ function LREntryView({ toast }) {
                       <button className="iconbtn danger" onClick={() => removeEntry(r)}
                         aria-label="Delete entry"
                         title={r.matched ? 'Linked to an invoice — unlink before deleting' : 'Delete this entry'}>🗑</button>
-                    </td>
+                    </td>{/* end row */}
                   </tr>
                 ))}</tbody>
               </table>
             </div>
+            <Pager {...savedPage} noun="entry" nouns="entries" />
           </Section>
         )}
         {found && found.rows.length === 0 && (
@@ -3923,7 +4880,6 @@ function OptionList({ kind, title, blurb, fixed, values, reload, toast }) {
   return (
     <>
       <h2 style={{ marginTop: 0 }}>{title}</h2>
-      <p className="small">{blurb}{fixed ? '' : ' Values typed on the LR Entry form are remembered here automatically.'}</p>
       {!fixed && (
         <div style={{ display: 'flex', gap: 8, marginBottom: 14, maxWidth: 420 }}>
           <input value={adding} onChange={(e) => setAdding(e.target.value)} placeholder={`Add to ${title}…`}
@@ -3945,79 +4901,3002 @@ function OptionList({ kind, title, blurb, fixed, values, reload, toast }) {
   )
 }
 
-function Masters({ toast }) {
-  const [tab, setTab] = useState('categories')
-  const [cats, setCats] = useState(null)
+// ---------- unit types: what a dozen becomes ----------
+// Two lists that answer one question between them. The TYPES say how many
+// individual items are in one of a unit — a pair is 2, a dozen is 12 — and the
+// dozen→pieces conversion is arithmetic over exactly those numbers. The RULES say
+// which type a given product IS, read off its description, so nobody re-picks
+// "pillow cover = pair" on every receipt.
+//
+// Neither is retroactive, and the screen says so: a product freezes its own
+// factor the day it is created, because stock on a shelf was counted under the
+// rule that was in force when it arrived.
+function UnitTypes({ toast }) {
+  const [data, setData] = useState({ types: [], rules: [] })
+  const [adding, setAdding] = useState({ code: '', name: '', pieces: '2', aliases: '' })
+  const [rule, setRule] = useState({ pattern: '', unit_type: 'PAIR' })
+  const [edit, setEdit] = useState({})              // code -> in-progress pieces
+  const load = useCallback(() => api.unitTypes().then(setData).catch(() => {}), [])
+  useEffect(() => { load() }, [load])
+
+  const addType = async () => {
+    const code = adding.code.trim().toUpperCase()
+    if (!code) return
+    try {
+      await api.addUnitType({ code, name: adding.name.trim() || code,
+        pieces: +adding.pieces || 1,
+        aliases: adding.aliases.split(',').map(s => s.trim()).filter(Boolean) })
+      setAdding({ code: '', name: '', pieces: '2', aliases: '' }); load()
+      toast(`✓ ${code} added`, 'ok')
+    } catch (e) { toast(e.detail || 'Could not add the unit', 'err') }
+  }
+  const savePieces = async (t) => {
+    const v = +edit[t.code]
+    setEdit((p) => { const c = { ...p }; delete c[t.code]; return c })
+    if (!v || v === t.pieces) return
+    try { await api.editUnitType(t.code, { pieces: v }); load(); toast(`✓ 1 ${t.code} = ${v} piece(s)`, 'ok') }
+    catch (e) { toast(e.detail || 'Could not change it', 'err') }
+  }
+  const dropType = async (t) => {
+    if (!window.confirm(`Remove the unit ${t.code}?\n\nRefused if any product is counted in it.`)) return
+    try { await api.deleteUnitType(t.code); load() }
+    catch (e) { toast(e.detail || 'Could not remove it', 'err') }
+  }
+  const addRule = async () => {
+    const pattern = rule.pattern.trim()
+    if (!pattern) return
+    try {
+      await api.addUnitRule({ pattern, unit_type: rule.unit_type, scope: 'keyword' })
+      setRule({ ...rule, pattern: '' }); load()
+      toast(`✓ “${pattern}” is counted in ${rule.unit_type}`, 'ok')
+    } catch (e) { toast(e.detail || 'Could not add the rule', 'err') }
+  }
+  const dropRule = async (r) => {
+    try { await api.deleteUnitRule(r.id); load() }
+    catch (e) { toast(e.detail || 'Could not remove it', 'err') }
+  }
+  const box = { background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8 }
+  const inp = { background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px' }
+  return (
+    <>
+      <h2 style={{ marginTop: 0 }}>Unit Types</h2>
+      <div style={{ display: 'flex', gap: 8, margin: '14px 0', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input value={adding.code} onChange={(e) => setAdding({ ...adding, code: e.target.value })}
+          placeholder="CODE" style={{ ...inp, width: 110, textTransform: 'uppercase' }} />
+        <input value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })}
+          placeholder="Name" style={{ ...inp, width: 150 }} />
+        <input value={adding.pieces} onChange={(e) => setAdding({ ...adding, pieces: e.target.value })}
+          placeholder="pieces" style={{ ...inp, width: 90 }} title="How many individual items are in one of these" />
+        <input value={adding.aliases} onChange={(e) => setAdding({ ...adding, aliases: e.target.value })}
+          placeholder="Aliases on invoices, comma separated" style={{ ...inp, flex: 1, minWidth: 220 }} />
+        <button className="btn primary" onClick={addType}>Add unit</button>
+      </div>
+      <table className="items" style={{ maxWidth: 860 }}>
+        <thead><tr><th style={{ width: 120 }}>Code</th><th>Name</th>
+          <th style={{ width: 130, textAlign: 'right' }} title="Individual items in one of these">Pieces in one</th>
+          <th>Printed on invoices as</th><th style={{ width: 80 }}></th></tr></thead>
+        <tbody>
+          {(data.types || []).map((t) => (
+            <tr key={t.code}>
+              <td className="mono"><b>{t.code}</b>{!t.countable && (
+                <span className="badge review" style={{ marginLeft: 6 }} title="Measured, not counted — no piece labels">measured</span>)}</td>
+              <td>{t.name}</td>
+              <td className="num"><input value={edit[t.code] ?? t.pieces}
+                onChange={(e) => setEdit({ ...edit, [t.code]: e.target.value })}
+                onBlur={() => savePieces(t)}
+                onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} /></td>
+              <td className="mono small" style={{ color: 'var(--muted)' }}>{(t.aliases || []).join(', ') || '—'}</td>
+              <td>{t.is_seed
+                ? <span className="small" style={{ color: 'var(--muted)' }}>built in</span>
+                : <button className="btn" style={{ padding: '2px 8px' }} onClick={() => dropType(t)}>×</button>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <h2 style={{ marginTop: 28 }}>Which unit a product is</h2>
+      <div style={{ display: 'flex', gap: 8, margin: '14px 0', maxWidth: 620 }}>
+        <input value={rule.pattern} onChange={(e) => setRule({ ...rule, pattern: e.target.value })}
+          placeholder="wording in the description, e.g. pillow cover"
+          onKeyDown={(e) => { if (e.key === 'Enter') addRule() }} style={{ ...inp, flex: 1 }} />
+        <select value={rule.unit_type} onChange={(e) => setRule({ ...rule, unit_type: e.target.value })} style={inp}>
+          {(data.types || []).map((t) => <option key={t.code} value={t.code}>{t.code}</option>)}
+        </select>
+        <button className="btn primary" onClick={addRule}>Add rule</button>
+      </div>
+      {(data.rules || []).map((r) => (
+        <div key={r.id} style={{ ...box, display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', marginBottom: 7, maxWidth: 620 }}>
+          <span style={{ flex: 1 }}>“{r.pattern}”{r.scope === 'category' ? ' (category)' : ''}</span>
+          <span className="mono">{r.unit_type}</span>
+          <span className="small" style={{ color: 'var(--muted)' }}>{r.source}{r.hits ? ` · ${r.hits}×` : ''}</span>
+          <button className="btn" style={{ padding: '2px 8px' }} onClick={() => dropRule(r)}>×</button>
+        </div>
+      ))}
+    </>
+  )
+}
+
+// ==========================================================================
+//  The ERP masters — one renderer for all seventeen
+//  ------------------------------------------------------------------------
+//  Product, Brand, Tax, Item, Supplier, Trade Agreement, Agent, Tailor,
+//  Transport, Configuration, Product Attributes, Attribute Filter, Employee,
+//  Employee Incharge, HR Configuration, Salary Management, Employee In/Out.
+//
+//  None of them is written here. Each arrives as a DEFINITION from the server —
+//  its groups, its fields, their types, which are mandatory, and every dropdown
+//  already resolved — and this renders whatever it is handed. A field added to
+//  the definition appears here with no change to this file, and the * it wears
+//  is the same `req` flag the API refuses to save without, so the form and the
+//  server can never disagree about what is required.
+// ==========================================================================
+// A checkbox is one word and a box. Given a field cell of its own — label above,
+// box below — seven of them leave a section mostly white space with the controls
+// scattered across it, which is what these forms looked like. They flow in a
+// single dense row at the foot of their section instead, where a tick is next to
+// its own name and the eye can run along them.
+// ---------- voice into a form ----------
+// One recogniser, driven two ways: a mic on a single field, and a mic that fills
+// the whole record from one sentence. The rules for holding a microphone open are
+// the same either way, so they live here rather than in each button.
+//
+// Language is shared with the Reports ask bar (same localStorage key): whoever
+// set it to Tamil there meant it here too.
+function useSpeechInput({ onFinal, onInterim }) {
+  const [listening, setListening] = useState(false)
+  const [err, setErr] = useState('')
+  const [lang, setLangState] = useState(() => {
+    try { return localStorage.getItem('essa_voice_lang') || 'en-IN' } catch { return 'en-IN' }
+  })
+  const rec = useRef(null)
+  const blocked = voiceBlockedBecause()
+  const setLang = (l) => {
+    setLangState(l)
+    try { localStorage.setItem('essa_voice_lang', l) } catch { /* private mode */ }
+  }
+  // a recogniser still holding the mic after this screen is gone is both a stuck
+  // mic light and a callback firing into an unmounted component
+  useEffect(() => () => { try { rec.current?.abort() } catch { /* already gone */ } }, [])
+
+  const stop = () => { try { rec.current?.stop() } catch { /* not started */ } }
+  const start = () => {
+    if (blocked || listening) return
+    setErr('')
+    const r = new SpeechRec()
+    rec.current = r
+    r.lang = lang
+    r.interimResults = true
+    r.continuous = false            // one field, or one sentence, per press
+    r.maxAlternatives = 1
+    r.onresult = (e) => {
+      let interim = '', final = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const chunk = e.results[i][0].transcript
+        if (e.results[i].isFinal) final += chunk; else interim += chunk
+      }
+      if (interim && onInterim) onInterim(interim)
+      if (final) { setListening(false); onFinal(final.trim()) }
+    }
+    r.onerror = (e) => {
+      setErr({
+        'not-allowed': 'microphone permission was refused — allow it in the address bar',
+        'service-not-allowed': 'the browser blocked speech recognition on this page',
+        'no-speech': 'nothing was heard — try again, closer to the microphone',
+        'audio-capture': 'no microphone was found',
+        network: 'speech recognition could not reach the network',
+        aborted: '',
+      }[e.error] || `speech recognition failed (${e.error})`)
+      setListening(false)
+    }
+    r.onend = () => setListening(false)
+    try { r.start(); setListening(true) } catch { setErr('could not start the microphone') }
+  }
+  return { listening, err, start, stop, lang, setLang, blocked }
+}
+
+//: Tamil is transcribed as Tamil, and a master record has to be English — its
+//: labels, its dropdown vocabularies and every search that will later look for
+//: the row. So anything that is not English English goes to the server to be
+//: understood and translated in one step (services/voice_form.py).
+const isEnglish = (lang) => String(lang || '').toLowerCase().startsWith('en')
+
+// The mic on one box. Hidden until the field is hovered or focused — thirty
+// always-visible mics on a Product Master is thirty things to look past.
+function FieldMic({ f, master, onValue, toast }) {
+  const [busy, setBusy] = useState(false)
+  const heardRef = useRef('')
+  const take = async (text, lang) => {
+    if (isEnglish(lang)) { onValue(coerceSpoken(f, text)); return }
+    // Tamil: the box would otherwise end up holding "பில்லோ", and nobody finds
+    // that product again by typing "pillow"
+    heardRef.current = text
+    setBusy(true)
+    try {
+      const r = await api.voiceFill(master, text, [f.key], lang)
+      const got = r.fills?.[f.key]
+      if (got !== undefined && got !== null) onValue(got)
+      else if (r.reason === 'no-key') {
+        onValue(text)
+        toast('No vision/AI key is set, so Tamil cannot be translated — the Tamil words were kept', 'err')
+      } else {
+        onValue(text)
+        toast(`Kept what was heard — “${text}” could not be placed in ${f.label}`, 'err')
+      }
+    } catch {
+      onValue(text)
+      toast('Translation failed — the Tamil words were kept so nothing is lost', 'err')
+    }
+    setBusy(false)
+  }
+  const { listening, err, start, stop, blocked, lang } = useSpeechInput({
+    onFinal: (text) => take(text, lang),
+  })
+  if (blocked) return null            // the form still types; see the Dictate hint
+  return (
+    <button type="button" className={'fieldmic' + (listening ? ' on' : '') + (busy ? ' busy' : '')}
+      onClick={() => (listening ? stop() : start())}
+      title={err || (busy ? `Translating “${heardRef.current}”…`
+        : listening ? 'Listening — say the value'
+        : `Speak the ${f.label}${isEnglish(lang) ? '' : ' (Tamil is translated to English)'}`)}>
+      {busy ? '…' : listening ? '⏹' : '🎤'}
+    </button>
+  )
+}
+
+// One sentence, several boxes. The form's own labels are the grammar — see
+// voicefill.js — so the example offered here is built from this master's first
+// few fields rather than written out for one of them.
+function MasterDictate({ def, data, onFills, toast }) {
+  const [heard, setHeard] = useState(null)
+  const [busy, setBusy] = useState(false)
+  // Nine labels repeat across the Employee master's two address blocks, so a
+  // bare "City" in the filled list would not say which one moved.
+  const shown = (f) => (f._dup ? `${f._group} · ${f.label}` : f.label)
+
+  const take = async (text, spokenLang) => {
+    if (isEnglish(spokenLang)) {
+      const { fills, preamble } = parseDictation(def, text)
+      if (fills.length) {
+        setHeard({ text, filled: fills.map((x) => shown(x.field)), preamble })
+        onFills(fills)
+        toast(`✓ Filled ${fills.length} field${fills.length === 1 ? '' : 's'} by voice`, 'ok')
+        return
+      }
+      // nothing matched a label. Rather than stop at "not understood", let the
+      // server try — it also handles English phrased the way a person phrases it
+    }
+    setHeard({ text, working: true })
+    setBusy(true)
+    try {
+      const r = await api.voiceFill(def.key, text, null, spokenLang)
+      const targets = dictationTargets(def)
+      const fills = Object.entries(r.fills || {})
+        .map(([key, value]) => ({ field: targets.find((f) => f.key === key), value }))
+        .filter((x) => x.field)
+      setHeard({ text, english: r.english, filled: fills.map((x) => shown(x.field)),
+        preamble: r.unused, dropped: r.dropped, reason: r.reason })
+      if (fills.length) {
+        onFills(fills)
+        toast(`✓ Filled ${fills.length} field${fills.length === 1 ? '' : 's'} by voice`, 'ok')
+      } else if (r.reason === 'no-key') {
+        toast('Tamil needs the vision/AI key — set it from “vision” in the header', 'err')
+      } else {
+        toast('Nothing in that could be placed on this form', 'err')
+      }
+    } catch {
+      setHeard({ text, reason: 'the server could not be reached' })
+      toast('Could not reach the server to understand that', 'err')
+    }
+    setBusy(false)
+  }
+
+  const { listening, err, start, stop, lang, setLang, blocked } =
+    useSpeechInput({
+      onFinal: (text) => take(text, lang),
+      onInterim: (t) => setHeard({ text: t, interim: true }),
+    })
+
+  const sample = useMemo(() => {
+    const fs = (def.groups || []).flatMap((g) => g.fields || [])
+      .filter((f) => f.type !== 'check' && f.type !== 'date').slice(0, 3)
+    const say = (f) => `${f.label.replace(/\s*\(.*\)$/, ' $&').replace(/[()]/g, '')} ${
+      f.options?.length ? f.options[0] : f.type === 'num' || f.type === 'money' ? '10' : '…'}`
+    return fs.map(say).join(', ')
+  }, [def])
+
+  if (blocked) {
+    return (
+      <span className="small" style={{ color: 'var(--muted)' }} title={blocked}>
+        🎤 voice off — {blocked}
+      </span>
+    )
+  }
+  return (
+    <>
+      <span className="asklangs" title="Which language to listen for">
+        {VOICE_LANGS.map(([l, short, full]) => (
+          <button key={l} className={'asklang' + (lang === l ? ' on' : '')} title={`Listen for ${full}`}
+            disabled={listening} onClick={() => setLang(l)}>{short}</button>
+        ))}
+      </span>
+      <button className={'btn dictate' + (listening ? ' on' : '')} disabled={busy}
+        onClick={() => (listening ? stop() : start())}
+        title={isEnglish(lang)
+          ? `Say the field name then its value, several in one breath — e.g. “${sample}”`
+          : 'Speak in Tamil — it is understood and the form is filled in English'}>
+        {busy ? '⏳ Understanding…' : listening ? '⏹ Listening…' : '🎤 Dictate'}
+      </button>
+      {(heard || err) && (
+        <div className="heardstrip">
+          {err && <span className="hwhy">{err}</span>}
+          {heard && <>
+            <b>heard</b> “{heard.text}”
+            {/* what it was understood to MEAN, shown whenever that differs from
+                what was said — a Tamil sentence filling English boxes has to be
+                checkable, or it is a translation nobody can audit */}
+            {heard.english && heard.english !== heard.text
+              ? <> · <b>in English</b> “{heard.english}”</> : null}
+            {heard.working ? <> · understanding…</> : null}
+            {heard.filled?.length ? <> · <b>filled</b> {heard.filled.join(', ')}</> : null}
+            {heard.dropped?.length
+              ? <span className="hwhy"> · not a listed option, left alone: {heard.dropped.join(', ')}</span>
+              : null}
+            {heard.preamble && !heard.interim && !heard.working
+              ? <span className="hwhy"> · not understood: “{heard.preamble}”</span> : null}
+            {heard.reason === 'no-key'
+              ? <span className="hwhy"> · Tamil needs the vision/AI key — set it from “vision” in the header</span>
+              : heard.reason
+                ? <span className="hwhy"> · {heard.reason}</span>
+                : (!heard.interim && !heard.working && !heard.filled?.length && isEnglish(lang))
+                  ? <span className="hwhy"> · say a field name first, e.g. “{sample}”</span> : null}
+          </>}
+        </div>
+      )}
+    </>
+  )
+}
+
+function MasterCheck({ f, value, onChange }) {
+  return (
+    <label className="mcheck" title={f.help || f.label}>
+      <input type="checkbox" checked={!!value} onChange={(e) => onChange(f.key, e.target.checked)} />
+      <span>{f.label}</span>
+    </label>
+  )
+}
+
+function MasterField({ f, value, onChange, master, toast }) {
+  const set = (v) => onChange(f.key, v)
+  const common = { value: value ?? '', onChange: (e) => set(e.target.value) }
+  // A date is picked, not dictated — a misheard digit in a date is a wrong date
+  // that looks right, and the picker is faster anyway.
+  const mic = f.type !== 'date' && (
+    <FieldMic f={f} master={master} toast={toast} onValue={(v) => set(
+      // a description is added to; a one-line box is replaced, because a
+      // mishearing there is re-dictated rather than edited
+      f.type === 'textarea' && value ? `${value} ${v}`.trim() : v)} />
+  )
+  return (
+    <div className={'field' + (mic ? ' hasmic' : '')} style={f.wide ? { gridColumn: '1 / -1' } : null}>
+      <label>{f.label}{f.req ? ' *' : ''}</label>
+      {mic}
+      {f.type === 'textarea' ? <textarea rows={3} {...common} />
+        : f.type === 'date' ? <DateField inline value={value} onChange={set} />
+        : f.type === 'multiselect' ? (
+          // a plain multi-select scrolls a 300-brand list into a 4-line box;
+          // comma-separated text with the vocabulary behind it stays typeable
+          <>
+            <input list={'mopt-' + f.key} {...common}
+              placeholder="type to pick, comma-separated for several" />
+            <datalist id={'mopt-' + f.key}>
+              {(f.options || []).map((o) => <option key={o} value={o} />)}
+            </datalist>
+          </>
+        ) : f.options ? (
+          <>
+            <input list={'mopt-' + f.key} {...common} placeholder="type to search…" />
+            <datalist id={'mopt-' + f.key}>
+              {(f.options || []).map((o) => <option key={o} value={o} />)}
+            </datalist>
+          </>
+        ) : <input type={f.type === 'num' || f.type === 'money' ? 'number' : 'text'}
+              step="any" {...common} />}
+      {f.help && f.type !== 'check' && <div className="srcnote" style={{ color: 'var(--muted)' }}>{f.help}</div>}
+    </div>
+  )
+}
+
+//: a child table (Tailor's works, Transport's city rates, Brand's B2B margins)
+function MasterGrid({ grid, rows, onChange }) {
+  const upd = (i, k, v) => onChange(rows.map((r, j) => (j === i ? { ...r, [k]: v } : r)))
+  return (
+    <div className="section" style={{ marginTop: 14 }}>
+      <h4>{grid.title}</h4>
+      <div className="tablewrap">
+      <table className="items">
+        <thead><tr>{grid.columns.map((c) => <th key={c.key}>{c.label}</th>)}<th /></tr></thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i}>
+              {grid.columns.map((c) => (
+                <td key={c.key} className={c.type === 'num' || c.type === 'money' ? 'num' : ''}>
+                  <input list={c.options ? `g-${grid.key}-${c.key}` : undefined}
+                    value={r[c.key] ?? ''} onChange={(e) => upd(i, c.key, e.target.value)} />
+                  {c.options && (
+                    <datalist id={`g-${grid.key}-${c.key}`}>
+                      {c.options.map((o) => <option key={o} value={o} />)}
+                    </datalist>
+                  )}
+                </td>
+              ))}
+              <td><button className="btn" style={{ padding: '2px 7px' }}
+                onClick={() => onChange(rows.filter((_, j) => j !== i))}>×</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      </div>
+      <div className="items-foot">
+        <span>{rows.length} row(s)</span>
+        <button className="btn" style={{ marginLeft: 'auto', padding: '3px 10px' }}
+          onClick={() => onChange([...rows, {}])}>+ add row</button>
+      </div>
+    </div>
+  )
+}
+
+//: Product's Purchase Entry Attributes — which attributes a purchase entry asks
+//: for, and how hard it asks
+function MasterMatrix({ matrix, value, onChange }) {
+  const get = (row, col) => !!(value?.[row]?.[col])
+  const set = (row, col, on) => onChange({ ...value, [row]: { ...(value?.[row] || {}), [col]: on } })
+  return (
+    <div className="section" style={{ marginTop: 14 }}>
+      <h4>{matrix.title}</h4>
+      {matrix.help && <div className="calchint">{matrix.help}</div>}
+      <table className="items" style={{ maxWidth: 560 }}>
+        <thead><tr><th>Name</th>
+          {matrix.columns.map((c) => <th key={c} style={{ width: 70, textAlign: 'center' }}>{c}</th>)}
+        </tr></thead>
+        <tbody>
+          {matrix.rows.map((row) => (
+            <tr key={row}>
+              <td className="mono" style={{ fontSize: 11 }}>{row}</td>
+              {matrix.columns.map((c) => (
+                <td key={c} style={{ textAlign: 'center' }}>
+                  <input type="checkbox" checked={get(row, c)}
+                    onChange={(e) => set(row, c, e.target.checked)} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function MasterScreen({ mkey, onBack, toast }) {
+  const [def, setDef] = useState(null)
+  const [list, setList] = useState([])
   const [q, setQ] = useState('')
-  const [section, setSection] = useState('')
+  const [form, setForm] = useState(null)          // null = list, {} = new, {id} = edit
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => api.masterRecords(mkey, q).then((r) => setList(r.records)), [mkey, q])
+  const recPage = usePaged(list, 50)
+  useEffect(() => { api.masterDefinition(mkey).then(setDef); setForm(null) }, [mkey])
+  useEffect(() => { load() }, [load])
+  // a settings master is one row, not a list — open it straight away
+  useEffect(() => {
+    if (def?.singleton && form === null) setForm(list[0] ? { ...list[0] } : {})
+  }, [def, list])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!def) return <div className="empty">Loading…</div>
+  const data = form?.data || {}
+  const setField = (k, v) => setForm({ ...form, data: { ...data, [k]: v } })
+  // Several fields at once, from one dictated sentence. Applied in a single
+  // setForm — field by field, each would be computed against the same stale
+  // `data` and only the last one would survive.
+  const applyFills = (fills) => {
+    const next = { ...data }
+    fills.forEach(({ field, value }) => {
+      next[field.key] = field.type === 'date' ? (toISODate(value) || value) : value
+    })
+    setForm({ ...form, data: next })
+  }
+  const blank = () => {
+    const d = {}
+    def.groups.forEach((g) => g.fields.forEach((f) => { if (f.default !== undefined) d[f.key] = f.default }))
+    setForm({ data: d, grids: {}, matrix: {} })
+  }
+  const save = async () => {
+    setBusy(true)
+    try {
+      const body = { data, grids: form.grids || {}, matrix: form.matrix || {} }
+      const r = form.id ? await api.masterUpdate(mkey, form.id, body)
+        : await api.masterCreate(mkey, body)
+      toast(`✓ ${def.label} saved — ${r.name || r.code || '#' + r.id}`, 'ok')
+      await load()
+      if (!def.singleton) setForm(null); else setForm({ ...r })
+    } catch (e) { toast(e.detail || 'Could not save', 'err') }
+    setBusy(false)
+  }
+  const remove = async (r) => {
+    if (!window.confirm(`Delete ${def.label} “${r.name || r.code || r.id}”?`)) return
+    try { await api.masterDelete(mkey, r.id); toast('Deleted', 'ok'); setForm(null); load() }
+    catch (e) { toast(e.detail || 'Could not delete', 'err') }
+  }
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
+      <div className="pagehead" style={{ padding: 0, border: 'none', marginBottom: 14 }}>
+        <button className="btn" onClick={onBack}>‹ Masters</button>
+        <h2 style={{ margin: '0 0 0 10px' }}>{def.label}</h2>
+        <span className="small pagesub">{def.sub}</span>
+        <div style={{ flex: 1 }} />
+        {!def.singleton && form === null && (
+          <button className="btn primary" onClick={blank}>📄 New {def.label}</button>
+        )}
+        {/* Voice sits with the form's own actions, not in a settings screen: it
+            is how this record gets filled in, and it is offered at the moment
+            somebody is looking at 30 empty boxes. */}
+        {form !== null && (
+          <MasterDictate def={def} data={data} toast={toast} onFills={applyFills} />
+        )}
+        {form !== null && !def.singleton && (
+          <button className="btn" onClick={() => setForm(null)}>✕ Close</button>
+        )}
+      </div>
+
+      {form !== null ? (
+        <>
+          {/* Inputs in a responsive grid — three or four columns on a wide screen
+              rather than two enormous ones — then the section's checkboxes in a
+              dense row beneath a rule. Every section then has the same shape:
+              things you type, then things you tick. */}
+          {def.groups.map((g) => {
+            const checks = g.fields.filter((f) => f.type === 'check')
+            const typed = g.fields.filter((f) => f.type !== 'check')
+            return (
+              <div className="section" key={g.title}>
+                <h4>{g.title}</h4>
+                {typed.length > 0 && (
+                  <div className="mgrid">
+                    {typed.map((f) => (
+                      <MasterField key={f.key} f={f} value={data[f.key]} onChange={setField}
+                        master={mkey} toast={toast} />
+                    ))}
+                  </div>
+                )}
+                {checks.length > 0 && (
+                  <div className={'mchecks' + (typed.length ? '' : ' bare')}>
+                    {checks.map((f) => (
+                      <MasterCheck key={f.key} f={f} value={data[f.key]} onChange={setField} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {(def.grids || []).map((grid) => (
+            <MasterGrid key={grid.key} grid={grid} rows={form.grids?.[grid.key] || []}
+              onChange={(rows) => setForm({ ...form, grids: { ...(form.grids || {}), [grid.key]: rows } })} />
+          ))}
+          {def.matrix && (
+            <MasterMatrix matrix={def.matrix} value={form.matrix || {}}
+              onChange={(m) => setForm({ ...form, matrix: m })} />
+          )}
+          <div style={{ display: 'flex', gap: 8, margin: '16px 0 30px' }}>
+            <div style={{ flex: 1 }} />
+            {form.id && <button className="btn" onClick={() => remove(form)}>Delete</button>}
+            <button className="btn primary" disabled={busy} onClick={save}>
+              {busy ? 'Saving…' : `Save ${def.label}`}</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <SearchBox value={q} onChange={setQ} placeholder={`Search ${def.label}…`} style={{ maxWidth: 320 }} />
+          <div className="small" style={{ margin: '10px 0', color: 'var(--muted)' }}>
+            {list.length} record(s) · {def.groups.reduce((n, g) => n + g.fields.length, 0)} fields,
+            {' '}{def.groups.reduce((n, g) => n + g.fields.filter((f) => f.req).length, 0)} mandatory
+          </div>
+          {list.length === 0 && <div className="empty" style={{ marginTop: 30 }}>
+            Nothing in {def.label} yet — press <b>New {def.label}</b>.</div>}
+          {recPage.slice.map((r) => (
+            <div key={r.id} className="doc-row" onClick={() => setForm({ ...r })}
+              style={{ background: 'var(--panel)', border: '1px solid var(--line)',
+                borderRadius: 8, padding: '11px 14px', marginBottom: 7, maxWidth: 720 }}>
+              <div className="t">{r.name || r.code || '#' + r.id}</div>
+              <div className="m">
+                {r.code && <span className="mono">{r.code}</span>}
+                {!r.active && <span className="badge review">inactive</span>}
+                <span style={{ marginLeft: 'auto' }}>
+                  {Object.values(r.data || {}).filter((v) => v !== '' && v != null).length} field(s) filled</span>
+              </div>
+            </div>
+          ))}
+          <Pager {...recPage} noun="record" style={{ maxWidth: 720 }} />
+        </>
+      )}
+    </div>
+  )
+}
+
+// The masters this app already RUNS on, as opposed to the seventeen it now also
+// carries. These are not reference data: a category decides how a product is
+// classified at GRN, a unit type decides whether a billed dozen becomes twelve
+// pieces or six pairs, and agents and transporters fill themselves from what the
+// extractor reads off documents. They keep their own editors — a keyed list and
+// a conversion table are not a form — and the hub opens them like anything else.
+const BUILTIN_MASTERS = [
+  ['categories', 'Product Categories', 'Category Master', '▦',
+    'From GRN PRODUCT DETAILS.xlsx — what every product is classified as'],
+  ['units', 'Unit Types', 'Unit & Conversion Master', '⚖',
+    'Pieces in a dozen, pieces in a pair — what a billed dozen becomes on the shelf'],
+  ['agents', 'Agents', 'Agent Master', '👤',
+    'Fills itself from the agent named on invoices and LR pages'],
+  ['transports', 'Transporters', 'Transport Master', '🚚',
+    'Fills itself from the transporter named on invoices and LR pages'],
+  ...OPTION_TABS.map(([k, label, blurb, fixed]) =>
+    [k, label, fixed ? 'Fixed list' : 'Open list', '▤', blurb]),
+]
+
+//: the frame a built-in master opens in, so every master — generic or bespoke —
+//: comes back to the hub the same way
+function MasterPane({ title, sub, onBack, children }) {
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
+      <div className="pagehead" style={{ padding: 0, border: 'none', marginBottom: 14 }}>
+        <button className="btn" onClick={onBack}>‹ Masters</button>
+        <h2 style={{ margin: '0 0 0 10px' }}>{title}</h2>
+        {sub && <span className="small pagesub">{sub}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function MasterCard({ n, icon, label, sub, meta, note, flag, onClick }) {
+  return (
+    <button className="mastercard" onClick={onClick} title={note || meta}>
+      <span className="mc-icon">{icon}</span>
+      <span className="mc-body">
+        <b>{label}</b>
+        <span className="mc-sub">{sub}</span>
+        {meta && <span className="mc-meta">{meta}</span>}
+      </span>
+      <span className="mc-n">{n}</span>
+      {flag && <span className="mc-flag" title={flag}>⚠</span>}
+    </button>
+  )
+}
+
+// ONE hub for every master. It used to be two places — a sidebar listing the
+// eight this app runs on, and a card grid of the seventeen from the ERP — so
+// "the masters" meant a different screen depending on which one you were after,
+// and the sidebar list gave no clue what any of them held. Now they are one
+// grid, in two labelled groups, because the difference between them is real and
+// worth stating: the first seventeen are reference data, the last eight are
+// wired into extraction, GRN and labelling and are working right now.
+function Masters({ toast }) {
+  const [open, setOpen] = useState(null)      // null = hub, else {kind, key}
+  const [erp, setErp] = useState([])
+  const [cats, setCats] = useState(null)
   const [agents, setAgents] = useState([])
   const [transports, setTransports] = useState([])
   const [opts, setOpts] = useState({})
+  const [q, setQ] = useState('')
+  const [section, setSection] = useState('')
   const loadOpts = useCallback(() => api.masterOptions().then(setOpts).catch(() => {}), [])
-  useEffect(() => { api.categories().then(setCats); api.agents().then(setAgents); api.transports().then(setTransports); loadOpts() }, [loadOpts])
-  const shown = cats ? cats.items.filter(c => (!section || c.section === section) && (!q || c.name.toLowerCase().includes(q.toLowerCase()))) : []
-  const optTab = OPTION_TABS.find(([k]) => k === tab)
+  useEffect(() => {
+    api.masterList().then(setErp).catch(() => {})
+    api.categories().then(setCats).catch(() => {})
+    api.agents().then(setAgents).catch(() => {})
+    api.transports().then(setTransports).catch(() => {})
+    loadOpts()
+  }, [loadOpts])
+
+  // Computed before any branch: a hook cannot be called conditionally, and the
+  // 686-code category master is exactly the list that needs paging.
+  const catShown = cats ? cats.items.filter((c) =>
+    (!section || c.section === section)
+    && (!q || c.name.toLowerCase().includes(q.toLowerCase()))) : []
+  const catPage = usePaged(catShown, 100)
+
+  // one of the seventeen — the generic renderer handles all of them
+  if (open?.kind === 'erp') {
+    return <MasterScreen mkey={open.key} onBack={() => setOpen(null)} toast={toast} />
+  }
+
+  const back = () => setOpen(null)
+  const meta = BUILTIN_MASTERS.find(([k]) => k === open?.key)
+  if (open?.kind === 'builtin') {
+    const [key, label, sub, , note] = meta
+    if (key === 'categories') {
+      const shown = catShown
+      return (
+        <MasterPane title={label} sub={`${cats ? cats.count : 0} codes`} onBack={back}>
+          <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select value={section} onChange={(e) => setSection(e.target.value)}
+              style={{ background: 'var(--panel-2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px' }}>
+              <option value="">All sections</option>
+              {(cats?.sections || []).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <SearchBox value={q} onChange={setQ} placeholder="Search category…" style={{ width: 240 }} />
+            <span className="small" style={{ color: 'var(--muted)' }}>{shown.length} shown</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 8 }}>
+            {catPage.slice.map((c) => (
+              <div key={c.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '9px 12px' }}>
+                <span className="mono" style={{ color: 'var(--muted)', fontSize: 11 }}>{c.section}</span>
+                <div>{c.name}</div>
+              </div>
+            ))}
+          </div>
+          <Pager {...catPage} noun="category" nouns="categories" />
+        </MasterPane>
+      )
+    }
+    if (key === 'units') {
+      return <MasterPane title={label} sub={sub} onBack={back}><UnitTypes toast={toast} /></MasterPane>
+    }
+    if (key === 'agents' || key === 'transports') {
+      const rows = key === 'agents' ? agents : transports
+      return (
+        <MasterPane title={label} sub={`${rows.length} on record`} onBack={back}>
+          {rows.length === 0 && <div className="empty" style={{ marginTop: 24 }}>None yet.</div>}
+          {rows.map((r) => (
+            <div key={r.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '11px 14px', marginBottom: 7, maxWidth: 520 }}>
+              {r.name}{r.phone ? ' · ' + r.phone : ''}</div>
+          ))}
+        </MasterPane>
+      )
+    }
+    // a keyed dropdown list (purchase managers, LR modes, transfer locations…)
+    const tab = OPTION_TABS.find(([k]) => k === key)
+    return (
+      <MasterPane title={label} sub={sub} onBack={back}>
+        <OptionList kind={tab[0]} title={tab[1]} blurb={tab[2]} fixed={tab[3]}
+          values={opts[tab[0]] || []} reload={loadOpts} toast={toast} />
+      </MasterPane>
+    )
+  }
+
+  const builtinCount = (k) => k === 'categories' ? (cats?.count ?? 0)
+    : k === 'agents' ? agents.length
+    : k === 'transports' ? transports.length
+    : (opts[k] || []).length
+  const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))', gap: 10 }
+
   return (
-    <div className="body">
-      <Sidebar id="masters" label="Masters">
-        <div className="head"><h3>Masters</h3></div>
-        <div className="list" style={{ padding: '6px 0' }}>
-          {[['categories', `Product Categories · ${cats ? cats.count : '…'}`],
-            ['agents', `Agents · ${agents.length}`],
-            ['transports', `Transporters · ${transports.length}`],
-            ...OPTION_TABS.map(([k, label]) => [k, `${label} · ${(opts[k] || []).length}`]),
-          ].map(([k, label]) => (
-            <div key={k} className={'doc-row' + (tab === k ? ' sel' : '')} style={{ padding: '11px 14px' }} onClick={() => setTab(k)}>
-              <div className="t" style={{ fontWeight: tab === k ? 700 : 400 }}>{label}</div>
+    <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
+      <h2 style={{ marginTop: 0 }}>Masters</h2>
+
+      <h5 className="masterhead">ERP masters</h5>
+      <div style={grid}>
+        {erp.map((m, i) => (
+          <MasterCard key={m.key} n={m.count || i + 1} icon={m.icon} label={m.label} sub={m.sub}
+            meta={`${m.fields} fields · ${m.required} required`
+              + (m.grids.length ? ` · ${m.grids.length} grid` : '')
+              + (m.has_matrix ? ' · matrix' : '')}
+            note={m.note}
+            flag={m.unverified ? 'Fields inferred — no screenshot supplied' : null}
+            onClick={() => setOpen({ kind: 'erp', key: m.key })} />
+        ))}
+      </div>
+
+      <h5 className="masterhead">In use by this app</h5>
+      <div style={grid}>
+        {BUILTIN_MASTERS.map(([key, label, sub, icon, note]) => (
+          <MasterCard key={key} n={builtinCount(key) || '—'} icon={icon} label={label}
+            sub={sub} note={note}
+            onClick={() => setOpen({ kind: 'builtin', key })} />
+        ))}
+      </div>
+      <div style={{ height: 30 }} />
+    </div>
+  )
+}
+
+// ==========================================================================
+//  Label Designer · QR / Label Printing
+//  ------------------------------------------------------------------------
+//  Two screens, on purpose, because two different people use them.
+//
+//  A template is a LAYOUT: "product_name sits at 2mm/6mm in 8pt bold, the QR is
+//  a 20mm square at 28mm/12mm". It holds field REFERENCES and never a product's
+//  values. That is what lets one template print the whole warehouse, and what
+//  makes a corrected price appear on the next sticker without anyone reopening
+//  the designer. Designing is occasional and careful; printing is daily and in
+//  a hurry, and putting them on one screen would mean the daily job walks past
+//  every control of the careful one.
+//
+//  Millimetres throughout, because a label is cut to a physical size and the
+//  person checking the output holds a ruler against it. `PX_PER_MM` is a zoom
+//  factor on the screen only — nothing is ever stored in pixels.
+// ==========================================================================
+
+//: pt → screen px at a given zoom. A font size is in points because that is
+//: what a font size is; everything else on a label is in millimetres.
+const ptPx = (pt, px) => (pt / 72) * 25.4 * px
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+//: Positions snap to a half-millimetre. Free-floating decimals look identical on
+//: screen and produce labels whose rows are a hair out of line across a sheet.
+const snap = (v) => Math.round(v * 2) / 2
+
+// One label, drawn from a template and a set of values. The same component is
+// the designer's canvas and the printing screen's proof, so what someone
+// designs is literally what the other screen shows them before they print.
+// `interactive` is what separates the two.
+function LabelSurface({ tpl, values, symbols, px, selId, onSelect, onChange,
+                       interactive, specs, innerRef, onBegin }) {
+  const els = [...(tpl.elements || [])].sort((a, b) => a.z - b.z)
+  // Typing directly on the label. Local to the canvas because it is a gesture,
+  // not a property: it starts on a double-click, ends on Enter or a click
+  // elsewhere, and only then does anything reach the draft.
+  const [editing, setEditing] = useState(null)   // {id, value}
+  // The same thing in a ref, because Escape has to be able to cancel the edit
+  // BEFORE the blur that closing the box provokes — a cancel that a stray blur
+  // can still commit is not a cancel.
+  const editRef = useRef(null)
+  const begin = onBegin || (() => {})
+
+  // What a text box currently reads — the same expression the printer uses, so
+  // what is typed over is exactly what would have printed.
+  const shownText = (e) => (
+    (e.use_text || e.field === 'custom_text') ? (e.text || '') : (values[e.field] ?? ''))
+
+  const startEdit = (ev, el, spec) => {
+    if (!interactive || el.locked) return
+    if (!['text', 'static'].includes(spec.kind)) return
+    ev.preventDefault(); ev.stopPropagation()
+    onSelect(el.id)
+    const start = { id: el.id, value: String(shownText(el)) }
+    editRef.current = start; setEditing(start)
+  }
+
+  const commitEdit = (keep) => {
+    const ed = editRef.current
+    editRef.current = null
+    setEditing(null)
+    if (!ed || !keep) return
+    const el = els.find((x) => x.id === ed.id)
+    if (!el || String(shownText(el)) === ed.value) return
+    // Emptying a field's box is how you give the product's own value back —
+    // otherwise a mistyped override would be a blank line with no visible cause.
+    onChange(el.id, el.field === 'custom_text'
+      ? { text: ed.value }
+      : { text: ed.value, use_text: ed.value !== '' })
+  }
+
+  // Selecting is separate from dragging, because a LOCKED element must still be
+  // selectable — the properties panel is the only place its lock can be undone,
+  // and an element you cannot select is one you cannot unlock.
+  const pick = (ev, el) => {
+    if (!interactive) return
+    ev.stopPropagation()
+    if (editing && editing.id === el.id) return   // clicking inside the editor
+    onSelect(el.id)
+    if (!el.locked) drag(ev, el, 'move')
+  }
+
+  const drag = (ev, el, mode) => {
+    if (!interactive || el.locked) return
+    ev.preventDefault(); ev.stopPropagation()
+    onSelect(el.id)
+    const x0 = ev.clientX, y0 = ev.clientY
+    const o = { x: el.x, y: el.y, w: el.w, h: el.h }
+    const square = specs[el.field]?.kind === 'qr'
+    // One history entry for the whole gesture, taken on the first millimetre
+    // that actually moves: an undo that walks back through every frame of a drag
+    // is unusable, and a click that selects a box is not an edit to undo.
+    let opened = false
+    const move = (e) => {
+      if (!opened) { opened = true; begin() }
+      const dx = (e.clientX - x0) / px, dy = (e.clientY - y0) / px
+      if (mode === 'move') {
+        onChange(el.id, { x: snap(clamp(o.x + dx, 0, tpl.width_mm - o.w)),
+                          y: snap(clamp(o.y + dy, 0, tpl.height_mm - o.h)) },
+                 { silent: true })
+      } else {
+        let w = snap(clamp(o.w + dx, 1, tpl.width_mm - o.x))
+        let h = snap(clamp(o.h + dy, 0.3, tpl.height_mm - o.y))
+        // a QR is square by definition — a stretched symbol is an unreadable one
+        if (square) { w = h = Math.min(w, h) }
+        onChange(el.id, { w, h }, { silent: true })
+      }
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  return (
+    <div className="lsurface" ref={innerRef}
+      style={{ width: tpl.width_mm * px, height: tpl.height_mm * px,
+               border: tpl.border ? '1px solid #000' : '1px dashed #ccc',
+               fontFamily: tpl.font }}
+      onPointerDown={() => { if (!interactive) return; commitEdit(true); onSelect(null) }}>
+      {els.map((e) => {
+        const spec = specs[e.field]
+        if (!spec) return null
+        const sel = interactive && selId === e.id
+        const box = {
+          position: 'absolute', left: e.x * px, top: e.y * px,
+          width: e.w * px, height: e.h * px, zIndex: e.z,
+          opacity: e.visible === false ? (interactive ? 0.28 : 0) : 1,
+          outline: sel ? '1.5px solid var(--brand)' : (e.border ? '.5px solid #000' : 'none'),
+          cursor: interactive ? (e.locked ? 'not-allowed' : 'move') : 'default',
+        }
+        let inner
+        if (spec.kind === 'qr') {
+          inner = <div className="lqr" style={{ width: '100%', height: '100%', background: '#fff' }}
+            dangerouslySetInnerHTML={{ __html: symbols.qr_svg || '' }} />
+        } else if (spec.kind === 'barcode') {
+          inner = <div className="lqr" style={{ width: '100%', height: '100%', background: '#fff' }}
+            dangerouslySetInnerHTML={{ __html: symbols.barcode_svg || '' }} />
+        } else if (spec.kind === 'line') {
+          inner = <div style={{ width: '100%', height: '100%', background: e.color || '#000' }} />
+        } else if (spec.kind === 'image') {
+          inner = e.src
+            ? <img src={e.src} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+            : <span className="lph">logo</span>
+        } else {
+          const raw = shownText(e)
+          const txt = `${e.prefix || ''}${e.uppercase ? String(raw).toUpperCase() : raw}${e.suffix || ''}`
+          const type = {
+            display: 'block', width: '100%', height: '100%',
+            fontFamily: e.font || tpl.font, fontSize: ptPx(e.size, px),
+            lineHeight: `${e.h * px}px`, fontWeight: e.bold ? 700 : 400,
+            fontStyle: e.italic ? 'italic' : 'normal',
+            textAlign: e.align || 'left', color: e.color || '#000',
+          }
+          inner = editing && editing.id === e.id ? (
+            // eslint-disable-next-line jsx-a11y/no-autofocus
+            <input className="ltextin" autoFocus value={editing.value}
+              style={{ ...type, textTransform: e.uppercase ? 'uppercase' : 'none' }}
+              onChange={(ev) => {
+                const next = { id: e.id, value: ev.target.value }
+                editRef.current = next; setEditing(next)
+              }}
+              onPointerDown={(ev) => ev.stopPropagation()}
+              onBlur={() => commitEdit(true)}
+              onKeyDown={(ev) => {
+                ev.stopPropagation()          // arrow keys move the caret, not the box
+                if (ev.key === 'Enter') { ev.preventDefault(); commitEdit(true) }
+                if (ev.key === 'Escape') { ev.preventDefault(); commitEdit(false) }
+              }} />
+          ) : (
+            <span style={{ ...type, overflow: 'hidden', whiteSpace: 'nowrap',
+                           textOverflow: 'ellipsis' }}>
+              {txt === '' ? (interactive ? <span className="lph">{spec.label}</span> : '') : txt}
+            </span>
+          )
+        }
+        return (
+          <div key={e.id} style={box}
+            title={interactive ? `${spec.label}${e.locked ? ' · locked' : ''}`
+              + (['text', 'static'].includes(spec.kind) && !e.locked ? ' · double-click to type over it' : '')
+              : undefined}
+            onDoubleClick={(ev) => startEdit(ev, e, spec)}
+            onPointerDown={(ev) => pick(ev, e)}>
+            {inner}
+            {sel && !e.locked && (
+              <span className="lhandle" onPointerDown={(ev) => drag(ev, e, 'resize')}
+                title="Drag to resize" />
+            )}
+            {sel && e.locked && <span className="llock" title="Locked — unlock it in Properties to move it">🔒</span>}
+            {/* A line that has stopped following the product prints the same
+                words on every garment. That is sometimes exactly right and
+                sometimes a mistake nobody would spot on screen — so it is
+                marked on the canvas, not just in the panel. */}
+            {interactive && e.use_text && !(editing && editing.id === e.id) && (
+              <span className="lfixed" title={`Fixed text — this box no longer shows the product's ${spec.label}. Clear it to get the live value back.`}>✎</span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+//: Zoom steps, in screen pixels per millimetre. 8 shows a 50mm label at 400px,
+//: which is about the size it prints at on a normal monitor.
+const ZOOMS = [4, 6, 8, 11, 15]
+
+//: The stock sizes the server offers, if it is old enough not to offer any.
+//: Typing a size always works, so this is a convenience and never a constraint.
+const FALLBACK_SIZES = [
+  { key: '50x35', w: 50, h: 35, label: '50 × 35 — standard garment tag' },
+  { key: '100x150', w: 100, h: 150, label: '100 × 150 — shipping' },
+]
+
+// The label's own size — a control, not a number buried three panels away.
+// Presets are the roll someone actually loaded; the two boxes are for the die
+// that is not on the list. Both go through one `onResize`, so a preset and a
+// typed size do exactly the same thing to the design.
+function SizeBox({ draft, sizes, scaleOn, onScaleOn, onResize, column }) {
+  // Held as text while it is being typed. Clamping "1" to 10 the instant it is
+  // typed makes "100" impossible to enter — so the numbers are taken on Enter
+  // or when the box is left, and clamped then.
+  const [w, setW] = useState(String(draft.width_mm))
+  const [h, setH] = useState(String(draft.height_mm))
+  useEffect(() => { setW(String(draft.width_mm)); setH(String(draft.height_mm)) },
+    [draft.width_mm, draft.height_mm])
+  const list = (sizes && sizes.length) ? sizes : FALLBACK_SIZES
+  const here = `${+draft.width_mm}x${+draft.height_mm}`
+  const preset = list.find((s) => `${s.w}x${s.h}` === here)
+  return (
+    <div className={'lsize' + (column ? ' col' : '')}>
+      <select value={preset ? preset.key : ''} title="The label stock this design is cut to"
+        onChange={(e) => {
+          const s = list.find((x) => x.key === e.target.value)
+          if (s) onResize(s.w, s.h)
+        }}>
+        <option value="">{preset ? 'Custom size…' : `Custom · ${draft.width_mm} × ${draft.height_mm} mm`}</option>
+        {list.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
+      </select>
+      <div className="mm">
+        <input type="number" step="0.5" min="10" max="300" value={w} title="Width in millimetres"
+          onChange={(e) => setW(e.target.value)}
+          onBlur={() => onResize(parseFloat(w), parseFloat(h))}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} />
+        <span>×</span>
+        <input type="number" step="0.5" min="10" max="300" value={h} title="Height in millimetres"
+          onChange={(e) => setH(e.target.value)}
+          onBlur={() => onResize(parseFloat(w), parseFloat(h))}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} />
+        <span>mm</span>
+        <button className="btn" title="Turn the label on its side"
+          onClick={() => onResize(draft.height_mm, draft.width_mm)}>⇄</button>
+      </div>
+      <label className="chk" title="On: the whole design grows or shrinks with the label, type included — a 50mm design becomes the same design at 100mm. Off: the fields keep their millimetre positions and only the ones hanging over the new edge are pulled back in.">
+        <input type="checkbox" checked={scaleOn} onChange={(e) => onScaleOn(e.target.checked)} />
+        {' '}Scale the design with the label
+      </label>
+    </div>
+  )
+}
+
+function LabelDesigner({ toast, role }) {
+  const [cat, setCat] = useState(null)            // the field catalogue
+  const [templates, setTemplates] = useState([])
+  const [draft, setDraft] = useState(null)        // the template being edited
+  const [dirty, setDirty] = useState(false)
+  const [selId, setSelId] = useState(null)
+  const [px, setPx] = useState(8)
+  const [preview, setPreview] = useState(null)    // {values, qr_svg, barcode_svg, source}
+  const [products, setProducts] = useState([])
+  const [previewId, setPreviewId] = useState('')  // which product the canvas shows
+  const [qrNote, setQrNote] = useState('')
+  const [err, setErr] = useState('')              // why the screen is empty
+  const [scaleOn, setScaleOn] = useState(true)    // resize the design with the label
+  const surfRef = useRef(null)                    // the label itself, for drop coords
+  const canvRef = useRef(null)                    // the scroll area, for Fit
+  // Element ids only have to be unique within one template, and they are what
+  // selection and every edit key off — so they are minted from a counter rather
+  // than from the clock, which two adds in the same millisecond would collide on.
+  const seq = useRef(0)
+  const newId = () => `e${Date.now().toString(36)}${(seq.current += 1)}`
+
+  const specs = useMemo(() => {
+    const m = {}; (cat?.fields || []).forEach((f) => { m[f.key] = f }); return m
+  }, [cat])
+
+  // ---- undo / redo -------------------------------------------------------
+  // The whole draft is the unit of history. It is a few kilobytes of JSON, every
+  // edit already builds a new object rather than mutating the old one, and a
+  // stack of snapshots cannot drift out of step with the document the way a
+  // stack of inverse-operations can. Entries are pushed BEFORE a change lands,
+  // by whoever makes it — so what an undo restores is a state that was on screen.
+  const hist = useRef({ past: [], future: [], tag: null, at: 0 })
+  const [histN, setHistN] = useState([0, 0])      // [undoable, redoable], for the buttons
+  const draftRef = useRef(null)
+  useEffect(() => { draftRef.current = draft })
+
+  const resetHistory = () => {
+    hist.current = { past: [], future: [], tag: null, at: 0 }
+    setHistN([0, 0])
+  }
+  //: `tag` coalesces a run of edits of the same kind into one step: dragging a
+  //: box across the label is one thing that happened, not sixty, and typing a
+  //: font size is one thing, not four. A different tag, or a pause, starts a new
+  //: entry. Untagged edits — adding, deleting, aligning — always get their own.
+  const push = (tag) => {
+    const h = hist.current, d = draftRef.current
+    if (!d) return
+    const now = Date.now()
+    if (tag && h.tag === tag && now - h.at < 900) { h.at = now; return }
+    if (h.past[h.past.length - 1] === d) { h.at = now; return }   // nothing moved since
+    h.past.push(d)
+    if (h.past.length > 80) h.past.shift()        // 80 steps back is further than anyone goes
+    h.future = []; h.tag = tag || null; h.at = now
+    setHistN([h.past.length, 0])
+  }
+  const step = (back) => {
+    const h = hist.current, d = draftRef.current
+    const from = back ? h.past : h.future
+    const to = back ? h.future : h.past
+    if (!from.length || !d) return
+    to.push(d)
+    const next = from.pop()
+    h.tag = null
+    draftRef.current = next
+    setDraft(next); setDirty(true)
+    // the element that was selected may not exist in the state being restored
+    setSelId((s) => (next.elements.some((e) => e.id === s) ? s : null))
+    setHistN([h.past.length, h.future.length])
+  }
+  const undo = () => step(true)
+  const redo = () => step(false)
+
+  const loadTemplates = useCallback(() => api.labelTemplates().then(setTemplates), [])
+  // Deliberately once, on mount. `toast` is re-created on every render of the
+  // app shell, so listing it here would re-run this on every render — and since
+  // the failure path reports an error, a server that 404s these routes would
+  // re-render, re-fetch, re-fail and shout forever.
+  useEffect(() => {
+    api.labelFields().then(setCat).catch((e) => setErr(
+      (e.status === 404 || e.status === 405)
+        ? 'restart'
+        : `The field catalogue could not be read (${e.message || 'the request failed'}).`))
+    loadTemplates().catch(() => {})
+    api.listProducts().then(setProducts).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadTemplates])
+
+  // the values the canvas draws. Re-fetched when the chosen product changes,
+  // because the whole point of previewing against real stock is seeing a real
+  // description overflow its box before a roll of stickers proves it
+  useEffect(() => {
+    api.labelPreviewValues(previewId || undefined).then(setPreview).catch(() => {})
+  }, [previewId])
+
+  const sel = draft?.elements.find((e) => e.id === selId) || null
+
+  // The QR's size is the one property whose mistake is invisible on screen: a
+  // symbol scaled down to fit still looks like a QR and only stops working once
+  // it is on a garment. Keyed on the WIDTH alone, so a drag re-checks when the
+  // size settles rather than on every frame of it.
+  const qrW = draft?.elements.find((e) => specs[e.field]?.kind === 'qr')?.w
+  useEffect(() => {
+    if (qrW == null) { setQrNote(''); return undefined }
+    let live = true
+    api.labelQrCheck(qrW, previewId || undefined)
+      .then((r) => { if (live) setQrNote(r.warning || '') }).catch(() => {})
+    return () => { live = false }
+  }, [qrW, previewId])
+
+  //: Every mutator takes the same optional third argument: `{silent}` while a
+  //: gesture is still running (the gesture pushed its own entry when it began),
+  //: `{tag}` for a run of keystrokes that is really one edit.
+  const edit = (patch, opt) => {
+    if (!opt?.silent) push(opt?.tag)
+    setDraft((d) => ({ ...d, ...patch })); setDirty(true)
+  }
+  const editEl = (id, patch, opt) => {
+    if (!opt?.silent) push(opt?.tag)
+    setDraft((d) => ({ ...d, elements: d.elements.map((e) => (e.id === id ? { ...e, ...patch } : e)) }))
+    setDirty(true)
+  }
+
+  // Changing the label's size. Two jobs, and which one is wanted is the whole
+  // reason for the tick-box: someone who bought a bigger roll wants the SAME
+  // design, bigger — someone correcting 50×35 to 50×40 wants the design left
+  // exactly where it is. Either way nothing may end up over the edge, because
+  // the server clamps on save and a design that silently moves between the
+  // screen and the sticker is worse than one that moves while you watch.
+  const resizeLabel = (w0, h0) => {
+    const lo = cat?.min_mm || 10, hi = cat?.max_mm || 300
+    const w = clamp(+w0 || draft.width_mm, lo, hi)
+    const h = clamp(+h0 || draft.height_mm, lo, hi)
+    if (w === draft.width_mm && h === draft.height_mm) return
+    push('size')
+    const r2 = (v) => Math.round(v * 100) / 100
+    setDraft((d) => {
+      const sx = w / d.width_mm, sy = h / d.height_mm
+      const k = Math.min(sx, sy)                  // type scales by the smaller of the two
+      const els = d.elements.map((e) => {
+        const n = scaleOn
+          ? { ...e, x: r2(e.x * sx), y: r2(e.y * sy), w: r2(e.w * sx), h: r2(e.h * sy),
+              size: Math.round(clamp(e.size * k, 3, 72) * 2) / 2 }
+          : { ...e }
+        if (specs[e.field]?.kind === 'qr') { n.w = n.h = Math.min(n.w, n.h) }
+        n.w = clamp(n.w, 0.5, w); n.h = clamp(n.h, 0.2, h)
+        n.x = snap(clamp(n.x, 0, w - n.w)); n.y = snap(clamp(n.y, 0, h - n.h))
+        return n
+      })
+      return { ...d, width_mm: w, height_mm: h, elements: els }
+    })
+    setDirty(true)
+  }
+
+  // Zoom until the whole label is in view. Once any size is designable this is
+  // the only zoom control that keeps working — a 100 × 150 shipping label at
+  // "100%" is taller than the screen.
+  const fitZoom = () => {
+    const box = canvRef.current
+    if (!box || !draft) return
+    const z = Math.min((box.clientWidth - 70) / draft.width_mm,
+                       (box.clientHeight - 130) / draft.height_mm)
+    setPx(clamp(Math.round(z * 2) / 2, 1, 20))
+  }
+
+  const addField = (key, at) => {
+    const spec = specs[key]; if (!spec || !draft) return
+    push()
+    const w = Math.min(spec.w || 20, draft.width_mm)
+    const h = Math.min(spec.h || 4, draft.height_mm)
+    const id = newId()
+    const el = {
+      id, field: key, w, h,
+      x: snap(clamp(at ? at.x - w / 2 : 2, 0, draft.width_mm - w)),
+      y: snap(clamp(at ? at.y - h / 2 : 2, 0, draft.height_mm - h)),
+      size: spec.size || 8, bold: !!spec.bold, italic: false,
+      align: spec.align || 'left', font: '', color: '#000000',
+      prefix: '', suffix: '', uppercase: false, border: false,
+      visible: true, locked: false, text: '', src: '',
+      z: (draft.elements.reduce((m, e) => Math.max(m, e.z), 0) || 0) + 1,
+    }
+    setDraft((d) => ({ ...d, elements: [...d.elements, el] }))
+    setSelId(id); setDirty(true)
+  }
+  const removeEl = (id) => {
+    push()
+    setDraft((d) => ({ ...d, elements: d.elements.filter((e) => e.id !== id) }))
+    setSelId(null); setDirty(true)
+  }
+  const dupEl = (el) => {
+    push()
+    const id = newId()
+    const copy = { ...el, id, x: snap(clamp(el.x + 2, 0, draft.width_mm - el.w)),
+      y: snap(clamp(el.y + 2, 0, draft.height_mm - el.h)), locked: false,
+      z: (draft.elements.reduce((m, e) => Math.max(m, e.z), 0) || 0) + 1 }
+    setDraft((d) => ({ ...d, elements: [...d.elements, copy] }))
+    setSelId(id); setDirty(true)
+  }
+  // z is re-numbered on every save, so "forward" only has to end up above the
+  // element it was below — swapping with the neighbour is exactly that
+  const restack = (el, dir) => {
+    const ordered = [...draft.elements].sort((a, b) => a.z - b.z)
+    const i = ordered.findIndex((e) => e.id === el.id)
+    const j = i + dir
+    if (j < 0 || j >= ordered.length) return
+    push()
+    const a = ordered[i].z, b = ordered[j].z
+    setDraft((d) => ({ ...d, elements: d.elements.map((e) =>
+      e.id === ordered[i].id ? { ...e, z: b } : e.id === ordered[j].id ? { ...e, z: a } : e) }))
+    setDirty(true)
+  }
+  const align = (how) => {
+    if (!sel) return
+    const p = { left: { x: 0 }, right: { x: snap(draft.width_mm - sel.w) },
+      hcentre: { x: snap((draft.width_mm - sel.w) / 2) }, top: { y: 0 },
+      bottom: { y: snap(draft.height_mm - sel.h) },
+      vcentre: { y: snap((draft.height_mm - sel.h) / 2) } }[how]
+    if (p) editEl(sel.id, p)
+  }
+
+  // arrow keys nudge, Delete removes — a mm of precision is not a mouse's job
+  useEffect(() => {
+    if (!draft || !selId) return
+    const onKey = (e) => {
+      const t = e.target.tagName
+      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return
+      const el = draft.elements.find((x) => x.id === selId)
+      if (!el || el.locked) return
+      const step = e.shiftKey ? 1 : 0.5
+      const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key]
+      if (d) {
+        e.preventDefault()
+        // a held-down arrow key is one nudge that went too far, not thirty
+        editEl(el.id, { x: snap(clamp(el.x + d[0], 0, draft.width_mm - el.w)),
+                        y: snap(clamp(el.y + d[1], 0, draft.height_mm - el.h)) },
+               { tag: `nudge:${el.id}` })
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault(); removeEl(el.id)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  // Ctrl-Z / Ctrl-Y anywhere on the screen — except inside a text box, where the
+  // browser's own undo is the one the person means.
+  useEffect(() => {
+    if (!draft) return undefined
+    const onKey = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const t = e.target.tagName
+      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
+      else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  const newTemplate = () => {
+    setDraft({ id: null, name: '', description: '', width_mm: 50, height_mm: 35,
+      padding_mm: 2, border: true, target: 'product',
+      font: 'Arial, Helvetica, sans-serif', elements: [], active: true, is_default: false })
+    setSelId(null); setDirty(true); resetHistory()
+  }
+  // History belongs to the template on the bench. Carrying it across a Close
+  // would let an undo pull one template's layout into another one.
+  const openTemplate = (t) => {
+    setDraft({ ...t, elements: [...(t.elements || [])] })
+    setSelId(null); setDirty(false); resetHistory()
+  }
+  const save = async () => {
+    if (!draft.name.trim()) { toast('Give the template a name first', 'err'); return }
+    try {
+      const body = { ...draft, created_by: role || 'admin' }
+      const saved = draft.id ? await api.saveLabelTemplate(draft.id, body)
+        : await api.createLabelTemplate(body)
+      setDraft({ ...saved, elements: [...(saved.elements || [])] })
+      setDirty(false); await loadTemplates()
+      toast('✓ Template saved', 'ok')
+    } catch (e) { toast(e.detail || 'Could not save the template', 'err') }
+  }
+  const act = async (fn, ok) => {
+    try { await fn(); await loadTemplates(); toast(ok, 'ok') }
+    catch (e) { toast(e.detail || 'That did not work', 'err') }
+  }
+  const close = () => {
+    if (dirty && !window.confirm('Close without saving? The changes to this layout will be lost.')) return
+    setDraft(null); setSelId(null); setDirty(false); resetHistory()
+  }
+
+  // A screen that says "loading…" forever is the one thing this must not do: the
+  // usual reason it cannot load is a backend still running the code from before
+  // these routes existed, which is a restart rather than a fault — and the
+  // person looking at the blank screen is the person who can do it.
+  if (err) return (
+    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+      <div className="pagehead"><h2>Label Designer</h2></div>
+      <div style={{ padding: 22, maxWidth: 620 }}>
+        <div className="warnbox">
+          <h4>{err === 'restart' ? 'The server needs restarting' : 'Label Designer could not start'}</h4>
+          <div className="small" style={{ color: 'var(--text-2)', lineHeight: 1.5 }}>
+            {err === 'restart' ? <>
+              This page was loaded from disk, but the routes it calls are registered when
+              Python starts — and this server was started before Label Designer existed,
+              so it answers <code>/api/labels/…</code> with 404. Stop the ESSA server
+              (Ctrl-C in the run window), start it again with <code>run.bat</code>, and
+              reload this page.
+            </> : err}
+          </div>
+          <button className="btn" style={{ marginTop: 12 }} onClick={() => window.location.reload()}>
+            ↻ Reload</button>
+        </div>
+      </div>
+    </div>
+  )
+  if (!cat) return <div className="body"><div className="empty" style={{ marginTop: 100 }}>Loading the label fields…</div></div>
+
+  // ---- the template list ----
+  if (!draft) return (
+    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+      <div className="pagehead">
+        <h2>Label Designer</h2>
+        {/* the subtitle used to be what pushed the actions to the right edge —
+            without one, the spacer has to do it explicitly */}
+        <div style={{ flex: 1 }} />
+        <button className="btn primary" onClick={newTemplate}>+ New template</button>
+      </div>
+      <div style={{ padding: 22 }}>
+        {templates.length === 0 && <div className="empty" style={{ marginTop: 60 }}>
+          No templates yet.</div>}
+        <div className="tplgrid">
+          {templates.map((t) => (
+            <div key={t.id} className={'tplcard' + (t.active ? '' : ' off')}>
+              <div className="tplthumb">
+                {/* fits the card in BOTH directions — bounding only the width
+                    let a 150mm-tall shipping label make a 500px-tall card */}
+                <LabelSurface tpl={t} values={cat.sample}
+                  px={Math.min(3.4, 170 / t.width_mm, 150 / t.height_mm)}
+                  symbols={{ qr_svg: preview?.qr_svg, barcode_svg: preview?.barcode_svg }}
+                  specs={specs} interactive={false} selId={null}
+                  onSelect={() => {}} onChange={() => {}} />
+              </div>
+              <div className="tplbody">
+                <div className="nm">{t.name}
+                  {t.is_default && <span className="badge confirmed" title="What the printing screen opens on">default</span>}
+                  {!t.active && <span className="badge">inactive</span>}
+                </div>
+                <div className="small" style={{ color: 'var(--muted)' }}>
+                  {t.width_mm}×{t.height_mm} mm · {(t.elements || []).length} field(s) ·
+                  {t.target === 'unit' ? ' per-piece' : ' per-SKU'}
+                </div>
+                {t.description && <div className="small" style={{ color: 'var(--text-2)' }}>{t.description}</div>}
+                <div className="tplacts">
+                  <button className="btn" onClick={() => openTemplate(t)}>Edit</button>
+                  <button className="btn" onClick={() => act(() => api.duplicateLabelTemplate(t.id), '✓ Duplicated')}>Duplicate</button>
+                  {!t.is_default && <button className="btn" onClick={() => act(() => api.setDefaultLabelTemplate(t.id), '✓ Default template set')}>Make default</button>}
+                  <button className="btn" onClick={() => act(() => api.setLabelTemplateActive(t.id, !t.active), t.active ? '✓ Deactivated' : '✓ Activated')}>
+                    {t.active ? 'Deactivate' : 'Activate'}</button>
+                  <a className="btn" href={api.labelPreviewUrl(t.id, previewId || undefined, 6)} target="_blank" rel="noreferrer">Print proof</a>
+                  {!t.is_default && <button className="btn danger" onClick={() => {
+                    if (window.confirm(`Delete “${t.name}”? Labels already printed from it are unaffected.`)) act(() => api.deleteLabelTemplate(t.id), '✓ Deleted')
+                  }}>Delete</button>}
+                </div>
+              </div>
             </div>
           ))}
         </div>
-      </Sidebar>
-      <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
-        {tab === 'categories' && (
-          <>
-            <div style={{ display: 'flex', gap: 10, marginBottom: 14, alignItems: 'center' }}>
-              <h2 style={{ margin: 0 }}>Product Categories</h2>
-              <span className="small">from GRN PRODUCT DETAILS.xlsx · {cats ? cats.count : 0} codes</span>
-              <div style={{ flex: 1 }} />
-              <select value={section} onChange={e => setSection(e.target.value)}
-                style={{ background: 'var(--panel2)', color: 'var(--text)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px' }}>
-                <option value="">All sections</option>
-                {(cats?.sections || []).map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <SearchBox value={q} onChange={setQ} placeholder="Search category…" style={{ width: 220 }} />
-            </div>
-            <div className="small" style={{ marginBottom: 8 }}>{shown.length} shown</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8 }}>
-              {shown.map(c => (
-                <div key={c.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '9px 12px' }}>
-                  <span className="mono" style={{ color: 'var(--muted)', fontSize: 11 }}>{c.section}</span>
-                  <div>{c.name}</div>
-                </div>
+      </div>
+    </div>
+  )
+
+  // ---- the builder ----
+  const groups = cat.groups.map((g) => [g, cat.fields.filter((f) => f.group === g)])
+  const used = new Set(draft.elements.map((e) => e.field))
+  // measured against the LABEL, not the scroll area it sits in — the drop lands
+  // where the cursor is on the sticker, which is the whole promise of dragging it
+  const onDrop = (ev) => {
+    ev.preventDefault()
+    const key = ev.dataTransfer.getData('text/label-field')
+    if (!key) return
+    const r = surfRef.current?.getBoundingClientRect()
+    addField(key, r ? { x: (ev.clientX - r.left) / px, y: (ev.clientY - r.top) / px } : null)
+  }
+
+  return (
+    <div className="body ldesign">
+      {/* LEFT — the palette */}
+      <div className="lpanel">
+        <div className="head"><h3>Available information</h3></div>
+        <div className="list">
+          {groups.map(([g, fs]) => (
+            <div key={g} className="lgroup">
+              <h5>{g}</h5>
+              {fs.map((f) => (
+                <button key={f.key} className={'lfield' + (used.has(f.key) ? ' used' : '')}
+                  draggable onDragStart={(e) => e.dataTransfer.setData('text/label-field', f.key)}
+                  onClick={() => addField(f.key)}
+                  title={f.hint || `Add ${f.label} to the label`}>
+                  <span className="nm">{f.label}</span>
+                  <span className="kd">{f.kind === 'text' ? 'field' : f.kind}</span>
+                </button>
               ))}
             </div>
-          </>
-        )}
-        {tab === 'agents' && (
+          ))}
+        </div>
+      </div>
+
+      {/* CENTRE — the canvas */}
+      <div className="lcanvaswrap">
+        <div className="toolbar ltoolbar">
+          <input value={draft.name} onChange={(e) => edit({ name: e.target.value }, { tag: 'name' })}
+            placeholder="Template name" style={{ width: 196, fontWeight: 600 }} />
+          <div className="segbar">
+            <button className="seg" onClick={undo} disabled={!histN[0]}
+              title="Undo (Ctrl-Z)">↶</button>
+            <button className="seg" onClick={redo} disabled={!histN[1]}
+              title="Redo (Ctrl-Y)">↷</button>
+          </div>
+          <SizeBox draft={draft} sizes={cat.sizes} scaleOn={scaleOn}
+            onScaleOn={setScaleOn} onResize={resizeLabel} />
+          <div className="segbar">
+            {ZOOMS.map((z) => (
+              <button key={z} className={'seg' + (px === z ? ' on' : '')} onClick={() => setPx(z)}
+                title={`${z} screen pixels per millimetre`}>{z === 8 ? '100%' : `${Math.round(z / 8 * 100)}%`}</button>
+            ))}
+            <button className="seg" onClick={fitZoom} title="Zoom until the whole label is in view">Fit</button>
+          </div>
+          <div className="spacer" />
+          <select value={previewId} onChange={(e) => setPreviewId(e.target.value)}
+            style={{ width: 200 }} title="Draw the canvas with a real product's data">
+            <option value="">Sample data</option>
+            {products.map((p) => <option key={p.id} value={p.id}>{p.sku} · {(p.name || p.description)?.slice(0, 40)}</option>)}
+          </select>
+          <button className="btn" onClick={close}>Close</button>
+          <button className="btn primary" onClick={save} disabled={!dirty}>
+            {dirty ? 'Save template' : 'Saved'}</button>
+        </div>
+
+        <div className="lcanvas" ref={canvRef} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+          {preview && (
+            <LabelSurface tpl={draft} values={preview.values} symbols={preview}
+              px={px} selId={selId} onSelect={setSelId} onChange={editEl}
+              onBegin={push} interactive specs={specs} innerRef={surfRef} />
+          )}
+          {draft.elements.length === 0 && (
+            <div className="small" style={{ marginTop: 16, color: 'var(--muted)' }}>
+              Empty label — drag a field from the left.
+            </div>
+          )}
+          {qrNote && <div className="warnbox" style={{ marginTop: 18, maxWidth: 520 }}>
+            <h4>The QR may not scan at this size</h4>
+            <div className="small" style={{ color: 'var(--text-2)' }}>{qrNote}</div>
+          </div>}
+        </div>
+      </div>
+
+      {/* RIGHT — properties */}
+      <div className="lprops">
+        {!sel && (
           <>
-            <h2 style={{ marginTop: 0 }}>Agents</h2>
-            <p className="small">Auto-created from the "agent" field on extracted invoices. {agents.length ? '' : 'None yet — confirm an invoice that names an agent.'}</p>
-            {agents.map(a => <div key={a.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '11px 14px', marginBottom: 7 }}>{a.name}{a.phone ? ' · ' + a.phone : ''}</div>)}
+            <div className="head"><h3>Label properties</h3></div>
+            <div className="lform">
+              <div className="field"><label>Description</label>
+                <input value={draft.description || ''} placeholder="What this template is for"
+                  onChange={(e) => edit({ description: e.target.value }, { tag: 'desc' })} /></div>
+              <div className="field"><label>Label size</label>
+                <SizeBox draft={draft} sizes={cat.sizes} scaleOn={scaleOn}
+                  onScaleOn={setScaleOn} onResize={resizeLabel} column />
+              </div>
+              <div className="field"><label>Prints one label per</label>
+                <select value={draft.target} onChange={(e) => edit({ target: e.target.value })}
+                  title="A per-SKU label carries the product's QR; a per-piece label carries that garment's own code">
+                  <option value="product">SKU (product QR)</option>
+                  <option value="unit">Piece (each garment's own code)</option>
+                </select></div>
+              <div className="field"><label>Default font</label>
+                <select value={draft.font} onChange={(e) => edit({ font: e.target.value })}>
+                  {cat.fonts.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+                </select></div>
+              <label className="chk"><input type="checkbox" checked={!!draft.border}
+                onChange={(e) => edit({ border: e.target.checked })} /> Print a border round the label</label>
+              <label className="chk"><input type="checkbox" checked={!!draft.active}
+                onChange={(e) => edit({ active: e.target.checked })} /> Active (offered when printing)</label>
+              {/* Ticking makes this one the default; there is no un-ticking,
+                  because a warehouse with no default template has nothing for
+                  the printing screen to open on. Another template taking the
+                  title is how this one loses it. */}
+              <label className="chk" title={draft.is_default
+                ? 'Already the default — make another template the default to change it'
+                : 'The template QR / Label Printing opens on'}>
+                <input type="checkbox" checked={!!draft.is_default} disabled={!!draft.is_default}
+                  onChange={(e) => edit({ is_default: e.target.checked })} /> Default template</label>
+            </div>
           </>
         )}
-        {tab === 'transports' && (
+        {sel && (
           <>
-            <h2 style={{ marginTop: 0 }}>Transporters</h2>
-            <p className="small">Auto-created from the "transporter" field on extracted invoices/LRs.</p>
-            {transports.map(t => <div key={t.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '11px 14px', marginBottom: 7 }}>{t.name}{t.phone ? ' · ' + t.phone : ''}</div>)}
+            <div className="head"><h3>{specs[sel.field]?.label}</h3></div>
+            <div className="lform">
+              <div className="row2">
+                <div className="field"><label>X (mm)</label>
+                  <input type="number" step="0.5" value={sel.x} disabled={sel.locked}
+                    onChange={(e) => editEl(sel.id, { x: clamp(+e.target.value || 0, 0, draft.width_mm - sel.w) }, { tag: `x:${sel.id}` })} /></div>
+                <div className="field"><label>Y (mm)</label>
+                  <input type="number" step="0.5" value={sel.y} disabled={sel.locked}
+                    onChange={(e) => editEl(sel.id, { y: clamp(+e.target.value || 0, 0, draft.height_mm - sel.h) }, { tag: `y:${sel.id}` })} /></div>
+              </div>
+              <div className="row2">
+                <div className="field"><label>{specs[sel.field]?.kind === 'qr' ? 'QR size (mm)' : 'Width (mm)'}</label>
+                  <input type="number" step="0.5" value={sel.w} disabled={sel.locked}
+                    onChange={(e) => {
+                      const w = clamp(+e.target.value || 1, 0.5, draft.width_mm - sel.x)
+                      editEl(sel.id, specs[sel.field]?.kind === 'qr' ? { w, h: w } : { w }, { tag: `w:${sel.id}` })
+                    }} /></div>
+                <div className="field"><label>Height (mm)</label>
+                  <input type="number" step="0.5" value={sel.h}
+                    disabled={sel.locked || specs[sel.field]?.kind === 'qr'}
+                    onChange={(e) => editEl(sel.id, { h: clamp(+e.target.value || 1, 0.2, draft.height_mm - sel.y) }, { tag: `h:${sel.id}` })} /></div>
+              </div>
+              <div className="lalign">
+                <span className="small">Align on label</span>
+                <div>
+                  {[['left', '⇤'], ['hcentre', '↔'], ['right', '⇥'], ['top', '⇡'], ['vcentre', '↕'], ['bottom', '⇣']].map(([k, g]) => (
+                    <button key={k} className="btn" disabled={sel.locked} onClick={() => align(k)} title={k}>{g}</button>
+                  ))}
+                </div>
+              </div>
+
+              {['text', 'static'].includes(specs[sel.field]?.kind) && <>
+                {/* Words. A template normally holds a REFERENCE — "whatever this
+                    product's colour is" — and that is what makes one template
+                    print the whole warehouse. Typing over a box (here, or by
+                    double-clicking it on the label) breaks that link for that
+                    one box, on purpose and visibly: some lines really are the
+                    same on every garment, and a care instruction is not a
+                    column in the products table. */}
+                {sel.field === 'custom_text' ? (
+                  <div className="field"><label>Text</label>
+                    <input value={sel.text || ''} placeholder="What this line should say"
+                      onChange={(e) => editEl(sel.id, { text: e.target.value }, { tag: `t:${sel.id}` })} /></div>
+                ) : <>
+                  <label className="chk" title="Off: this box prints whatever the product says, and a corrected value reaches the next label on its own. On: it prints these words on every label, whatever the product says.">
+                    <input type="checkbox" checked={!!sel.use_text}
+                      onChange={(e) => editEl(sel.id, e.target.checked
+                        ? { use_text: true, text: sel.text || String(preview?.values?.[sel.field] ?? '') }
+                        : { use_text: false })} />
+                    {' '}Fixed text instead of the {specs[sel.field]?.label?.toLowerCase()}
+                  </label>
+                  {sel.use_text && (
+                    <div className="field">
+                      <input value={sel.text || ''} placeholder="What this line should say"
+                        onChange={(e) => editEl(sel.id, { text: e.target.value }, { tag: `t:${sel.id}` })} />
+                      <span className="small" style={{ color: 'var(--warn)' }}>
+                        Printed on every label.
+                      </span>
+                    </div>
+                  )}
+                </>}
+                <div className="field"><label>Font</label>
+                  <select value={sel.font || ''} onChange={(e) => editEl(sel.id, { font: e.target.value })}>
+                    <option value="">Template default</option>
+                    {cat.fonts.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+                  </select></div>
+                <div className="row2">
+                  <div className="field"><label>Font size (pt)</label>
+                    <input type="number" step="0.5" value={sel.size}
+                      onChange={(e) => editEl(sel.id, { size: clamp(+e.target.value || 8, 3, 72) }, { tag: `s:${sel.id}` })} /></div>
+                  <div className="field"><label>Text align</label>
+                    <select value={sel.align} onChange={(e) => editEl(sel.id, { align: e.target.value })}>
+                      {cat.aligns.map((a) => <option key={a} value={a}>{a}</option>)}
+                    </select></div>
+                </div>
+                <div className="row2">
+                  <div className="field"><label>Prefix</label>
+                    <input value={sel.prefix || ''} placeholder="Size: "
+                      onChange={(e) => editEl(sel.id, { prefix: e.target.value }, { tag: `p:${sel.id}` })} /></div>
+                  <div className="field"><label>Suffix</label>
+                    <input value={sel.suffix || ''} placeholder="% OFF"
+                      onChange={(e) => editEl(sel.id, { suffix: e.target.value }, { tag: `f:${sel.id}` })} /></div>
+                </div>
+                <label className="chk"><input type="checkbox" checked={!!sel.bold}
+                  onChange={(e) => editEl(sel.id, { bold: e.target.checked })} /> Bold</label>
+                <label className="chk"><input type="checkbox" checked={!!sel.italic}
+                  onChange={(e) => editEl(sel.id, { italic: e.target.checked })} /> Italic</label>
+                <label className="chk"><input type="checkbox" checked={!!sel.uppercase}
+                  onChange={(e) => editEl(sel.id, { uppercase: e.target.checked })} /> UPPERCASE</label>
+              </>}
+
+              {specs[sel.field]?.kind === 'image' && (
+                <div className="field"><label>Image</label>
+                  <input type="file" accept="image/*" onChange={(e) => {
+                    const f = e.target.files[0]; if (!f) return
+                    if (f.size > 400 * 1024) { toast('Use an image under 400 KB — it is stored inside the template', 'err'); return }
+                    const rd = new FileReader()
+                    rd.onload = () => editEl(sel.id, { src: rd.result })
+                    rd.readAsDataURL(f)
+                  }} />
+                </div>
+              )}
+
+              <div className="row2">
+                <div className="field"><label>Colour</label>
+                  <input type="color" value={sel.color || '#000000'}
+                    onChange={(e) => editEl(sel.id, { color: e.target.value }, { tag: `c:${sel.id}` })} /></div>
+                <div className="field"><label>Layer</label>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button className="btn" onClick={() => restack(sel, 1)} title="Bring forward">▲</button>
+                    <button className="btn" onClick={() => restack(sel, -1)} title="Send backward">▼</button>
+                  </div></div>
+              </div>
+              <label className="chk"><input type="checkbox" checked={!!sel.border}
+                onChange={(e) => editEl(sel.id, { border: e.target.checked })} /> Box border</label>
+              <label className="chk"><input type="checkbox" checked={sel.visible !== false}
+                onChange={(e) => editEl(sel.id, { visible: e.target.checked })} /> Visible</label>
+              <label className="chk" title="Locked fields cannot be moved or resized by accident — the QR and the SKU are worth locking once they are right">
+                <input type="checkbox" checked={!!sel.locked}
+                  onChange={(e) => editEl(sel.id, { locked: e.target.checked })} /> 🔒 Lock this field</label>
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button className="btn" onClick={() => dupEl(sel)}>Duplicate</button>
+                <button className="btn danger" disabled={sel.locked} onClick={() => removeEl(sel.id)}>Remove</button>
+              </div>
+            </div>
           </>
-        )}
-        {optTab && (
-          <OptionList kind={optTab[0]} title={optTab[1]} blurb={optTab[2]} fixed={optTab[3]}
-            values={opts[optTab[0]] || []} reload={loadOpts} toast={toast} />
         )}
       </div>
     </div>
+  )
+}
+
+// ==========================================================================
+//  QR / Label Printing — the daily screen
+//  ------------------------------------------------------------------------
+//  Pick stock, pick a template, check the proof, print. Nothing here can change
+//  a design, which is the point: the person doing this is holding a roll of
+//  stickers, not deciding what a label looks like.
+// ==========================================================================
+function LabelPrinting({ toast }) {
+  const [templates, setTemplates] = useState([])
+  const [tplId, setTplId] = useState(0)
+  const [products, setProducts] = useState([])
+  const [q, setQ] = useState('')
+  const [picked, setPicked] = useState({})        // {product_id: qty}
+  const [preview, setPreview] = useState(null)
+  const [cat, setCat] = useState(null)
+
+  useEffect(() => {
+    api.labelFields().then(setCat).catch(() => {})
+    api.labelTemplates().then((ts) => {
+      const live = ts.filter((t) => t.active)
+      setTemplates(live)
+      const def = live.find((t) => t.is_default) || live[0]
+      if (def) setTplId(def.id)
+    }).catch((e) => toast(
+      e.status === 404
+        ? 'This server was started before Label Printing existed — restart the ESSA server and reload.'
+        : 'Could not load the templates', 'err'))
+    api.listProducts().then(setProducts).catch(() => {})
+    // once, on mount — see the same note in LabelDesigner: `toast` changes
+    // identity every render, and this effect's failure path raises one
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const tpl = templates.find((t) => t.id === tplId) || null
+  const perPiece = tpl?.target === 'unit'
+
+  const specs = useMemo(() => {
+    const m = {}; (cat?.fields || []).forEach((f) => { m[f.key] = f }); return m
+  }, [cat])
+
+  // The proof is drawn to FIT the panel it sits in, not at a fixed zoom. It used
+  // to render at 8 px/mm whatever the template was: a 50mm label came out 400px
+  // wide inside a 300px column and lost both its edges to the scrollbar, and a
+  // 100 × 150 shipping label was a corner of itself. The panel is a fixed column
+  // and templates are any size between 10 and 300mm, so the only stable answer
+  // is to measure the box and scale to it — never magnifying past 8 px/mm, which
+  // is roughly life size on a normal monitor.
+  const proofRef = useRef(null)
+  const [proofW, setProofW] = useState(0)
+  useEffect(() => {
+    const el = proofRef.current
+    if (!el) return undefined
+    setProofW(el.clientWidth)
+    // once, on mount: the box is always rendered, and re-observing on every
+    // render would tear the observer down and build it again for nothing
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const ro = new ResizeObserver((es) => setProofW(es[0].contentRect.width))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  //: 12px of room for the box's own padding, so the label never sits edge to edge
+  const proofPx = (tpl && proofW)
+    ? Math.max(0.6, Math.min(8, (proofW - 12) / tpl.width_mm))
+    : 8
+
+  const visible = products.filter((p) => matches(p, q, ['sku', 'description', 'size', 'color', 'category', 'supplier_name', 'barcode']))
+  const page = usePaged(visible, 50)
+  const ids = Object.keys(picked).map(Number)
+  // a per-piece run prints one label per garment, so its count is the live piece
+  // codes, not a quantity anybody types
+  const total = ids.reduce((n, id) => {
+    const p = products.find((x) => x.id === id)
+    return n + (perPiece ? (p?.live_units || 0) : (+picked[id] || 0))
+  }, 0)
+
+  const toggle = (p) => setPicked((s) => {
+    const n = { ...s }
+    if (n[p.id] != null) delete n[p.id]
+    else n[p.id] = Math.max(1, Math.round(p.stock_qty || 1))
+    return n
+  })
+  const setQty = (id, v) => setPicked((s) => ({ ...s, [id]: Math.max(1, Math.min(+v || 1, 2000)) }))
+
+  // The proof is drawn from one of the selected products rather than from sample
+  // data, because a label that comes out wrong is usually wrong about a
+  // product's data — a description too long for its box, a missing MRP — and
+  // that is invisible against a sample record that has every field filled.
+  useEffect(() => {
+    const first = ids[0]
+    api.labelPreviewValues(first || undefined).then(setPreview).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids[0]])
+
+  const blocked = ids.map((id) => products.find((p) => p.id === id))
+    .filter((p) => p && p.can_print === false)
+
+  const doPrint = () => {
+    if (!tpl) { toast('Choose a template first', 'err'); return }
+    if (!ids.length) { toast('Select at least one product', 'err'); return }
+    if (blocked.length) {
+      toast(`${blocked[0].sku}: ${blocked[0].print_block}`, 'err'); return
+    }
+    const url = perPiece
+      ? api.labelPrintUrl(tpl.id, [], { unitProducts: ids })
+      : api.labelPrintUrl(tpl.id, ids.map((id) => ({ id, qty: picked[id] })))
+    window.open(url, '_blank')
+  }
+
+  return (
+    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+      <div className="pagehead">
+        <h2>QR / Label Printing</h2>
+      </div>
+      <div className="lprintwrap">
+        <div>
+          <div className="toolbar">
+            {/* supplier was always searchable here — it just never said so */}
+            <SearchBox value={q} onChange={setQ} placeholder="Search product / SKU / size / colour / supplier…"
+              style={{ width: 320 }} />
+            <div className="field" style={{ width: 280, margin: 0 }}><label>Template</label>
+              <select value={tplId} onChange={(e) => setTplId(+e.target.value)}>
+                {templates.length === 0 && <option value={0}>No active template</option>}
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}{t.is_default ? ' — default' : ''} ({t.width_mm}×{t.height_mm} mm)
+                  </option>
+                ))}
+              </select></div>
+            <div className="spacer" />
+            <button className="btn" onClick={() => setPicked({})} disabled={!ids.length}>Clear selection</button>
+          </div>
+
+          {perPiece && <div className="infobox" style={{ marginBottom: 12 }}>
+            <b>{tpl.name}</b> prints one label per garment, each carrying that piece's own
+            code — so the quantity is the number of piece codes the SKU has, not a number
+            you choose.
+          </div>}
+
+          <div className="tablewrap">
+          <table className="items">
+            <thead><tr>
+              <th style={{ width: 34 }}></th><th>SKU</th><th>Product</th>
+              <th>Size</th><th>Colour</th>
+              {/* Who it came from — on screen only, to tell two identical-looking
+                  rows apart before printing a hundred tags of the wrong one. It
+                  is NOT a label field: what prints is whatever the template lays
+                  out, and no template is touched by this column. */}
+              <th>Supplier</th>
+              <th style={{ textAlign: 'right' }}>Stock</th>
+              <th style={{ textAlign: 'right', width: 110 }}>{perPiece ? 'Pieces' : 'Labels'}</th>
+            </tr></thead>
+            <tbody>
+              {page.slice.map((p) => {
+                const on = picked[p.id] != null
+                return (
+                  <tr key={p.id} className={on ? 'sel' : ''}
+                    style={p.can_print === false ? { color: 'var(--muted)' } : undefined}>
+                    <td><input type="checkbox" checked={on} onChange={() => toggle(p)}
+                      title={p.can_print === false ? p.print_block : 'Select for printing'} /></td>
+                    <td className="mono">{p.sku || '—'}</td>
+                    <td>{p.name || p.description}
+                      {p.can_print === false && <span className="badge needs_review" style={{ marginLeft: 6 }}
+                        title={p.print_block}>cannot print</span>}</td>
+                    <td>{p.size || '—'}</td>
+                    <td>{p.color || '—'}</td>
+                    <td title={p.supplier_name ? `Received from ${p.supplier_name}` : 'No supplier recorded against this item'}>
+                      {p.supplier_name || '—'}</td>
+                    <td className="num">{p.stock_qty}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      {!on ? '—' : perPiece ? (p.live_units || 0)
+                        : <input type="number" min="1" value={picked[p.id]} style={{ width: 78 }}
+                            onChange={(e) => setQty(p.id, e.target.value)} />}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          </div>
+          <Pager {...page} noun="product" />
+        </div>
+
+        <div className="lprintside">
+          <div className="section">
+            <h4>Preview
+              {tpl && (
+                <span className="proofsize">
+                  {tpl.width_mm} × {tpl.height_mm} mm
+                  {proofPx < 7.9 ? ` · shown at ${Math.round((proofPx / 8) * 100)}%` : ''}
+                </span>
+              )}
+            </h4>
+            <div className="small" style={{ color: 'var(--muted)', margin: '-4px 0 10px' }}>
+              {ids.length ? `${preview?.values?.sku || 'A selected product'}, in the chosen template.`
+                : 'Sample data — select a product to see its own.'}
+            </div>
+            <div className="lproof" ref={proofRef}>
+              {tpl && preview && cat
+                ? <LabelSurface tpl={tpl} values={preview.values} symbols={preview} px={proofPx}
+                    specs={specs} interactive={false} selId={null}
+                    onSelect={() => {}} onChange={() => {}} />
+                : <div className="small">Nothing to preview yet.</div>}
+            </div>
+            <div className="items-foot" style={{ marginTop: 12 }}>
+              <span>Selected <b>{ids.length}</b> product{ids.length === 1 ? '' : 's'}</span>
+              <span>Labels <b>{total}</b></span>
+            </div>
+            {blocked.length > 0 && <div className="warnbox" style={{ marginTop: 12 }}>
+              <h4>{blocked.length} selected product(s) cannot be printed</h4>
+              <div className="small" style={{ color: 'var(--text-2)' }}>{blocked[0].print_block}</div>
+            </div>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+              <a className="btn" href={tpl ? api.labelPreviewUrl(tpl.id, ids[0], 6) : '#'}
+                target="_blank" rel="noreferrer"
+                onClick={(e) => { if (!tpl) e.preventDefault() }}
+                title="Open a full sheet of six, exactly as it will print">Preview sheet</a>
+              <button className="btn primary" onClick={doPrint} disabled={!total}>
+                🖨 Print {total || ''} label{total === 1 ? '' : 's'}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ==========================================================================
+//  Notifications
+//  ------------------------------------------------------------------------
+//  The dashboard already says what is waiting on someone — but only to whoever
+//  opens the dashboard. This is the same queues, carried: a bell that counts
+//  what has not been seen, a panel that opens the screen which clears it, and a
+//  roster of who is meant to be watching.
+//
+//  Read means read AT A NUMBER. Acknowledging "4 drafts" stores 4; a fifth makes
+//  it unread again, a third leaves it quiet. That is what makes a bell you can
+//  clear and still trust — see services/notifications.py.
+// ==========================================================================
+
+const NOTIF_LEVEL = {
+  critical: { dot: '🔥', label: 'Critical', tone: 'crit' },
+  warn: { dot: '🔴', label: 'Needs attention', tone: 'warn' },
+  info: { dot: '🟠', label: 'For information', tone: 'info' },
+}
+
+// One notice, wherever it is shown — the bell panel and the dashboard section
+// render the same row, so a notice never says two different things in two places.
+function NoticeRow({ n, onOpen, onRead, onMute, compact }) {
+  return (
+    <div className={'notice' + (n.unread ? ' unread' : '')}>
+      <span className="ndot" title={NOTIF_LEVEL[n.level]?.label}>{n.dot}</span>
+      <div className="nbody">
+        <div className="ntitle">{n.title}</div>
+        <div className="nsub">{n.body}</div>
+        <div className="nmeta">
+          {n.waiting ? <>waiting {n.waiting}</> : null}
+          {n.read_by ? <> · read by {n.read_by}</> : null}
+        </div>
+      </div>
+      <div className="nacts">
+        <button className="btn" onClick={() => onOpen(n)} title="Open the screen that clears this">Open</button>
+        {!compact && n.unread && (
+          <button className="btn" onClick={() => onRead(n)} title="Acknowledge it at this count — it comes back if it grows">Mark read</button>
+        )}
+        {!compact && onMute && (
+          <button className="btn" onClick={() => onMute(n)} title="Silence this queue until it is unmuted">Mute</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// The bell. Polls only the four counts — the feed is read when the panel is
+// actually opened, because the full pass walks every queue in the warehouse.
+//
+// The button and the panel are deliberately two components: the bell belongs on
+// the chrome, and the panel must NOT be a child of it. Everything under .topbar
+// is styled for a dark brown bar — `.topbar .btn:not(.primary)` paints buttons
+// transparent with near-white text — so a white panel rendered inside the header
+// comes out with invisible buttons. Overlays in this app live at the app root
+// (see how VisionSettings and ScanningOverlay are mounted), and `tick` is what
+// lets the badge re-read itself after the panel marks something read.
+function NotificationBell({ onOpen, tick }) {
+  const [counts, setCounts] = useState(null)
+  const [err, setErr] = useState('')
+
+  const poll = useCallback(() => api.notificationCount().then((c) => { setCounts(c); setErr('') })
+    .catch((e) => setErr(e.status === 404 ? 'restart' : '')), [])
+  useEffect(() => { poll() }, [poll, tick])
+  useEffect(() => {
+    const t = setInterval(() => { if (document.visibilityState === 'visible') poll() }, 60000)
+    document.addEventListener('visibilitychange', poll)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', poll) }
+  }, [poll])
+
+  const unread = counts?.unread || 0
+  return (
+    <button className={'bell' + (unread ? ' has' : '')} onClick={onOpen}
+      title={err === 'restart'
+        ? 'The server is running code from before notifications existed — restart it'
+        : unread ? `${unread} unread notification${unread === 1 ? '' : 's'}` : 'Notifications — nothing unread'}>
+      🔔{unread > 0 && <span className={'bellcount' + (counts.critical ? ' crit' : '')}>{unread}</span>}
+    </button>
+  )
+}
+
+function NotificationPanel({ go, user, toast, onClose, onChanged }) {
+  const [feed, setFeed] = useState(null)
+  const [tab, setTab] = useState('inbox')
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    api.notifications().then(setFeed)
+      .catch((e) => setErr(e.status === 404 ? 'restart' : 'failed'))
+  }, [])
+  const apply = (f) => f.then((r) => { setFeed(r); onChanged() })
+    .catch(() => toast('Could not save that', 'err'))
+
+  return (
+    <div className="piece-wrap" onClick={onClose}>
+      <div className="piece-card notifpanel" onClick={(e) => e.stopPropagation()}>
+        <div className="piece-head">
+          <b>🔔 Notifications</b>
+          <div className="segbar" style={{ marginLeft: 12 }}>
+            <button className={'seg' + (tab === 'inbox' ? ' on' : '')} onClick={() => setTab('inbox')}>Inbox</button>
+            <button className={'seg' + (tab === 'people' ? ' on' : '')} onClick={() => setTab('people')}
+              title="Who is meant to be watching these, and on what number">People</button>
+          </div>
+          <button className="btn" style={{ marginLeft: 'auto' }} onClick={onClose}
+            title="Close">✕</button>
+        </div>
+        <div className="piece-body" style={{ maxHeight: '68vh', overflow: 'auto' }}>
+          {err && <div className="warnbox" style={{ marginBottom: 12 }}>
+            <h4>{err === 'restart' ? 'Notifications need a restart' : 'The queues could not be read'}</h4>
+            <div className="small" style={{ color: 'var(--text-2)' }}>
+              {err === 'restart'
+                ? 'The server is still running the code from before this existed. Stop it in the run window (Ctrl-C) and start run.bat again.'
+                : 'Nothing was returned. Refresh, or check the run window for an error.'}</div></div>}
+
+          {tab === 'inbox' && !err && (!feed ? <div className="empty">Reading the queues…</div> : (
+            <>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+                <span className="small" style={{ color: 'var(--text-2)' }}>
+                  {feed.counts.total
+                    ? <>{feed.counts.total} open · <b>{feed.counts.unread}</b> unread</>
+                    : 'Nothing is waiting — every queue in the warehouse is clear.'}
+                </span>
+                {feed.counts.unread > 0 && <button className="btn" style={{ marginLeft: 'auto' }}
+                  onClick={() => apply(api.notificationsReadAll(user))}>Mark all read</button>}
+              </div>
+              {feed.notices.map((n) => (
+                <NoticeRow key={n.key} n={n}
+                  onOpen={(x) => { onClose(); go(x.module) }}
+                  onRead={(x) => apply(api.notificationsRead([x.key], user))}
+                  onMute={(x) => apply(api.notificationMute(x.key, true, user))} />
+              ))}
+              {!feed.notices.length && <div className="empty" style={{ marginTop: 20 }}>
+                Nothing open. Notices appear here the moment a queue stops being empty.</div>}
+              <MutedList onChanged={(r) => { setFeed(r); onChanged() }} user={user} />
+            </>
+          ))}
+
+          {tab === 'people' && <RecipientList toast={toast} />}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Muted queues, listed where they were muted from. A silence nobody can find is
+// a silence nobody can undo, and this is the screen someone comes back to.
+function MutedList({ onChanged, user }) {
+  const [rows, setRows] = useState([])
+  // Through api rather than a bare fetch: only the calls in that module carry
+  // the signed-in token, and one that goes round it is one the server refuses.
+  const load = useCallback(() => api.notificationsMuted()
+    .then(setRows).catch(() => {}), [])
+  useEffect(() => { load() }, [load])
+  if (!rows.length) return null
+  return (
+    <div style={{ marginTop: 16, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+      <div className="small" style={{ color: 'var(--muted)', marginBottom: 8 }}>Muted queues</div>
+      {rows.map((m) => (
+        <div key={m.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0' }}>
+          <span className="small" style={{ flex: 1 }}>{m.title}
+            {!m.open_now && <span style={{ color: 'var(--muted)' }}> · clear right now</span>}</span>
+          <button className="btn" style={{ padding: '2px 9px' }}
+            onClick={() => api.notificationMute(m.key, false, user).then((r) => { onChanged(r); load() })}>Unmute</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// Who is meant to be watching, and on what number. Delivery is in-app today —
+// said plainly here rather than implied by a number box that looks like it sends.
+function RecipientList({ toast }) {
+  const [rows, setRows] = useState([])
+  const [form, setForm] = useState({ name: '', mobile: '', role: '', levels: ['critical', 'warn', 'info'] })
+  const load = useCallback(() => api.notificationRecipients().then(setRows).catch(() => {}), [])
+  useEffect(() => { load() }, [load])
+  const add = async () => {
+    if (!form.name.trim()) { toast('A name is needed', 'err'); return }
+    try {
+      await api.addRecipient(form)
+      setForm({ name: '', mobile: '', role: '', levels: ['critical', 'warn', 'info'] })
+      load(); toast('✓ Added to the list', 'ok')
+    } catch (e) { toast(e.detail || 'Could not add them', 'err') }
+  }
+  const toggleLevel = (r, lvl) => {
+    const has = (r.levels || []).includes(lvl)
+    const levels = has ? r.levels.filter((l) => l !== lvl) : [...(r.levels || []), lvl]
+    api.updateRecipient(r.id, { levels }).then(load).catch(() => toast('Could not save', 'err'))
+  }
+  const remove = (r) => {
+    if (!window.confirm(`Remove ${r.name} from the notification list?`)) return
+    api.deleteRecipient(r.id).then(load).catch(() => toast('Could not remove them', 'err'))
+  }
+  return (
+    <>
+      <div className="small" style={{ color: 'var(--text-2)', marginBottom: 12, lineHeight: 1.6 }}>
+        Who watches these queues, and on what number. <b>Notices are delivered in the app</b> —
+        the bell here and the Notifications tab in the warehouse phone app. The number is held
+        against the person so a channel that dials out (SMS or WhatsApp) can be switched on later
+        without collecting this list again.
+      </div>
+      {rows.length > 0 && (
+        <div className="tablewrap">
+          <table className="items">
+            <thead><tr><th>Name</th><th>Mobile</th><th>Watches</th>
+              <th style={{ width: 210 }}>Gets</th><th style={{ width: 34 }}></th></tr></thead>
+            <tbody>{rows.map((r) => (
+              <tr key={r.id}>
+                <td><b>{r.name}</b></td>
+                <td className="mono">{r.mobile || '—'}</td>
+                <td className="small">{r.role || '—'}</td>
+                <td>{Object.keys(NOTIF_LEVEL).map((lvl) => (
+                  <button key={lvl} className={'fchip' + ((r.levels || []).includes(lvl) ? ' on' : '')}
+                    style={{ marginRight: 4 }} title={NOTIF_LEVEL[lvl].label}
+                    onClick={() => toggleLevel(r, lvl)}>{NOTIF_LEVEL[lvl].dot}</button>
+                ))}</td>
+                <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => remove(r)}>×</button></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      {!rows.length && <div className="empty" style={{ margin: '10px 0' }}>
+        Nobody on the list yet.</div>}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginTop: 14, flexWrap: 'wrap' }}>
+        <div className="field" style={{ minWidth: 150 }}><label>Name</label>
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="e.g. Sharu" /></div>
+        <div className="field" style={{ minWidth: 160 }}><label>Mobile number</label>
+          <input value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })}
+            inputMode="tel" placeholder="+91 98765 43210" /></div>
+        <div className="field" style={{ minWidth: 150 }}><label>What they watch</label>
+          <input value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}
+            placeholder="e.g. Warehouse in-charge" /></div>
+        <button className="btn primary" onClick={add}>Add</button>
+      </div>
+    </>
+  )
+}
+
+// ==========================================================================
+//  Dead Stock & Clearance
+//  ------------------------------------------------------------------------
+//  Five screens over ONE read of the stock: the dashboard is it totalled, the
+//  register is it listed, the summary is it grouped, the cash impact is it
+//  valued, and the worksheet is the part of it somebody has decided to act on.
+//  Only the worksheet writes anything, and what it writes is a plan — the
+//  quantity sold and the cash realised are read back off the till against the
+//  product, so no clearance line ever becomes a second stock record.
+// ==========================================================================
+
+const DS_TABS = [
+  ['dashboard', '📊 Dashboard', 'What has gone quiet, and what it is worth'],
+  ['register', '📋 Register', 'Every dead line, with its age band and clearance price'],
+  ['worksheet', '🏷 Clearance Worksheet', 'Campaigns, their actions, and what actually sold'],
+  ['summary', '📈 Summary', 'Dead stock by category and by age band'],
+  ['cash', '💰 Cash Impact', 'Capital locked, cash expected, and what it would earn'],
+  ['rules', '⚙ Discount Rules', 'The age ladder and the assumptions behind the projection'],
+]
+
+//: the age bands, coloured by how urgent they are rather than by name
+const DS_TONE = { critical: 'crit', dead: 'dead', approaching: 'warn', healthy: 'ok' }
+const DS_DOT = { critical: '🔥', dead: '🔴', approaching: '🟠', healthy: '🟢' }
+
+//: what the age is being measured from, said in words on the row it applies to
+const DS_BASIS = {
+  sale: 'since the last till sale',
+  dispatch: 'since it was dispatched to a store',
+  received: 'never sold — since it last came in',
+  never: 'nothing to date it from',
+}
+
+const rupees = (v) => (v == null ? '—' : '₹ ' + money(v))
+const pct = (v) => (v == null ? '—' : v + '%')
+
+function DsTiles({ tiles }) {
+  return (
+    <div className="dgrid">
+      {tiles.map((t, i) => (
+        <DashTile key={i} label={t.label} value={t.value} sub={t.sub} tone={t.tone}
+          hint={t.hint} onClick={t.onClick || (() => {})} />
+      ))}
+    </div>
+  )
+}
+
+// The three warnings, in the order they should be acted on. Not one 90-day
+// event: at 60 days a small markdown may still move the line, and at 180 the
+// question has stopped being "what discount" and become "who takes the lot".
+function DsAlerts({ alerts, go, compact }) {
+  if (!alerts?.length) {
+    return compact ? null : (
+      <div className="warnbox clean" style={{ marginBottom: 14 }}>
+        <h4 style={{ border: 'none', margin: 0 }}>Nothing has gone quiet — every stocked line has moved inside the window.</h4>
+      </div>
+    )
+  }
+  return (
+    <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
+      {alerts.map((a) => (
+        <div key={a.level} className="warnbox"
+          style={a.level === 'approaching' ? undefined : { borderColor: 'var(--danger-line)', background: 'var(--danger-bg)' }}>
+          <h4 style={{ border: 'none', margin: 0, color: a.level === 'approaching' ? 'var(--warn)' : 'var(--danger)' }}>
+            {DS_DOT[a.level]} {a.title} — {a.lines} product{a.lines === 1 ? '' : 's'}, {a.note}
+          </h4>
+          <div className="small" style={{ color: 'var(--text-2)', marginTop: 4 }}>
+            {a.qty} pcs · stock value <b>{rupees(a.stock_value)}</b> · expected on clearance <b>{rupees(a.expected_realisation)}</b>
+            {go && <>{'  '}<button className="btn" style={{ padding: '2px 9px', marginLeft: 8 }}
+              onClick={() => go(a.level)}>View these</button></>}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// Where the sales came from. Said on every screen that counts a sale, because a
+// register that quietly counts nothing when the till is off is worse than one
+// that admits it — every line would read as dead.
+function DsSource({ pos }) {
+  if (!pos) return null
+  return (
+    <div className="small" style={{ color: 'var(--muted)', marginTop: 8 }}>
+      {pos.available
+        ? <>Sales read from the shop (POS) — {pos.linked_products} item{pos.linked_products === 1 ? '' : 's'} sold there are warehouse stock
+            {pos.last_sale ? <>, last bill {pos.last_sale}</> : null}. Stock dispatched to a store counts as movement too.</>
+        : <><b>The shop (POS) is not installed here</b>, so no till sales are visible. Ages are measured from
+            dispatches and receipts only — a line sold at the counter would still read as unsold.</>}
+    </div>
+  )
+}
+
+function DeadStock({ toast, go, intent, onIntentUsed }) {
+  const [tab, setTab] = useState('dashboard')
+  const [sum, setSum] = useState(null)
+  const [alerts, setAlerts] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const loadSummary = useCallback(() => {
+    setBusy(true)
+    return Promise.all([api.deadStockSummary(), api.deadStockAlerts()])
+      .then(([s, a]) => { setSum(s); setAlerts(a); setErr('') })
+      .catch((e) => setErr(e.status === 404
+        ? 'The server is still running the code from before Dead Stock & Clearance existed — restart the backend (Ctrl-C in the run window, then run.bat again) and reload this page.'
+        : (e.message || 'Could not read the stock')))
+      .finally(() => setBusy(false))
+  }, [])
+  useEffect(() => { loadSummary() }, [loadSummary])
+
+  // the register opens filtered to whatever band was clicked on the dashboard
+  const [regStatus, setRegStatus] = useState('dead')
+  const openRegister = (status) => { setRegStatus(status || 'dead'); setTab('register') }
+  // A card on the MAIN dashboard says which screen it meant, and filtered how —
+  // "₹1.42L locked" opens the register on the lines holding it, not a landing
+  // page somebody then has to navigate. Consumed once, so coming back to this
+  // module later opens where it was left rather than replaying the last click.
+  useEffect(() => {
+    if (!intent) return
+    if (intent.tab) setTab(intent.tab)
+    if (intent.status) setRegStatus(intent.status)
+    onIntentUsed && onIntentUsed()
+  }, [intent])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const t = sum?.totals
+  const c = sum?.counts
+  const cash = sum?.cash_impact
+
+  return (
+    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+      <div className="pagehead">
+        <h2>Dead Stock &amp; Clearance</h2>
+        <div className="pagesub small">
+          Stock that has stopped moving, what it is worth to clear, and whether the clearance worked
+        </div>
+        <div style={{ flex: 1 }} />
+        <button className="btn" onClick={loadSummary} disabled={busy}
+          title="Re-read the stock, the till and the ledger">{busy ? 'Reading…' : '↻ Refresh'}</button>
+      </div>
+
+      <div style={{ padding: '14px 22px 0' }}>
+        <div className="segbar" role="tablist" aria-label="Dead stock screens">
+          {DS_TABS.map(([key, label, hint]) => (
+            <button key={key} role="tab" aria-selected={tab === key} title={hint}
+              className={'seg' + (tab === key ? ' on' : '')} onClick={() => setTab(key)}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="dash" style={{ padding: 22 }}>
+        {err && <div className="warnbox" style={{ marginBottom: 14 }}>
+          <h4>Dead stock could not be read</h4>
+          <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div>
+        </div>}
+
+        {tab === 'dashboard' && sum && (
+          <>
+            <DsAlerts alerts={alerts?.alerts} go={openRegister} />
+            <Section id="ds-tiles" title="Dead stock at a glance"
+              summary={`${c.dead_total.lines} line(s) past ${c.thresholds.dead} days`}>
+              <DsTiles tiles={[
+                { label: 'Dead stock', value: c.dead_total.qty + ' pcs',
+                  sub: `${c.dead_total.lines} product line(s) with no movement for ${c.thresholds.dead}+ days`,
+                  tone: c.dead_total.lines ? 'warn' : '', onClick: () => openRegister('dead'),
+                  hint: 'Open the register filtered to dead stock' },
+                { label: 'Stock value', value: rupees(t.stock_value),
+                  sub: 'capital sitting on the shelf', tone: c.dead_total.lines ? 'warn' : '',
+                  onClick: () => setTab('cash') },
+                { label: 'Expected cash', value: rupees(t.expected_realisation),
+                  sub: 'if every line clears at its ladder price', onClick: () => setTab('cash') },
+                { label: 'Recovery', value: t.recovery_pct == null ? '—' : t.recovery_pct + '%',
+                  sub: 'expected cash against what it cost', onClick: () => setTab('cash') },
+                { label: 'Approaching', value: c.approaching.qty + ' pcs',
+                  sub: `${c.approaching.lines} line(s) quiet for ${c.thresholds.approaching}+ days — dead in under a month`,
+                  tone: c.approaching.lines ? 'warn' : '', onClick: () => openRegister('approaching'),
+                  hint: 'Open the register filtered to what is about to go dead' },
+                { label: 'Critical', value: c.critical.qty + ' pcs',
+                  sub: `${c.critical.lines} line(s) unsold for ${c.thresholds.critical}+ days`,
+                  tone: c.critical.lines ? 'warn' : '', onClick: () => openRegister('critical') },
+              ]} />
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button className="btn" onClick={() => openRegister('dead')}>View dead stock</button>
+                <button className="btn primary" onClick={() => setTab('register')}>
+                  Create a clearance worksheet</button>
+              </div>
+              <DsSource pos={sum.pos} />
+            </Section>
+
+            {sum.oldest.length > 0 && (
+              <Section id="ds-oldest" title="Quietest lines" summary={`${sum.oldest.length} shown`}>
+                <div className="tablewrap">
+                  <table className="items">
+                    <thead><tr><th>SKU</th><th>Product</th><th className="num">Qty</th>
+                      <th className="num">Days</th><th>Measured from</th><th className="num">Stock value</th>
+                      <th className="num">Discount</th><th className="num">Expected</th></tr></thead>
+                    <tbody>{sum.oldest.map((r) => (
+                      <tr key={r.product_id}>
+                        <td className="mono">{r.sku}</td>
+                        <td>{r.name}{r.size ? <span className="small"> · {r.size}</span> : null}</td>
+                        <td className="num">{r.qty}</td>
+                        <td className="num"><b>{r.days_idle}</b></td>
+                        <td className="small">{DS_BASIS[r.basis]}</td>
+                        <td className="num">{rupees(r.stock_value)}</td>
+                        <td className="num">{pct(r.discount_pct)}</td>
+                        <td className="num">{rupees(r.expected_realisation)}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </Section>
+            )}
+          </>
+        )}
+
+        {tab === 'register' && <DsRegister toast={toast} status={regStatus} setStatus={setRegStatus}
+          onChanged={loadSummary} />}
+        {tab === 'worksheet' && <DsWorksheets toast={toast} />}
+        {tab === 'summary' && sum && <DsSummary sum={sum} />}
+        {tab === 'cash' && sum && <DsCash sum={sum} toast={toast} onSaved={loadSummary} />}
+        {tab === 'rules' && <DsRules toast={toast} onSaved={loadSummary} />}
+      </div>
+    </div>
+  )
+}
+
+// ---------- the register: every dead line, and what to do with it ----------
+function DsRegister({ toast, status, setStatus, onChanged }) {
+  const [data, setData] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [q, setQ] = useState('')
+  const [f, setF] = useState({ bucket: '', category: '', supplier: '', size: '', min_value: '', min_qty: '' })
+  const [open, setOpen] = useState(false)          // filter panel
+  const [sel, setSel] = useState(() => new Set())
+  const [actions, setActions] = useState({})       // product_id → chosen action
+  const [adding, setAdding] = useState(false)      // the "add to clearance" dialog
+
+  const load = useCallback(() => {
+    setBusy(true)
+    return api.deadStock({ q, status, ...f })
+      .then(setData).catch((e) => toast(e.message || 'Could not read the register', 'err'))
+      .finally(() => setBusy(false))
+  }, [q, status, f, toast])
+  useEffect(() => { load() }, [load])
+
+  const rows = data?.rows || []
+  const page = usePaged(rows, 50)
+  const chosen = rows.filter((r) => sel.has(r.product_id))
+  const toggle = (id) => setSel((s) => {
+    const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n
+  })
+  const allShown = page.slice.every((r) => sel.has(r.product_id))
+  const toggleAll = () => setSel((s) => {
+    const n = new Set(s)
+    page.slice.forEach((r) => (allShown ? n.delete(r.product_id) : n.add(r.product_id)))
+    return n
+  })
+  const selTotals = {
+    qty: chosen.reduce((a, r) => a + r.qty, 0),
+    cost: chosen.reduce((a, r) => a + r.stock_value, 0),
+    expected: chosen.reduce((a, r) => a + r.expected_realisation, 0),
+  }
+  const active = Object.values(f).filter(Boolean).length + (q ? 1 : 0)
+
+  return (
+    <>
+      <Section id="ds-register" title="Dead Stock Register"
+        summary={data ? `${rows.length} line(s)` : 'reading…'}
+        actions={<>
+          <SearchBox value={q} onChange={setQ} placeholder="SKU, product, category, supplier…" />
+          <FilterButton open={open} onToggle={() => setOpen((o) => !o)} active={active} />
+        </>}>
+        <div className="toolbar" style={{ marginBottom: 10 }}>
+          <FilterChips value={status} onChange={setStatus} options={[
+            ['dead', 'Dead', null, `No movement for ${data?.rules?.dead_after_days ?? 90}+ days — includes critical`],
+            ['critical', 'Critical', null, `Unsold for ${data?.rules?.critical_days ?? 180}+ days`],
+            ['approaching', 'Approaching', null, `Quiet for ${data?.rules?.approaching_days ?? 60}+ days, not dead yet`],
+            ['healthy', 'Healthy', null, 'Still moving'],
+            ['all', 'All stock', null, 'Every stocked line, whatever its age'],
+          ]} />
+        </div>
+        <FilterPanel open={open} active={active} onClear={() => {
+          setQ(''); setF({ bucket: '', category: '', supplier: '', size: '', min_value: '', min_qty: '' })
+        }} onApply={load} hint="Narrow the register, then select the lines to clear.">
+          <div><label>Age band</label>
+            <select value={f.bucket} onChange={(e) => setF({ ...f, bucket: e.target.value })}>
+              <option value="">Any</option>
+              {(data?.options?.buckets || []).map((b) => <option key={b} value={b}>{b}</option>)}
+            </select></div>
+          <div><label>Category</label>
+            <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>
+              <option value="">Any</option>
+              {(data?.options?.categories || []).map((x) => <option key={x} value={x}>{x}</option>)}
+            </select></div>
+          <div><label>Supplier</label>
+            <select value={f.supplier} onChange={(e) => setF({ ...f, supplier: e.target.value })}>
+              <option value="">Any</option>
+              {(data?.options?.suppliers || []).map((x) => <option key={x} value={x}>{x}</option>)}
+            </select></div>
+          <div><label>Size</label>
+            <select value={f.size} onChange={(e) => setF({ ...f, size: e.target.value })}>
+              <option value="">Any</option>
+              {(data?.options?.sizes || []).map((x) => <option key={x} value={x}>{x}</option>)}
+            </select></div>
+          <div><label>Stock value at least</label>
+            <input value={f.min_value} inputMode="decimal"
+              onChange={(e) => setF({ ...f, min_value: e.target.value })} placeholder="₹" /></div>
+          <div><label>Quantity at least</label>
+            <input value={f.min_qty} inputMode="decimal"
+              onChange={(e) => setF({ ...f, min_qty: e.target.value })} placeholder="pcs" /></div>
+        </FilterPanel>
+
+        {busy && !data && <div className="empty" style={{ marginTop: 30 }}>Reading the stock…</div>}
+        {data && rows.length === 0 && (
+          <div className="empty" style={{ marginTop: 30 }}>
+            {status === 'dead'
+              ? `Nothing has been still for ${data.rules.dead_after_days}+ days. Try “All stock” to see what is moving.`
+              : 'Nothing matches these filters.'}
+          </div>
+        )}
+        {rows.length > 0 && (
+          <>
+            <div className="tablewrap">
+              <table className="items" style={{ minWidth: 1420 }}>
+                <thead><tr>
+                  <th style={{ width: 30 }}>
+                    <input type="checkbox" checked={allShown} onChange={toggleAll}
+                      title="Select every line on this page" /></th>
+                  <th style={{ width: 96 }}>SKU</th>
+                  <th style={{ minWidth: 190 }}>Product</th>
+                  <th style={{ width: 58 }}>Size</th>
+                  <th className="num" style={{ width: 56 }}>Qty</th>
+                  <th className="num" style={{ width: 76 }}>Cost</th>
+                  <th className="num" style={{ width: 76 }}>MRP</th>
+                  <th style={{ width: 96 }}>Last sold</th>
+                  <th className="num" style={{ width: 62 }}>Days</th>
+                  <th style={{ width: 108 }}>Age band</th>
+                  <th className="num" style={{ width: 66 }}>Disc</th>
+                  <th className="num" style={{ width: 88 }}>Clearance</th>
+                  <th className="num" style={{ width: 96 }}>Expected</th>
+                  <th style={{ width: 132 }}>Action</th>
+                </tr></thead>
+                <tbody>{page.slice.map((r) => (
+                  <tr key={r.product_id} style={sel.has(r.product_id) ? { background: 'var(--brand-50)' } : undefined}>
+                    <td><input type="checkbox" checked={sel.has(r.product_id)}
+                      onChange={() => toggle(r.product_id)} /></td>
+                    <td className="mono">{r.sku}</td>
+                    <td>{r.name}
+                      {r.category && <div className="cellsub">{r.category}</div>}</td>
+                    <td>{r.size || '—'}</td>
+                    <td className="num">{r.qty}</td>
+                    <td className="num">{rupees(r.cost_price)}</td>
+                    <td className="num">{r.mrp == null
+                      ? <span title={`No MRP on this product — the clearance price is worked out off ${r.price_source === 'cost' ? 'cost, which is a loss, not a markdown' : 'the sale price'}`}
+                          style={{ color: 'var(--warn)' }}>none</span>
+                      : rupees(r.mrp)}</td>
+                    <td className="small" title={DS_BASIS[r.basis]}>
+                      {r.moved_on || '—'}
+                      <div className="cellsub">{r.basis === 'sale' ? 'till sale'
+                        : r.basis === 'dispatch' ? 'dispatched' : 'never sold'}</div></td>
+                    <td className="num"><b>{r.days_idle}</b></td>
+                    <td>{DS_DOT[r.status]} <span className="small">{r.bucket}</span></td>
+                    <td className="num">{pct(r.discount_pct)}</td>
+                    <td className="num">{rupees(r.clearance_price)}</td>
+                    <td className="num">{rupees(r.expected_realisation)}</td>
+                    <td>
+                      <select value={actions[r.product_id] || 'Review'}
+                        onChange={(e) => setActions({ ...actions, [r.product_id]: e.target.value })}
+                        title="What to do with this line — carried onto the worksheet">
+                        {DS_ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+                      </select>
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <Pager {...page} noun="line" />
+            <div className="items-foot">
+              <span>{rows.length} line(s) · Σ {data.totals.qty} pcs</span>
+              <span>Σ stock value <b>{rupees(data.totals.stock_value)}</b></span>
+              <span>Σ expected <b>{rupees(data.totals.expected_realisation)}</b></span>
+              <button className="btn primary" style={{ marginLeft: 'auto' }}
+                disabled={!chosen.length} onClick={() => setAdding(true)}
+                title={chosen.length ? 'Put these lines on a clearance worksheet' : 'Select some lines first'}>
+                Add {chosen.length || ''} to clearance</button>
+            </div>
+            {chosen.length > 0 && (
+              <div className="small" style={{ color: 'var(--text-2)', marginTop: 6 }}>
+                Selected: {chosen.length} line(s) · {Math.round(selTotals.qty * 1000) / 1000} pcs ·
+                cost <b>{rupees(selTotals.cost)}</b> · expected <b>{rupees(selTotals.expected)}</b>
+              </div>
+            )}
+          </>
+        )}
+        <DsSource pos={data?.pos} />
+      </Section>
+
+      {adding && (
+        <DsAddToClearance rows={chosen} actions={actions} toast={toast}
+          onClose={() => setAdding(false)}
+          onDone={() => { setAdding(false); setSel(new Set()); load(); onChanged && onChanged() }} />
+      )}
+    </>
+  )
+}
+
+const DS_ACTIONS = ['Clear Now', 'Markdown', 'Bundle', 'Promotional Sale',
+  'Transfer to Store', 'Return to Supplier', 'Hold', 'Review']
+
+// Putting selected lines on a worksheet — onto a draft that is already open, or
+// onto a new one. Two ways in, because a clearance is built over a morning, not
+// in one pass of the register.
+function DsAddToClearance({ rows, actions, onClose, onDone, toast }) {
+  const [drafts, setDrafts] = useState([])
+  const [target, setTarget] = useState('new')
+  const [name, setName] = useState(() => {
+    const d = new Date()
+    return `${d.toLocaleString('en-IN', { month: 'long' })} ${d.getFullYear()} Clearance`
+  })
+  const iso = (d) => d.toISOString().slice(0, 10)
+  const [from, setFrom] = useState(() => iso(new Date()))
+  const [to, setTo] = useState(() => iso(new Date(Date.now() + 30 * 864e5)))
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { api.clearanceList('draft').then(setDrafts).catch(() => {}) }, [])
+
+  const ids = rows.map((r) => r.product_id)
+  const picked = {}
+  ids.forEach((id) => { picked[String(id)] = actions[id] || 'Review' })
+  const totals = {
+    qty: rows.reduce((a, r) => a + r.qty, 0),
+    cost: rows.reduce((a, r) => a + r.stock_value, 0),
+    expected: rows.reduce((a, r) => a + r.expected_realisation, 0),
+  }
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const r = target === 'new'
+        ? await api.clearanceCreate({ name, starts_on: from, ends_on: to, product_ids: ids, actions: picked })
+        : await api.clearanceAddLines(+target, ids, picked)
+      toast(`✓ ${r.added} line(s) on “${r.name}”${r.skipped ? ` · ${r.skipped} already there or out of stock` : ''}`, 'ok')
+      onDone()
+    } catch (e) { toast(e.detail || 'Could not add the lines', 'err'); setBusy(false) }
+  }
+
+  return (
+    <div className="piece-wrap" onClick={onClose}>
+      <div className="piece-card" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        <div className="piece-head"><b>Add to a clearance worksheet</b>
+          <button className="btn" style={{ marginLeft: 'auto' }} onClick={onClose}>✕</button></div>
+        <div className="piece-body">
+          <div className="small" style={{ color: 'var(--text-2)', marginBottom: 12 }}>
+            {rows.length} line(s) · {Math.round(totals.qty * 1000) / 1000} pcs ·
+            stock cost <b>{rupees(totals.cost)}</b> · expected <b>{rupees(totals.expected)}</b>.
+            The age, band, discount and price are copied onto the worksheet as they are today — that is
+            what the campaign is approved at, and it does not drift as the stock goes on ageing.
+          </div>
+          <div className="field"><label>Worksheet</label>
+            <select value={target} onChange={(e) => setTarget(e.target.value)}>
+              <option value="new">➕ A new worksheet</option>
+              {drafts.map((d) => <option key={d.id} value={d.id}>{d.name} · {d.line_count} line(s)</option>)}
+            </select></div>
+          {target === 'new' && <>
+            <div className="field"><label>Campaign name</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} /></div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <DateField label="Runs from" value={from} onChange={setFrom} />
+              <DateField label="Runs to" value={to} onChange={setTo} />
+            </div>
+            <div className="small" style={{ color: 'var(--muted)', marginTop: 4 }}>
+              Sales at the till between these dates are what this campaign realised.
+            </div>
+          </>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+            <button className="btn" onClick={onClose}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={busy || !ids.length}>
+              {busy ? 'Adding…' : `Add ${ids.length} line(s)`}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------- the worksheets, and how each one is actually doing ----------
+function DsWorksheets({ toast }) {
+  const [list, setList] = useState([])
+  const [open, setOpen] = useState(null)          // the campaign being read
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => {
+    setBusy(true)
+    return api.clearanceList('all').then(setList).catch(() => {}).finally(() => setBusy(false))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const openOne = async (id) => {
+    try { setOpen(await api.clearanceGet(id)) }
+    catch { toast('Could not open that worksheet', 'err') }
+  }
+  const patch = async (body) => {
+    try { const c = await api.clearanceUpdate(open.id, body); setOpen(c); load() }
+    catch (e) { toast(e.detail || 'Could not save', 'err') }
+  }
+  const patchLine = async (lineId, body) => {
+    try { setOpen(await api.clearanceUpdateLine(open.id, lineId, body)) }
+    catch (e) { toast(e.detail || 'Could not save the line', 'err') }
+  }
+  const dropLine = async (lineId) => {
+    try { setOpen(await api.clearanceDeleteLine(open.id, lineId)) }
+    catch (e) { toast(e.detail || 'Could not remove the line', 'err') }
+  }
+  const remove = async (c) => {
+    if (!window.confirm(`Delete “${c.name}”?\n\nThe worksheet and its ${c.line_count} line(s) go. No stock is affected — a clearance worksheet holds none.`)) return
+    try { await api.clearanceDelete(c.id); toast('Worksheet deleted', 'ok'); setOpen(null); load() }
+    catch (e) { toast(e.detail || 'Could not delete it', 'err') }
+  }
+
+  if (open) {
+    const t = open.totals
+    return (
+      <Section id="ds-sheet" title={open.name}
+        summary={`${open.status} · ${open.line_count} line(s)`}
+        actions={<button className="btn" onClick={() => { setOpen(null); load() }}>‹ All worksheets</button>}>
+        <div className="dgrid" style={{ marginBottom: 14 }}>
+          <DashTile label="Products" value={t.qty + ' pcs'} sub={`${open.line_count} line(s) in the campaign`} />
+          <DashTile label="Stock cost" value={rupees(t.stock_cost)} sub="what these pieces cost us" />
+          <DashTile label="Expected" value={rupees(t.expected_realisation)} sub="at the approved clearance prices" />
+          <DashTile label="Actually sold" value={t.sold_qty + ' pcs'}
+            sub={t.sell_through_pct == null ? 'nothing yet' : `${t.sell_through_pct}% sell-through`}
+            tone={t.sold_qty ? '' : 'warn'} />
+          <DashTile label="Actually realised" value={rupees(t.actual_realisation)}
+            sub={t.realisation_pct == null ? 'read from the till' : `${t.realisation_pct}% of expected`} />
+          <DashTile label="Remaining" value={t.remaining_qty + ' pcs'} sub="still on the shelf" />
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 14 }}>
+          <div className="field" style={{ minWidth: 220 }}><label>Campaign name</label>
+            <input defaultValue={open.name} onBlur={(e) => e.target.value !== open.name && patch({ name: e.target.value })} /></div>
+          <DateField label="Runs from" value={open.starts_on} onChange={(v) => patch({ starts_on: v })} />
+          <DateField label="Runs to" value={open.ends_on} onChange={(v) => patch({ ends_on: v })} />
+          <div className="field"><label>Status</label>
+            <select value={open.status} onChange={(e) => patch({ status: e.target.value })}
+              title="Draft is being built · Active is running · Closed stops counting new sales">
+              <option value="draft">Draft</option><option value="active">Active</option>
+              <option value="closed">Closed</option>
+            </select></div>
+          <button className="btn" onClick={() => remove(open)} title="Delete this worksheet">🗑 Delete</button>
+        </div>
+        <div className="small" style={{ color: 'var(--muted)', marginBottom: 10 }}>
+          Sold and realised are the till's own figures for these products between the campaign dates —
+          nothing is keyed in here, and nothing here holds stock.
+        </div>
+        <div className="tablewrap">
+          <table className="items" style={{ minWidth: 1180 }}>
+            <thead><tr>
+              <th style={{ width: 96 }}>SKU</th><th style={{ minWidth: 180 }}>Product</th>
+              <th className="num" style={{ width: 56 }}>Days</th><th style={{ width: 104 }}>Band</th>
+              <th className="num" style={{ width: 66 }}>Disc %</th>
+              <th className="num" style={{ width: 84 }}>Price</th>
+              <th className="num" style={{ width: 60 }}>Qty</th>
+              <th className="num" style={{ width: 92 }}>Expected</th>
+              <th className="num" style={{ width: 56 }}>Sold</th>
+              <th className="num" style={{ width: 72 }}>Left</th>
+              <th className="num" style={{ width: 96 }}>Realised</th>
+              <th style={{ width: 132 }}>Action</th><th style={{ width: 34 }}></th>
+            </tr></thead>
+            <tbody>{(open.lines || []).map((l) => (
+              <tr key={l.id}>
+                <td className="mono">{l.sku}</td>
+                <td>{l.name}{l.size ? <span className="small"> · {l.size}</span> : null}</td>
+                <td className="num">{l.days_idle}</td>
+                <td className="small">{l.bucket}</td>
+                <td className="num">
+                  <input defaultValue={l.discount_pct} inputMode="decimal" style={{ width: 52 }}
+                    title="Override the ladder for this line — the price and the expected figure follow it"
+                    onBlur={(e) => Number(e.target.value) !== l.discount_pct
+                      && patchLine(l.id, { discount_pct: Number(e.target.value) })} /></td>
+                <td className="num">{rupees(l.clearance_price)}</td>
+                <td className="num">{l.qty}</td>
+                <td className="num">{rupees(l.expected_realisation)}</td>
+                <td className="num"><b>{l.sold_qty}</b></td>
+                <td className="num">{l.remaining_qty}</td>
+                <td className="num">{rupees(l.actual_realisation)}</td>
+                <td><select value={l.action || 'Review'} onChange={(e) => patchLine(l.id, { action: e.target.value })}>
+                  {DS_ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}</select></td>
+                <td><button className="btn" style={{ padding: '2px 7px' }} title="Remove this line"
+                  onClick={() => dropLine(l.id)}>×</button></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        {!open.lines?.length && <div className="empty" style={{ marginTop: 24 }}>
+          No lines yet — open the Register, select what to clear and add it here.</div>}
+      </Section>
+    )
+  }
+
+  return (
+    <Section id="ds-sheets" title="Clearance worksheets" summary={`${list.length} campaign(s)`}>
+      {busy && !list.length && <div className="empty" style={{ marginTop: 30 }}>Reading…</div>}
+      {!busy && !list.length && (
+        <div className="empty" style={{ marginTop: 30 }}>
+          No clearance worksheets yet. Open the <b>Register</b>, select the lines to clear and add them to one.
+        </div>
+      )}
+      {list.length > 0 && (
+        <div className="tablewrap">
+          <table className="items">
+            <thead><tr><th>Campaign</th><th>Status</th><th>Period</th>
+              <th className="num">Lines</th><th className="num">Pcs</th><th className="num">Stock cost</th>
+              <th className="num">Expected</th><th className="num">Sold</th>
+              <th className="num">Realised</th><th className="num">Sell-through</th><th></th></tr></thead>
+            <tbody>{list.map((c) => (
+              <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => openOne(c.id)}>
+                <td><b>{c.name}</b>{c.note && <div className="cellsub">{c.note}</div>}</td>
+                <td><span className={'badge ' + (c.status === 'closed' ? 'posted' : c.status === 'active' ? 'confirmed' : 'draft')}>{c.status}</span></td>
+                <td className="small">{c.starts_on} → {c.ends_on}</td>
+                <td className="num">{c.line_count}</td>
+                <td className="num">{c.totals.qty}</td>
+                <td className="num">{rupees(c.totals.stock_cost)}</td>
+                <td className="num">{rupees(c.totals.expected_realisation)}</td>
+                <td className="num">{c.totals.sold_qty}</td>
+                <td className="num">{rupees(c.totals.actual_realisation)}</td>
+                <td className="num">{c.totals.sell_through_pct == null ? '—' : c.totals.sell_through_pct + '%'}</td>
+                <td><button className="btn" style={{ padding: '2px 7px' }}
+                  onClick={(e) => { e.stopPropagation(); remove(c) }}>×</button></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+// ---------- the summary: the same dead stock, grouped ----------
+function DsSummary({ sum }) {
+  const t = sum.totals
+  const maxCat = Math.max(1, ...sum.by_category.map((g) => g.stock_value))
+  return (
+    <>
+      <Section id="ds-sum-tiles" title="Dead stock summary" summary={`${t.lines} line(s)`}>
+        <DsTiles tiles={[
+          { label: 'Dead stock', value: t.qty + ' pcs', sub: `${t.lines} product line(s)` },
+          { label: 'Stock value', value: rupees(t.stock_value), sub: 'at weighted-average cost' },
+          { label: 'Expected cash', value: rupees(t.expected_realisation), sub: 'at ladder prices' },
+          { label: 'Recovery', value: t.recovery_pct == null ? '—' : t.recovery_pct + '%',
+            sub: 'expected cash ÷ stock cost' },
+        ]} />
+      </Section>
+
+      <Section id="ds-by-cat" title="By category" summary={`${sum.by_category.length} categor(y/ies)`}>
+        {!sum.by_category.length && <div className="empty">Nothing dead to group.</div>}
+        {sum.by_category.length > 0 && (
+          <div className="tablewrap">
+            <table className="items">
+              <thead><tr><th>Category</th><th className="num">Lines</th><th className="num">Qty</th>
+                <th className="num">Cost value</th><th className="num">Expected realisation</th>
+                <th className="num">Recovery</th><th style={{ width: 180 }}>Share of locked capital</th></tr></thead>
+              <tbody>{sum.by_category.map((g) => (
+                <tr key={g.category}>
+                  <td>{g.category}</td>
+                  <td className="num">{g.lines}</td>
+                  <td className="num">{g.qty}</td>
+                  <td className="num">{rupees(g.stock_value)}</td>
+                  <td className="num">{rupees(g.expected_realisation)}</td>
+                  <td className="num">{g.recovery_pct == null ? '—' : g.recovery_pct + '%'}</td>
+                  <td><div style={{ background: 'var(--panel-3)', borderRadius: 3, height: 10 }}>
+                    <div style={{ width: `${Math.round(g.stock_value / maxCat * 100)}%`, height: '100%',
+                      background: 'var(--brand)', borderRadius: 3 }} /></div></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+
+      <Section id="ds-by-band" title="By age band" summary="the ladder, as it actually falls">
+        {!sum.by_bucket.length && <div className="empty">Nothing dead to band.</div>}
+        {sum.by_bucket.length > 0 && (
+          <div className="tablewrap">
+            <table className="items">
+              <thead><tr><th>Age band</th><th className="num">Discount</th><th className="num">Lines</th>
+                <th className="num">Qty</th><th className="num">Cost value</th>
+                <th className="num">Expected realisation</th></tr></thead>
+              <tbody>{sum.by_bucket.map((b) => (
+                <tr key={b.bucket}>
+                  <td>{b.bucket}</td>
+                  <td className="num">{pct(b.discount_pct)}</td>
+                  <td className="num">{b.lines}</td>
+                  <td className="num">{b.qty}</td>
+                  <td className="num">{rupees(b.stock_value)}</td>
+                  <td className="num">{rupees(b.expected_realisation)}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+    </>
+  )
+}
+
+// ---------- what clearing it is worth, and on what assumptions ----------
+function DsCash({ sum, toast, onSaved }) {
+  const c = sum.cash_impact
+  const [turns, setTurns] = useState(String(c.stock_turns ?? ''))
+  const [margin, setMargin] = useState(String(c.gross_margin_pct ?? ''))
+  const [busy, setBusy] = useState(false)
+  const save = async () => {
+    setBusy(true)
+    try {
+      await api.saveDeadStockRules({ stock_turns: Number(turns), gross_margin_pct: Number(margin) })
+      toast('✓ Assumptions saved', 'ok'); onSaved()
+    } catch (e) { toast(e.detail || 'Could not save', 'err') }
+    setBusy(false)
+  }
+  return (
+    <>
+      <Section id="ds-cash" title="Cash impact" summary="what the shelf is holding, and what it would return">
+        <DsTiles tiles={[
+          { label: 'Capital locked', value: rupees(c.capital_locked),
+            sub: 'cost of stock that has stopped moving', tone: c.capital_locked ? 'warn' : '' },
+          { label: 'Expected cash', value: rupees(c.expected_cash),
+            sub: 'if every dead line clears at its ladder price' },
+          { label: 'Expected recovery', value: c.recovery_pct == null ? '—' : c.recovery_pct + '%',
+            sub: 'cash out against cost in' },
+          { label: 'Annual revenue potential', value: rupees(c.annual_revenue_potential),
+            sub: `that cash turned over ${c.stock_turns}× a year` },
+          { label: 'Annual gross profit', value: rupees(c.annual_gross_profit),
+            sub: `at ${c.gross_margin_pct}% gross margin` },
+        ]} />
+        <div className="small" style={{ color: 'var(--text-2)', marginTop: 12, maxWidth: 760, lineHeight: 1.6 }}>
+          The first three figures are facts about stock that exists. The last two are a
+          <b> projection</b>: freed capital, assumed to turn over {c.stock_turns} times a year at
+          {' '}{c.gross_margin_pct}% margin. They are here because “₹{money(c.capital_locked)} is asleep on a shelf”
+          is not an argument anyone acts on, and “that capital would earn ₹{money(c.annual_gross_profit)} a year
+          if it were working” is.
+        </div>
+      </Section>
+      <Section id="ds-assume" title="Assumptions" summary="used by the two projected figures above">
+        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div className="field"><label>Stock turns per year</label>
+            <input value={turns} inputMode="decimal" onChange={(e) => setTurns(e.target.value)} style={{ width: 120 }} /></div>
+          <div className="field"><label>Gross margin %</label>
+            <input value={margin} inputMode="decimal" onChange={(e) => setMargin(e.target.value)} style={{ width: 120 }} /></div>
+          <button className="btn primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save assumptions'}</button>
+        </div>
+      </Section>
+    </>
+  )
+}
+
+// ---------- the ladder, as a policy someone owns ----------
+function DsRules({ toast, onSaved }) {
+  const [rules, setRules] = useState(null)
+  const [defaults, setDefaults] = useState(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    api.deadStockRules().then((r) => { setRules(r.rules); setDefaults(r.defaults) }).catch(() => {})
+  }, [])
+  if (!rules) return <div className="empty" style={{ marginTop: 30 }}>Reading the rules…</div>
+
+  const setBucket = (i, k, v) => {
+    const b = rules.buckets.map((x, j) => (j === i ? { ...x, [k]: v } : x))
+    setRules({ ...rules, buckets: b })
+  }
+  const addBucket = () => setRules({
+    ...rules,
+    buckets: [...rules.buckets, { from: 0, to: null, label: '', discount: 0 }],
+  })
+  const dropBucket = (i) => setRules({ ...rules, buckets: rules.buckets.filter((_, j) => j !== i) })
+  const save = async () => {
+    setBusy(true)
+    try {
+      const r = await api.saveDeadStockRules({
+        buckets: rules.buckets.map((b) => ({
+          from: Number(b.from) || 0,
+          to: b.to === '' || b.to == null ? null : Number(b.to),
+          label: b.label, discount: Number(b.discount) || 0,
+        })),
+        approaching_days: Number(rules.approaching_days),
+        dead_after_days: Number(rules.dead_after_days),
+        critical_days: Number(rules.critical_days),
+      })
+      setRules(r.rules)
+      toast('✓ Rules saved — every screen uses them from now on', 'ok')
+      onSaved()
+    } catch (e) { toast(e.detail || 'Could not save the rules', 'err') }
+    setBusy(false)
+  }
+
+  return (
+    <>
+      <Section id="ds-ladder" title="Discount ladder"
+        summary={`${rules.buckets.length} band(s)`}
+        actions={<button className="btn" onClick={() => setRules({ ...rules, ...defaults })}
+          title="Put back the ladder this install shipped with">Reset to default</button>}>
+        <div className="small" style={{ color: 'var(--text-2)', marginBottom: 12, maxWidth: 720 }}>
+          The discount a line is offered at, by how long it has been still. Bands are read in order and
+          the last one is open-ended. Changing a percentage here changes what the register suggests —
+          it never re-prices a worksheet that has already been approved.
+        </div>
+        <div className="tablewrap">
+          <table className="items" style={{ maxWidth: 720 }}>
+            <thead><tr><th style={{ width: 90 }}>From (days)</th><th style={{ width: 90 }}>To (days)</th>
+              <th>Label</th><th className="num" style={{ width: 100 }}>Discount %</th>
+              <th style={{ width: 34 }}></th></tr></thead>
+            <tbody>{rules.buckets.map((b, i) => (
+              <tr key={i}>
+                <td><input value={b.from} inputMode="numeric" onChange={(e) => setBucket(i, 'from', e.target.value)} /></td>
+                <td><input value={b.to == null ? '' : b.to} inputMode="numeric" placeholder="∞"
+                  onChange={(e) => setBucket(i, 'to', e.target.value)} /></td>
+                <td><input value={b.label} onChange={(e) => setBucket(i, 'label', e.target.value)} /></td>
+                <td className="num"><input value={b.discount} inputMode="decimal" style={{ width: 70 }}
+                  onChange={(e) => setBucket(i, 'discount', e.target.value)} /></td>
+                <td><button className="btn" style={{ padding: '2px 7px' }} onClick={() => dropBucket(i)}>×</button></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        <button className="btn" style={{ marginTop: 10 }} onClick={addBucket}>➕ Add a band</button>
+      </Section>
+
+      <Section id="ds-thresholds" title="When a line is called dead"
+        summary="the three lines the alerts are drawn at">
+        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div className="field"><label>🟠 Approaching after (days)</label>
+            <input value={rules.approaching_days} inputMode="numeric" style={{ width: 120 }}
+              onChange={(e) => setRules({ ...rules, approaching_days: e.target.value })} /></div>
+          <div className="field"><label>🔴 Dead after (days)</label>
+            <input value={rules.dead_after_days} inputMode="numeric" style={{ width: 120 }}
+              onChange={(e) => setRules({ ...rules, dead_after_days: e.target.value })} /></div>
+          <div className="field"><label>🔥 Critical after (days)</label>
+            <input value={rules.critical_days} inputMode="numeric" style={{ width: 120 }}
+              onChange={(e) => setRules({ ...rules, critical_days: e.target.value })} /></div>
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <button className="btn primary" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : 'Save rules'}</button>
+        </div>
+      </Section>
+    </>
   )
 }
 
@@ -4040,18 +7919,255 @@ function Masters({ toast }) {
 const DASHBOARD = { key: 'dashboard', icon: '🏠', label: 'Dashboard',
   blurb: 'What is waiting on someone, across every module' }
 
+// ==========================================================================
+//  Users & Access — the super admin's screen
+//  ------------------------------------------------------------------------
+//  Everything on it is refused by the server for anyone else, so this is the
+//  presentation of a rule rather than the rule itself. What it adds is the part
+//  a 403 cannot: it says what each role means beside the control that sets it,
+//  because "admin" and "user" are only obvious to whoever chose the words.
+//
+//  Deliberately not a modal. Adding people, resetting a forgotten password and
+//  checking who has never signed in are the same sitting, and a dialog that has
+//  to be closed to see the list turns that into three.
+// ==========================================================================
+
+const ROLE_HELP = {
+  user: 'The floor — LR, invoice entry, GRN, inventory, label printing, dispatch and receipt. On the phone app too.',
+  admin: 'All of the floor, plus the setup behind it — masters, suppliers, label design — and reports, payments, returns and dead stock.',
+  superadmin: 'Everything, plus this screen and the server settings (the vision key and model).',
+}
+
+function Users({ toast, me }) {
+  const [rows, setRows] = useState([])
+  const [roles, setRoles] = useState([])
+  const [busy, setBusy] = useState(true)
+  const [err, setErr] = useState('')
+  const blank = { username: '', password: '', role: 'user', full_name: '' }
+  const [form, setForm] = useState(blank)
+
+  const load = useCallback(() => {
+    setBusy(true)
+    return api.listUsers()
+      .then((r) => { setRows(r.users || []); setRoles(r.roles || []); setErr('') })
+      .catch((e) => setErr(e.detail || 'Could not load the user list'))
+      .finally(() => setBusy(false))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const add = async (e) => {
+    e.preventDefault()
+    if (!form.username.trim() || !form.password) { toast('Username and password are both needed', 'err'); return }
+    try {
+      await api.createUser({ ...form, username: form.username.trim() })
+      setForm(blank); load(); toast(`✓ ${form.username.trim()} can now sign in`, 'ok')
+    } catch (e2) { toast(e2.detail || 'Could not create that account', 'err') }
+  }
+
+  const patch = async (u, body, note) => {
+    try { await api.updateUser(u.id, body); await load(); if (note) toast(note, 'ok') }
+    catch (e) { toast(e.detail || 'Could not save that change', 'err') }
+  }
+
+  const reset = async (u) => {
+    // window.prompt rather than a field on the row: a reset is rare, and a
+    // password box sitting open on every row is a shoulder-surfing invitation
+    // for the ninety-nine percent of the time nobody is resetting anything.
+    const pw = window.prompt(`New password for ${u.username}.\n\nThey are signed out of every device as soon as this is set.`)
+    if (!pw) return
+    try { await api.resetUserPassword(u.id, pw); toast(`✓ Password reset for ${u.username}`, 'ok') }
+    catch (e) { toast(e.detail || 'Could not reset it', 'err') }
+  }
+
+  const remove = async (u) => {
+    if (!window.confirm(`Delete ${u.username}?\n\nDeactivating instead keeps the record of what they did and can be undone. Deleting cannot.`)) return
+    try { await api.deleteUser(u.id); await load(); toast(`✓ ${u.username} deleted`, 'ok') }
+    catch (e) { toast(e.detail || 'Could not delete that account', 'err') }
+  }
+
+  const isMe = (u) => u.username === me
+  const when = (iso) => (iso ? new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '—')
+
+  return (
+    <div className="body" style={{ display: 'block', overflow: 'auto', padding: 18 }}>
+      <div style={{ maxWidth: 1080, background: 'var(--panel)', border: '1px solid var(--line)',
+        borderRadius: 12, padding: 20 }}>
+        <h2 style={{ margin: '0 0 10px', fontSize: 18 }}>👤 Users &amp; Access</h2>
+
+        <div className="small" style={{ color: 'var(--text-2)', marginBottom: 14, lineHeight: 1.7 }}>
+          Everyone signs in with their own account, on the desktop app and on the phone —
+          the same account works on both. Three levels:
+          <div style={{ marginTop: 8 }}>{Object.keys(ROLE_HELP).map((r) => (
+            <div key={r} style={{ display: 'flex', gap: 10, marginTop: 5 }}>
+              <span className={'badge role-' + r} style={{ flex: '0 0 92px' }}>{ROLE_LABEL[r]}</span>
+              <span style={{ flex: 1 }}>{ROLE_HELP[r]}</span>
+            </div>
+          ))}</div>
+        </div>
+
+        {err && <div className="empty" style={{ margin: '10px 0' }}>{err}</div>}
+        {busy && !rows.length && <div className="empty" style={{ margin: '10px 0' }}>Loading…</div>}
+
+        {rows.length > 0 && (
+          <div className="tablewrap">
+            <table className="items">
+              <thead><tr>
+                <th>Username</th><th>Name</th><th style={{ width: 150 }}>Role</th>
+                <th style={{ width: 100 }}>Last signed in</th><th style={{ width: 90 }}>Added</th>
+                <th style={{ width: 200 }}></th>
+              </tr></thead>
+              <tbody>{rows.map((u) => (
+                <tr key={u.id} style={u.active ? undefined : { opacity: 0.55 }}>
+                  <td><b>{u.username}</b>{isMe(u) && <span className="small" style={{ color: 'var(--text-2)' }}> · you</span>}</td>
+                  <td className="small">{u.full_name || '—'}</td>
+                  <td>
+                    {/* Your own row shows the role but cannot change it — the
+                        account you are signed in as is the one holding the door
+                        open, and the server refuses this too. */}
+                    {isMe(u) ? <span className={'badge role-' + u.role}>{u.role_label}</span> : (
+                      <select className="sel" value={u.role} title={ROLE_HELP[u.role]}
+                        onChange={(e) => patch(u, { role: e.target.value }, `✓ ${u.username} is now ${ROLE_LABEL[e.target.value]}`)}>
+                        {roles.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                      </select>
+                    )}
+                  </td>
+                  <td className="small">{u.last_login_at ? when(u.last_login_at) : <span title="This account has never been used">never</span>}</td>
+                  <td className="small">{when(u.created_at)}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button className="btn" style={{ padding: '2px 8px', marginRight: 5 }}
+                      onClick={() => reset(u)} title="Set a new password and sign them out everywhere">Reset password</button>
+                    {!isMe(u) && <>
+                      <button className="btn" style={{ padding: '2px 8px', marginRight: 5 }}
+                        onClick={() => patch(u, { active: !u.active }, u.active ? `${u.username} can no longer sign in` : `✓ ${u.username} can sign in again`)}
+                        title={u.active ? 'Stop this account signing in — reversible' : 'Let this account sign in again'}>
+                        {u.active ? 'Deactivate' : 'Reactivate'}</button>
+                      <button className="btn" style={{ padding: '2px 8px' }} onClick={() => remove(u)} title="Delete permanently">×</button>
+                    </>}
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+
+        <form onSubmit={add} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginTop: 16, flexWrap: 'wrap' }}>
+          <div className="field" style={{ minWidth: 150 }}><label>Username</label>
+            <input value={form.username} autoComplete="off"
+              onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="e.g. sharu" /></div>
+          <div className="field" style={{ minWidth: 170 }}><label>Full name</label>
+            <input value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })}
+              placeholder="e.g. Sharu Kumar" /></div>
+          <div className="field" style={{ minWidth: 160 }}><label>Password</label>
+            <input type="password" value={form.password} autoComplete="new-password"
+              onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="at least 6 characters" /></div>
+          <div className="field" style={{ minWidth: 140 }}><label>Role</label>
+            <select className="sel" value={form.role} title={ROLE_HELP[form.role]}
+              onChange={(e) => setForm({ ...form, role: e.target.value })}>
+              {(roles.length ? roles : [{ value: 'user', label: 'User' }]).map((r) =>
+                <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select></div>
+          <button className="btn primary" type="submit">Add user</button>
+        </form>
+        <div className="small" style={{ color: 'var(--text-2)', marginTop: 8 }}>{ROLE_HELP[form.role]}</div>
+      </div>
+    </div>
+  )
+}
+
+// The one account action everybody has, whatever their role.
+function ChangePassword({ onClose, toast }) {
+  const [cur, setCur] = useState('')
+  const [next, setNext] = useState('')
+  const [again, setAgain] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const save = async (e) => {
+    e.preventDefault()
+    if (next !== again) { toast('The two new passwords do not match', 'err'); return }
+    setBusy(true)
+    try {
+      const r = await api.changePassword(cur, next)
+      // The change rotated the signing seed, so the token this tab is holding
+      // is already dead — swap in the fresh one rather than dropping the user
+      // at the login screen for having done as they were asked.
+      if (r.token) session.set(r.token)
+      toast('✓ Password changed', 'ok'); onClose()
+    } catch (e2) { toast(e2.detail || 'Could not change it', 'err'); setBusy(false) }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(42,35,32,.45)', zIndex: 100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ width: 380, background: 'var(--panel)', border: '1px solid var(--line)',
+        borderRadius: 12, padding: 24 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Change password</h2>
+          <div style={{ flex: 1 }} />
+          <button className="btn" style={{ padding: '2px 9px' }} onClick={onClose}>×</button>
+        </div>
+        <form onSubmit={save}>
+          <div className="field"><label>Current password</label>
+            <input type="password" value={cur} autoComplete="current-password"
+              onChange={(e) => setCur(e.target.value)} autoFocus /></div>
+          <div className="field"><label>New password</label>
+            <input type="password" value={next} autoComplete="new-password"
+              onChange={(e) => setNext(e.target.value)} placeholder="at least 6 characters" /></div>
+          <div className="field"><label>New password again</label>
+            <input type="password" value={again} autoComplete="new-password"
+              onChange={(e) => setAgain(e.target.value)} /></div>
+          <div className="small" style={{ color: 'var(--text-2)', margin: '10px 0' }}>
+            Your other devices — including the phone app — are signed out when this is saved.
+          </div>
+          <button className="btn primary" type="submit" disabled={busy} style={{ width: '100%' }}>
+            {busy ? 'Saving…' : 'Change password'}</button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ==========================================================================
+//  Roles
+//  ------------------------------------------------------------------------
+//  Three ranked roles, matching backend/app/services/users.py. Everything is
+//  compared by RANK rather than by equality — `rank >= admin` rather than
+//  `role === 'admin'` — because the super admin is an admin who can also do
+//  more, and equality tests quietly lock the top role out of the middle one's
+//  screens. That bug is invisible until the one person who has the top role
+//  tries to use the app.
+//
+//  This gating is a courtesy, not the enforcement. A screen hidden here is
+//  still refused by the server (see backend/app/security.py) if it is reached
+//  another way — the point of hiding it is that the floor is not shown twelve
+//  buttons that answer "not for you".
+// ==========================================================================
+const ROLE_RANK = { user: 1, admin: 2, superadmin: 3 }
+const ROLE_LABEL = { user: 'User', admin: 'Admin', superadmin: 'Super Admin' }
+const rank = (role) => ROLE_RANK[role] || 0
+const atLeast = (role, need) => rank(role) >= rank(need)
+
 const MODULES = [
   { key: 'lr', icon: '🚚', label: 'LR Entry', blurb: 'The transport register — consignments as they arrive' },
   { key: 'documents', icon: '🧾', label: 'Invoice Entry', blurb: 'Read a supplier invoice and review what came off it' },
   { key: 'purchases', icon: '📋', label: 'GRN', blurb: 'Receive against an invoice — count, claim shortages, post' },
   { key: 'inventory', icon: '📦', label: 'Inventory', blurb: 'Stock on hand, labels and per-piece codes' },
+  // Beside Inventory because it is a question about the same stock — not what
+  // we hold, but what has stopped moving and what clearing it is worth.
+  { key: 'deadstock', icon: '🧊', label: 'Dead Stock & Clearance', blurb: 'Stock nobody is buying, the discount ladder, and whether the clearance worked', min: 'admin' },
+  // Design and printing are two entries because they are two jobs, and they are
+  // also two roles: the designer is opened when a new roll of label stock is
+  // bought, by whoever set the warehouse up, while the printing screen is
+  // opened every time goods are put away, by whoever is putting them away.
+  { key: 'labels', icon: '🏷', label: 'Label Designer', blurb: 'Lay out the sticker once — which field prints where, and how big the QR is', min: 'admin' },
+  { key: 'labelprint', icon: '🖨', label: 'QR / Label Printing', blurb: 'Pick stock, pick a template, print the labels' },
   { key: 'outward', icon: '📤', label: 'Stock Outward', blurb: 'Dispatch stock to a shop or another godown' },
   { key: 'inward', icon: '📥', label: 'Stock Inward', blurb: 'Accept a dispatched transfer, line by line' },
-  { key: 'returns', icon: '↩', label: 'Returns', blurb: 'Debit notes raised against a posted GRN' },
-  { key: 'payments', icon: '₹', label: 'Payments', blurb: 'Settle supplier bills and read the ledger' },
-  { key: 'reports', icon: '📊', label: 'Reports', blurb: 'Every register, filtered and exportable' },
-  { key: 'suppliers', icon: '🏭', label: 'Suppliers', blurb: 'Supplier master and trained invoice formats' },
-  { key: 'masters', icon: '⚙', label: 'Masters', blurb: 'Categories, agents, transporters and the dropdown lists', admin: true },
+  { key: 'returns', icon: '↩', label: 'Returns', blurb: 'Debit notes raised against a posted GRN', min: 'admin' },
+  { key: 'payments', icon: '₹', label: 'Payments', blurb: 'Settle supplier bills and read the ledger', min: 'admin' },
+  { key: 'reports', icon: '📊', label: 'Reports', blurb: 'Every register, filtered and exportable', min: 'admin' },
+  { key: 'suppliers', icon: '🏭', label: 'Suppliers', blurb: 'Supplier master and trained invoice formats', min: 'admin' },
+  { key: 'masters', icon: '⚙', label: 'Masters', blurb: 'Categories, agents, transporters and the dropdown lists', min: 'admin' },
+  { key: 'users', icon: '👤', label: 'Users & Access', blurb: 'Who can sign in, and how much of this they see', min: 'superadmin' },
 ]
 
 // ==========================================================================
@@ -4157,7 +8273,6 @@ function NavMenu({ tab, setTab, items, icon, label, hint }) {
               <span className="ico" aria-hidden="true">{m.icon}</span>
               <span className="txt">
                 <span className="lbl">{m.label}</span>
-                <span className="blurb">{m.blurb}</span>
               </span>
             </button>
           ) : <div key={'sep' + i} className="navmenu-sep" role="separator" />))}
@@ -4562,9 +8677,7 @@ function DashboardCharts({ money }) {
   const hasAny = c.purchases.values.some((v) => v > 0) ||
     mv.series.some((s) => s.values.some((v) => v > 0)) || c.stock_by_category.length > 0
   if (!hasAny) return (
-    <div className="empty" style={{ marginTop: 60 }}>Nothing to plot yet.<br />
-      <span className="small">Charts appear once there are posted receipts and stock
-        movements to draw — the static view shows what is recorded so far.</span></div>
+    <div className="empty" style={{ marginTop: 60 }}>Nothing to plot yet.</div>
   )
 
   return (
@@ -4609,7 +8722,132 @@ function DashboardCharts({ money }) {
   )
 }
 
-function Dashboard({ modules, go, company, docs, refreshDocs }) {
+// The dead-stock headline on the main dashboard: the alert, four KPIs, the ageing
+// shape and whether clearance is working. Reads the module's OWN summary — one
+// arithmetic, two screens, so the dashboard can never quote a figure the register
+// disagrees with.
+function DashDeadStock({ sum, open }) {
+  const t = sum.totals, c = sum.counts, cash = sum.cash_impact
+  const dead = c.dead_total
+  const trend = sum.trend || []
+  const bands = (sum.by_bucket || []).map((b) => ({ label: b.bucket, value: b.qty }))
+  const critical = c.critical
+
+  if (!dead.lines) {
+    return (
+      <Section id="dash-dead" title="Dead Stock & Clearance" summary="all clear">
+        <div className="warnbox clean">
+          <h4 style={{ border: 'none', margin: 0 }}>
+            Nothing has been still for {c.thresholds.dead}+ days — every stocked line is moving.
+          </h4>
+          <div className="small" style={{ color: 'var(--text-2)', marginTop: 4 }}>
+            {c.approaching.lines
+              ? <>{c.approaching.lines} line(s) have been quiet for {c.thresholds.approaching}+ days and
+                  will cross the line within a month. <button className="btn" style={{ padding: '2px 9px' }}
+                    onClick={() => open({ tab: 'register', status: 'approaching' })}>See them</button></>
+              : 'Nothing is approaching the line either.'}
+          </div>
+        </div>
+      </Section>
+    )
+  }
+
+  return (
+    <Section id="dash-dead" title="Dead Stock & Clearance"
+      summary={`${dead.lines} product line(s) · ${rupees(t.stock_value)} locked`}
+      actions={<button className="btn primary" style={{ padding: '3px 11px' }}
+        onClick={() => open({ tab: 'register', status: 'dead' })}>Review dead stock</button>}>
+
+      {/* The notification management actually reads, with the two things they can
+          do about it beside it rather than in another module's menu. */}
+      <div className="warnbox" style={{ borderColor: 'var(--danger-line)', background: 'var(--danger-bg)', marginBottom: 14 }}>
+        <h4 style={{ border: 'none', margin: 0, color: 'var(--danger)' }}>
+          🔴 {dead.lines} product{dead.lines === 1 ? '' : 's'} have crossed {c.thresholds.dead} days without a sale
+        </h4>
+        <div className="small" style={{ color: 'var(--text-2)', marginTop: 4 }}>
+          {rupees(t.stock_value)} of stock value requires clearance review
+          {critical.lines ? <> · <b>{critical.lines}</b> of them unsold for {c.thresholds.critical}+ days</> : null}
+          {sum.pos && !sum.pos.available
+            ? <> · <b>the till is not readable here</b>, so these ages come from dispatches and receipts only</>
+            : null}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <button className="btn" onClick={() => open({ tab: 'register', status: 'dead' })}>Review dead stock</button>
+          <button className="btn" onClick={() => open({ tab: 'worksheet' })}>Clearance worksheets</button>
+          {critical.lines > 0 && (
+            <button className="btn" onClick={() => open({ tab: 'register', status: 'critical' })}>
+              {critical.lines} critical</button>
+          )}
+        </div>
+      </div>
+
+      <div className="dgrid">
+        <DashTile label="Dead stock" value={dead.qty + ' pcs'} tone="warn"
+          sub={`${t.skus} SKU${t.skus === 1 ? '' : 's'} with no sale for ${c.thresholds.dead}+ days`}
+          hint="Open the Dead Stock Register"
+          onClick={() => open({ tab: 'register', status: 'dead' })} />
+        <DashTile label="Stock value" value={rupees(t.stock_value)} tone="warn"
+          sub="locked — capital sitting on the shelf"
+          hint="Open the products holding it"
+          onClick={() => open({ tab: 'register', status: 'dead' })} />
+        <DashTile label="Clearance" value={rupees(t.expected_realisation)}
+          sub="expected at the ladder's prices"
+          hint="Open the Clearance Worksheet"
+          onClick={() => open({ tab: 'worksheet' })} />
+        <DashTile label="Recovery" value={t.recovery_pct == null ? '—' : t.recovery_pct + '%'}
+          sub="expected cash against what it cost"
+          hint="Open the Cash Impact"
+          onClick={() => open({ tab: 'cash' })} />
+        <DashTile label="Critical" value={critical.lines} tone={critical.lines ? 'warn' : ''}
+          sub={critical.lines
+            ? `unsold for ${c.thresholds.critical}+ days — ${rupees(critical.stock_value)}`
+            : 'nothing past the critical line'}
+          hint="Open the register filtered to the worst of it"
+          onClick={() => open({ tab: 'register', status: 'critical' })} />
+        <DashTile label="Approaching" value={c.approaching.lines}
+          tone={c.approaching.lines ? 'warn' : ''}
+          sub={c.approaching.lines
+            ? `quiet ${c.thresholds.approaching}+ days — dead within a month`
+            : 'nothing about to go dead'}
+          hint="Open the register filtered to what is about to go dead"
+          onClick={() => open({ tab: 'register', status: 'approaching' })} />
+      </div>
+
+      <div className="vizgrid" style={{ marginTop: 16 }}>
+        <ChartCard title="Dead stock by age"
+          note={`Pieces past ${c.thresholds.dead} days, by how long they have been still. One hue darkening, because the bands are an ordered scale.`}
+          columns={['Age band', 'Pieces', 'Lines', 'Stock value', 'Expected']}
+          rows={(sum.by_bucket || []).map((b) => [b.bucket, b.qty, b.lines,
+            money(b.stock_value), money(b.expected_realisation)])}>
+          {bands.length
+            ? <HBars rows={bands} unit="pcs" ordinal />
+            : <div className="empty" style={{ margin: '20px 0' }}>Nothing dead to band.</div>}
+        </ChartCard>
+
+        <ChartCard title="Clearance performance"
+          note="What each month's worksheets promised against what the till has actually taken for those products, inside those dates. The gap is the shortfall, and it closes on its own as the goods sell."
+          legend={<Legend items={[{ label: 'Expected', color: VIZ[0] },
+                                  { label: 'Realised', color: VIZ[1] }]} />}
+          columns={['Month', 'Campaigns', 'Expected', 'Realised', 'Realised %', 'Sell-through %']}
+          rows={trend.map((r) => [r.month, r.campaigns, money(r.expected), money(r.actual),
+            r.realisation_pct == null ? '—' : r.realisation_pct + '%',
+            r.sell_through_pct == null ? '—' : r.sell_through_pct + '%'])}>
+          {trend.length
+            ? <GroupedBars labels={trend.map((r) => r.month)}
+                series={[{ name: 'Expected', values: trend.map((r) => r.expected) },
+                         { name: 'Realised', values: trend.map((r) => r.actual) }]} unit="₹" />
+            : <div className="empty" style={{ margin: '20px 0', lineHeight: 1.6 }}>
+                No clearance worksheet has been run yet — so there is nothing to judge.<br />
+                <button className="btn" style={{ marginTop: 10 }}
+                  onClick={() => open({ tab: 'register', status: 'dead' })}>Build the first one</button>
+              </div>}
+        </ChartCard>
+      </div>
+    </Section>
+  )
+}
+
+function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStock }) {
   const [d, setD] = useState(null)
   const [partial, setPartial] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -4630,13 +8868,21 @@ function Dashboard({ modules, go, company, docs, refreshDocs }) {
     return Promise.allSettled([
       api.listPurchases(), api.inventorySummary(), api.listOutwards('posted'),
       api.listOutwards('draft'), api.pendingBills(), api.listReturns(),
-      api.lrList(), api.listSuppliers(),
+      api.lrList(), api.listSuppliers(), api.notifications(), api.deadStockSummary(),
     ]).then((r) => {
       const v = (i, fb) => (r[i].status === 'fulfilled' ? r[i].value : fb)
       setPartial(r.some((x) => x.status === 'rejected'))
       setD({
         grns: v(0, []), stock: v(1, {}), transit: v(2, []), outDrafts: v(3, []),
         bills: v(4, []), returns: v(5, []), lr: v(6, []), suppliers: v(7, []),
+        // The same feed the bell reads. One call rather than a second pass for
+        // the dead-stock tile: the notices already carry it, and two reads of
+        // one queue is two chances to print two different numbers for it.
+        notifs: v(8, { notices: [], counts: {} }),
+        // the same read the module opens on — KPIs, age bands and the clearance
+        // trend, so the section below is the module's own arithmetic and not a
+        // second calculation of it that could disagree
+        dead: v(9, null),
       })
     }).finally(() => setBusy(false))
   }, [])
@@ -4656,6 +8902,13 @@ function Dashboard({ modules, go, company, docs, refreshDocs }) {
   const retDrafts = d.returns.filter((r) => r.status === 'draft').length
   const pendingDetail = d.stock.pending_detail || 0
   const transitQty = sum(d.transit, (o) => o.total_qty)
+  // dead + critical: both are past the line, and a headline that left out the
+  // worst rows would be the one figure nobody could reconcile against the module
+  const notices = d.notifs?.notices || []
+  const deadBands = notices.filter((n) => n.key === 'deadstock.dead' || n.key === 'deadstock.critical')
+  const deadLines = sum(deadBands, (n) => n.count)
+  const deadValue = sum(deadBands, (n) => n.value)
+  const criticalLines = sum(notices.filter((n) => n.key === 'deadstock.critical'), (n) => n.count)
 
   const attention = [
     { key: 'documents', label: 'Invoices to review', value: toReview, tone: toReview ? 'warn' : '',
@@ -4677,6 +8930,12 @@ function Dashboard({ modules, go, company, docs, refreshDocs }) {
       tone: overdue.length ? 'warn' : '',
       sub: d.bills.length ? `${d.bills.length} bill${d.bills.length === 1 ? '' : 's'}${overdue.length ? ` · ${overdue.length} over 30 days` : ''}` : 'nothing outstanding',
       hint: 'Open Payments — unpaid supplier invoices' },
+    { key: 'deadstock', label: 'Dead stock', value: deadLines,
+      tone: deadLines ? 'warn' : '',
+      sub: deadLines
+        ? `₹ ${money(deadValue)} of capital asleep${criticalLines ? ` · ${criticalLines} line(s) critical` : ''}`
+        : 'every stocked line is still moving',
+      hint: 'Open Dead Stock & Clearance — products with no sale inside the window' },
   ]
   const open = attention.filter((a) => a.tone === 'warn').length
 
@@ -4718,6 +8977,30 @@ function Dashboard({ modules, go, company, docs, refreshDocs }) {
           </div>
         </div>}
 
+        {/* The notification centre, on the screen people already open. The bell
+            in the header carries the same feed for everywhere else — this is it
+            in full, where there is room to read the sentence under each line. */}
+        <Section id="dash-notices" title="Notifications"
+          summary={notices.length
+            ? `${d.notifs.counts.unread || 0} unread of ${notices.length}`
+            : 'nothing open'}
+          actions={(d.notifs.counts?.unread || 0) > 0 ? (
+            <button className="btn" onClick={() => api.notificationsReadAll(user).then(load)}>
+              Mark all read</button>
+          ) : null}>
+          {!notices.length && (
+            <div className="empty" style={{ padding: '18px 0' }}>
+              Nothing is waiting. A notice appears the moment a queue stops being empty —
+              and clears itself when the queue does.
+            </div>
+          )}
+          {notices.map((n) => (
+            <NoticeRow key={n.key} n={n} compact
+              onOpen={(x) => go(x.module)}
+              onRead={() => {}} />
+          ))}
+        </Section>
+
         <Section id="dash-attention" title="Waiting on someone"
           summary={open ? `${open} queue${open === 1 ? '' : 's'} not clear` : 'all clear'}>
           <div className="dgrid">
@@ -4727,6 +9010,14 @@ function Dashboard({ modules, go, company, docs, refreshDocs }) {
             ))}
           </div>
         </Section>
+
+        {/* Dead stock, for the people who decide about it rather than the people
+            who clear it. Four figures, the ageing shape, and whether the last
+            clearance actually worked — every one of them a link into the module
+            already filtered, because a number management cannot open is a number
+            they have to ask somebody about. The worksheet itself stays where it
+            belongs; this is its headline. */}
+        {d.dead && <DashDeadStock sum={d.dead} open={openDeadStock} />}
 
         <Section id="dash-stock" title="Stock at a glance"
           summary={`${d.stock.product_count || 0} records · ₹ ${money(d.stock.total_stock_value)}`}>
@@ -4770,7 +9061,6 @@ function Dashboard({ modules, go, company, docs, refreshDocs }) {
               <button key={m.key} className="modcard" onClick={() => go(m.key)} title={m.blurb}>
                 <span className="ico" aria-hidden="true">{m.icon}</span>
                 <span className="lbl">{m.label}</span>
-                <span className="blurb">{m.blurb}</span>
               </button>
             ))}
           </div>
@@ -4824,6 +9114,15 @@ export default function App() {
   const [selPurchase, setSelPurchase] = useState(null)
   const [toastMsg, setToastMsg] = useState(null)
   const [showSettings, setShowSettings] = useState(false)
+  // The notification panel is mounted at the root (see below) while its bell
+  // sits on the chrome, so the open flag lives here. `notifTick` is bumped when
+  // the panel changes something, which is what makes the badge re-read.
+  const [notifsOpen, setNotifsOpen] = useState(false)
+  const [notifTick, setNotifTick] = useState(0)
+  // Which Dead Stock screen a dashboard card asked for. Held here because the
+  // card and the module are siblings — see the useEffect in DeadStock.
+  const [dsIntent, setDsIntent] = useState(null)
+  const openDeadStock = (intent) => { setDsIntent(intent || null); setTab('deadstock') }
   const [scanning, setScanning] = useState(null)   // {url, name} while extracting
   const [docQuery, setDocQuery] = useState('')
   const [docScope, setDocScope] = useState('all')
@@ -4831,28 +9130,49 @@ export default function App() {
   const shownDocs = docs
     .filter((d) => docScope === 'all' || d.status === docScope)
     .filter((d) => matches(d, docQuery, ['supplier_name', 'filename', 'invoice_number', 'status']))
+  const docPage = usePaged(shownDocs, 50)
   const [authed, setAuthed] = useState(false)
   const [authChecked, setAuthChecked] = useState(false)
   const [user, setUser] = useState('')
   const [role, setRole] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
 
   const refreshStatus = useCallback(() => api.status().then(setStatus), [])
   const refresh = useCallback(() => api.listDocuments().then(setDocs), [])
 
-  // verify any stored token on load (so a refresh doesn't force re-login)
+  // verify any stored token on load (so a refresh doesn't force re-login).
+  // The role comes back from the server on every verify rather than being kept
+  // beside the token: a role changed by the super admin then takes effect on
+  // the next reload, instead of waiting for the person to sign out.
   useEffect(() => {
-    const t = localStorage.getItem('essa_token')
+    const t = session.get()
     if (!t) { setAuthChecked(true); return }
     api.verifyToken(t).then((r) => {
       if (r.ok) { setAuthed(true); setUser(r.user); setRole(r.role || '') }
-      else localStorage.removeItem('essa_token')
+      else session.clear()
     }).catch(() => {}).finally(() => setAuthChecked(true))
+  }, [])
+
+  // A token that expires, or an account deactivated mid-shift, comes back as a
+  // 401 on whatever call happens next. Handled once here so it returns the
+  // whole app to the login screen, rather than leaving each panel to show its
+  // own failure and the person to guess why everything stopped working.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      session.clear(); setAuthed(false); setSel(null)
+    })
   }, [])
 
   useEffect(() => { if (authed) { refreshStatus(); refresh() } }, [authed, refresh, refreshStatus])
   const toast = (m, kind) => { setToastMsg({ m, kind }); setTimeout(() => setToastMsg(null), 3000) }
-  const handleLogin = (token, u, r) => { localStorage.setItem('essa_token', token); setUser(u); setRole(r || ''); setAuthed(true) }
-  const logout = () => { localStorage.removeItem('essa_token'); setAuthed(false); setSel(null) }
+  const handleLogin = (token, u, r) => { session.set(token); setUser(u); setRole(r || ''); setAuthed(true) }
+  const logout = () => {
+    // Clears the cookie as well as the stored token. Without the call the
+    // cookie outlives the logout, and the invoice images on a shared terminal
+    // stay fetchable by the next person to open the tab.
+    api.logout()
+    session.clear(); setAuthed(false); setSel(null); setTab('dashboard')
+  }
   const gotoPurchase = (id) => { setSelPurchase(id); setTab('purchases') }
 
   const onUpload = async (e) => {
@@ -4900,12 +9220,19 @@ export default function App() {
   }
 
   const providers = status?.providers || {}
-  // Masters is admin-only, so it is absent from the menu and the dashboard grid
-  // for everyone else rather than present and refusing.
-  const modules = MODULES.filter((m) => !m.admin || role === 'admin')
+  // A module above this person's rank is absent from the menu and from the
+  // dashboard grid, rather than present and refusing when clicked.
+  const modules = MODULES.filter((m) => !m.min || atLeast(role, m.min))
+  const isSuper = atLeast(role, 'superadmin')
   // A `pos:` tab is a screen of the shop rather than one of ours, and is served
   // in a frame — so it is answered before the warehouse chain below.
   const posScreen = POS_ITEMS.find((p) => p && p.key === tab)
+  // The open tab is remembered across sessions, so the person who signs in at
+  // this terminal is not always the one who left it on Payments. One guard in
+  // front of the whole chain rather than a check inside each branch: a screen
+  // added later is covered by its MODULES entry alone, and cannot be forgotten.
+  const wanted = MODULES.find((m) => m.key === tab)
+  const denied = wanted && wanted.min && !atLeast(role, wanted.min) ? wanted : null
 
   if (!authChecked) return <div className="login-wrap"><div className="login-bg" /></div>
   if (!authed) return <LoginScreen onLogin={handleLogin} />
@@ -4919,12 +9246,30 @@ export default function App() {
       <div className="topbar">
         <div className="brand">Essa <span>·</span> Document Intake<small>{status?.company?.name} — invoice → data, trained per supplier</small></div>
         <div className="spacer" />
-        <button className={'pill ' + (providers.claude_vision ? 'on' : 'off')} style={{ cursor: 'pointer' }}
-          title="Configure vision extraction" onClick={() => setShowSettings(true)}>
-          👁 vision {providers.claude_vision ? 'on' : 'off'} ⚙</button>
+        {/* The vision key and model are server-wide settings, so the gear is a
+            super admin's. For everyone else the pill still reports whether
+            vision is on — that changes how an upload behaves and is worth
+            knowing — but it does not open a screen the server would refuse. */}
+        {isSuper ? (
+          <button className={'pill ' + (providers.claude_vision ? 'on' : 'off')} style={{ cursor: 'pointer' }}
+            title="Configure vision extraction" onClick={() => setShowSettings(true)}>
+            👁 vision {providers.claude_vision ? 'on' : 'off'} ⚙</button>
+        ) : (
+          <span className={'pill ' + (providers.claude_vision ? 'on' : 'off')}
+            title="Vision extraction — a super admin configures this">
+            👁 vision {providers.claude_vision ? 'on' : 'off'}</span>
+        )}
         <span className={'pill ' + (providers.tesseract ? 'on' : 'off')}>OCR {providers.tesseract ? 'on' : 'off'}</span>
+        <NotificationBell onOpen={() => setNotifsOpen(true)} tick={notifTick} />
         <label className="btn primary uploadbtn">Upload invoice<input type="file" accept="image/*,.pdf" onChange={onUpload} /></label>
-        <button className="btn" title={'Signed in as ' + user} onClick={logout}>Logout</button>
+        {/* Who you are signed in as, and at what level. On a shared warehouse
+            terminal the second half is the load-bearing one: it is the answer
+            to "why can I not see Reports today", visible without asking. */}
+        <span className={'badge role-' + (role || 'user')} style={{ marginLeft: 2 }}
+          title={ROLE_HELP[role] || ''}>{ROLE_LABEL[role] || role}</span>
+        <button className="btn" title="Change your password"
+          onClick={() => setShowPassword(true)}>{user}</button>
+        <button className="btn" title={'Sign out of ' + user} onClick={logout}>Logout</button>
       </div>
       {/* Not wrapped in .tabs: that class styles a strip of tab buttons, and its
           rules (nowrap above all) reach into the menu's own buttons and stop the
@@ -4937,19 +9282,31 @@ export default function App() {
           icon="🛍" label="POS" hint="The retail shop — billing, floor sales and shop stock" />
       </div>
 
-      {posScreen ? (
+      {denied ? (
+        <div className="body"><div className="empty" style={{ margin: 'auto', maxWidth: 420, lineHeight: 1.7 }}>
+          <div style={{ fontSize: 26, marginBottom: 6 }}>{denied.icon}</div>
+          <b>{denied.label}</b> needs {ROLE_LABEL[denied.min]} access.<br />
+          You are signed in as <b>{user}</b> ({ROLE_LABEL[role] || role}).
+          <div style={{ marginTop: 12 }}>
+            <button className="btn primary" onClick={() => setTab('dashboard')}>Back to the dashboard</button>
+          </div>
+        </div></div>
+      ) : posScreen ? (
         <PosScreen screen={posScreen} available={status?.pos?.available}
           error={status?.pos?.error} />
       ) : tab === 'dashboard' ? (
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
-          docs={docs} refreshDocs={refresh} />
+          docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
       ) : tab === 'lr' ? (
         <div className="body"><LREntryView toast={toast} /></div>
       ) : tab === 'documents' ? (
         <div className="body">
           <Sidebar id="documents" label="Documents">
             <div className="head"><h3>Documents · {docs.length}</h3>
-              {docs.length > 0 && <button className="btn" style={{ padding: '3px 9px', fontSize: 11 }}
+              {/* Emptying every transaction table is irreversible and global,
+                  so it is a super admin's button even though this screen is
+                  the floor's. The server refuses it for anyone else too. */}
+              {docs.length > 0 && isSuper && <button className="btn" style={{ padding: '3px 9px', fontSize: 11 }}
                 onClick={clearAll} title="Delete all documents & transaction data">Clear all</button>}</div>
             {docs.length > 0 && <>
               <SearchBox value={docQuery} onChange={setDocQuery}
@@ -4965,7 +9322,7 @@ export default function App() {
               {docs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>No documents. Click “Upload invoice” to add one.</div>}
               {docs.length > 0 && shownDocs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
                 Nothing matches. Try “All” or clear the search.</div>}
-              {shownDocs.map((d) => (
+              {docPage.slice.map((d) => (
                 <div key={d.id} className={'doc-row' + (sel === d.id ? ' sel' : '')} onClick={() => setSel(d.id)}>
                   <div className="t" style={{ display: 'flex', alignItems: 'center' }}>
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.supplier_name || d.filename}</span>
@@ -4980,6 +9337,7 @@ export default function App() {
                 </div>
               ))}
             </div>
+            <Pager {...docPage} noun="document" />
           </Sidebar>
           <Review docId={sel} onSaved={refresh} onCreateGrn={gotoPurchase} toast={toast} />
         </div>
@@ -4987,6 +9345,13 @@ export default function App() {
         <Purchases selId={selPurchase} setSelId={setSelPurchase} toast={toast} />
       ) : tab === 'inventory' ? (
         <Inventory toast={toast} />
+      ) : tab === 'deadstock' ? (
+        <DeadStock toast={toast} go={setTab} intent={dsIntent}
+          onIntentUsed={() => setDsIntent(null)} />
+      ) : tab === 'labels' ? (
+        <LabelDesigner toast={toast} role={role} />
+      ) : tab === 'labelprint' ? (
+        <LabelPrinting toast={toast} />
       ) : tab === 'outward' ? (
         <StockOutward toast={toast} />
       ) : tab === 'inward' ? (
@@ -4998,20 +9363,32 @@ export default function App() {
       ) : tab === 'reports' ? (
         <Reports />
       ) : tab === 'masters' ? (
-        role === 'admin' ? <Masters toast={toast} /> : <div className="empty">Masters are admin-only.</div>
+        // No role check here any more — the guard above the chain covers every
+        // module from its MODULES entry, so this cannot drift out of step with
+        // the menu the way a second copy of the rule would.
+        <Masters toast={toast} />
+      ) : tab === 'users' ? (
+        <Users toast={toast} me={user} />
       ) : tab === 'suppliers' ? (
         <Suppliers toast={toast} />
       ) : (
         // an unknown saved tab (a module renamed since it was stored) lands on
         // the dashboard rather than on a blank screen
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
-          docs={docs} refreshDocs={refresh} />
+          docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
       )}
 
       {scanning && <ScanningOverlay url={scanning.url} name={scanning.name}
         vision={!!providers.claude_vision} />}
+      {/* At the app root, not in the header the bell sits in: everything under
+          .topbar is styled for the dark chrome, and a light panel mounted there
+          inherits white button text on a white card. */}
+      {notifsOpen && <NotificationPanel go={setTab} user={user} toast={toast}
+        onClose={() => setNotifsOpen(false)}
+        onChanged={() => setNotifTick((t) => t + 1)} />}
       {showSettings && <VisionSettings onClose={() => setShowSettings(false)}
         onChanged={refreshStatus} toast={toast} />}
+      {showPassword && <ChangePassword onClose={() => setShowPassword(false)} toast={toast} />}
       {toastMsg && <div className={'toast ' + toastMsg.kind}>{toastMsg.m}</div>}
     </div>
   )

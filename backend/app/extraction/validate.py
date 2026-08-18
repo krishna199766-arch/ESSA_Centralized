@@ -133,15 +133,30 @@ def normalise_and_check(inv: Dict[str, Any], profile: Dict[str, Any] = None,
         tot["tax_total"] = tax_total
 
     # ---- grand total ----
-    charges = _f(tx.get("other_charges")) + _f(tx.get("freight_in_total", 0))
+    #
+    # Two figures were being dropped here and both are ordinary on these bills: a
+    # `special_discount` (which reduces the total) and `freight` (which adds to
+    # it). The old reconstruction read neither — it summed `freight_in_total`, a
+    # key no provider has ever returned — so every invoice carrying either one
+    # was reported as not adding up, and the reviewer learned to ignore the
+    # warning. That is the worst state for a check to be in.
+    #
+    # Layouts still differ over what the printed total includes, so the stated
+    # figure is accepted if ANY sensible combination reaches it, and the headline
+    # reconstruction is the full one — which is what the review screen computes,
+    # so a total filled in there never comes back flagged on save.
+    other = _f(tx.get("other_charges"))
+    freight = _f(tx.get("freight")) or _f(tx.get("freight_in_total", 0))
+    special = _f(tx.get("special_discount"))
     round_off = _f(tx.get("round_off"))
-    recon = taxable + tax_total + charges + round_off
+    base = taxable + tax_total + round_off
+    recon = base + other + freight - special
     stated_grand = _f(tot.get("grand_total"))
     if not stated_grand and recon:
         tot["grand_total"] = round(recon, 2)
     elif stated_grand:
-        # try both with and without 'other_charges' since layouts differ
-        candidates = [recon, recon - charges + _f(tx.get("other_charges"))]
+        candidates = {recon, base, base + other, base + freight, base + other + freight,
+                      base - special, recon + special}
         if all(abs(stated_grand - c) > max(MONEY_TOL, stated_grand * 0.03) for c in candidates):
             warnings.append(f"Reconstructed grand total ≈ {recon:.2f} ≠ stated {stated_grand:.2f}")
             flags["totals.grand_total"] = "review"

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models
 from ..services import masters as svc
+from ..services import unit_types as ut
 
 router = APIRouter(prefix="/api/masters", tags=["masters"])
 
@@ -56,6 +57,166 @@ def add_transport(body: NameIn, db: Session = Depends(get_db)):
         t.phone = body.phone
     db.commit()
     return {"ok": bool(t), "id": t.id if t else None}
+
+
+# ---- unit types + the rules that pick one ------------------------------------
+#
+# "Make Unit Type configurable per product" is two lists, not one. The TYPES say
+# what a unit is worth in individual items (a pair is 2, a dozen is 12) and are
+# what the dozen→pieces conversion is done against; the RULES say which type a
+# product is, read off its description, so nobody re-picks "pillow cover = pair"
+# on every receipt. Both are editable here, and both take effect on the next GRN
+# posted — never retroactively, because stock already counted was counted under
+# the rule in force when it arrived.
+
+class UnitTypeIn(BaseModel):
+    code: str
+    name: Optional[str] = None
+    pieces: float = 1.0
+    aliases: Optional[list] = None
+    countable: bool = True
+
+
+class UnitTypeEdit(BaseModel):
+    name: Optional[str] = None
+    pieces: Optional[float] = None
+    aliases: Optional[list] = None
+    countable: Optional[bool] = None
+
+
+class UnitRuleIn(BaseModel):
+    pattern: str
+    unit_type: str
+    scope: str = "keyword"           # keyword (description) | category
+
+
+def _type_out(t: models.UnitType):
+    return {"id": t.id, "code": t.code, "name": t.name, "pieces": t.pieces,
+            "aliases": t.aliases or [], "countable": bool(t.countable),
+            "is_seed": bool(t.is_seed)}
+
+
+def _rule_out(r: models.UnitRule):
+    return {"id": r.id, "pattern": r.pattern, "scope": r.scope,
+            "unit_type": r.unit_type, "source": r.source, "hits": r.hits or 0}
+
+
+@router.get("/unit-types")
+def unit_types(db: Session = Depends(get_db)):
+    """The unit master and the rules that assign it, for the Masters screen and
+    for the unit picker on a GRN line."""
+    return {"types": [_type_out(t) for t in ut.types(db)],
+            "rules": [_rule_out(r) for r in ut.rules(db)],
+            "default": ut.DEFAULT_CODE}
+
+
+@router.post("/unit-types")
+def add_unit_type(body: UnitTypeIn, db: Session = Depends(get_db)):
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "a unit needs a code")
+    if ut.get(db, code):
+        raise HTTPException(400, f"“{code}” is already a unit type")
+    if body.pieces <= 0:
+        raise HTTPException(400, "one of a unit has to contain at least some of an item")
+    t = models.UnitType(code=code, name=(body.name or code.title()),
+                        pieces=float(body.pieces),
+                        aliases=[str(a).strip().upper() for a in (body.aliases or []) if str(a).strip()],
+                        countable=bool(body.countable),
+                        sort=len(ut.types(db)))
+    db.add(t)
+    db.commit()
+    return _type_out(t)
+
+
+@router.patch("/unit-types/{code}")
+def edit_unit_type(code: str, body: UnitTypeEdit, db: Session = Depends(get_db)):
+    """Change what a unit means. Applies to receipts posted from now on — every
+    product already in stock froze its own factor when it was created, so
+    correcting a typo here can never restate goods sitting on a shelf."""
+    t = ut.get(db, code)
+    if not t:
+        raise HTTPException(404, "no such unit type")
+    d = body.model_dump(exclude_unset=True)
+    if "pieces" in d and d["pieces"] is not None:
+        if float(d["pieces"]) <= 0:
+            raise HTTPException(400, "one of a unit has to contain at least some of an item")
+        t.pieces = float(d["pieces"])
+    if d.get("name"):
+        t.name = d["name"]
+    if d.get("aliases") is not None:
+        t.aliases = [str(a).strip().upper() for a in d["aliases"] if str(a).strip()]
+    if d.get("countable") is not None:
+        t.countable = bool(d["countable"])
+    db.commit()
+    return _type_out(t)
+
+
+@router.delete("/unit-types/{code}")
+def delete_unit_type(code: str, db: Session = Depends(get_db)):
+    """Remove a unit nobody uses. Refused while products are counted in it —
+    deleting it would leave their quantities meaning nothing."""
+    t = ut.get(db, code)
+    if not t:
+        raise HTTPException(404, "no such unit type")
+    used = db.query(models.Product).filter(
+        models.Product.unit_type == t.code).count()
+    if used:
+        raise HTTPException(400, f"{used} product(s) are counted in {t.code} — "
+                                 f"it can't be removed")
+    for r in db.query(models.UnitRule).filter(
+            models.UnitRule.unit_type == t.code).all():
+        db.delete(r)
+    db.delete(t)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/unit-rules")
+def add_unit_rule(body: UnitRuleIn, db: Session = Depends(get_db)):
+    """Say that a wording means a unit — "pillow cover" is a PAIR — so every line
+    that says it is born counted in pairs."""
+    pattern = (body.pattern or "").strip().lower()
+    code = (body.unit_type or "").strip().upper()
+    if not pattern:
+        raise HTTPException(400, "a rule needs some wording to match")
+    if not ut.get(db, code):
+        raise HTTPException(400, f"“{code}” is not a unit type")
+    if body.scope not in ("keyword", "category"):
+        raise HTTPException(400, "scope must be 'keyword' or 'category'")
+    r = db.query(models.UnitRule).filter(
+        models.UnitRule.scope == body.scope,
+        models.UnitRule.pattern == pattern).first()
+    if r:
+        r.unit_type = code
+        r.source = "human"
+    else:
+        r = models.UnitRule(pattern=pattern, scope=body.scope, unit_type=code,
+                            source="human")
+        db.add(r)
+    db.commit()
+    return _rule_out(r)
+
+
+@router.delete("/unit-rules/{rule_id}")
+def delete_unit_rule(rule_id: int, db: Session = Depends(get_db)):
+    r = db.get(models.UnitRule, rule_id)
+    if not r:
+        raise HTTPException(404, "no such rule")
+    db.delete(r)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/unit-preview")
+def unit_preview(qty: float = 1, uom: str = "DOZ", unit_type: str = "",
+                 description: str = "", db: Session = Depends(get_db)):
+    """What a billed quantity becomes — for the GRN screen, and for checking a
+    rule before saving it. "1 DOZ → 12 pcs → 6 PAIR · 6 QR label(s)"."""
+    code = (unit_type or "").strip().upper()
+    if not code:
+        code, _, _ = ut.resolve(db, description=description, uom=uom)
+    return ut.convert(db, qty, uom, code)
 
 
 # ---- keyed dropdown lists (companies, cities, racks, modes, …) ---------------

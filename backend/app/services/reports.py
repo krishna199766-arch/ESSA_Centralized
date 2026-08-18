@@ -249,11 +249,15 @@ def tax_master(db):
 # ===========================================================================
 def transport_report(db, date_from=None, date_to=None):
     """The consignment register: what arrived, on whose lorry, at what freight."""
+    # `freight` is the freight LINE; `charges_total` is the transporter's G. TOTAL
+    # — freight plus L.R. charge, H.C., S.T. charge and whatever else the LR
+    # printed. Both are shown because they answer different questions: what the
+    # haulage cost, and what the lorry is actually paid.
     cols = ["recv_date", "lr_entry_no", "lr_no", "lr_date", "transport", "supplier",
             "agent", "bundles", "boxes", "pieces", "goods_value", "freight",
-            "paid_topay", "received_by", "invoice"]
+            "charges_total", "paid_topay", "received_by", "invoice"]
     lo, hi = date_svc.to_iso(date_from), date_svc.to_iso(date_to)
-    rows, tq, tv, tf = [], 0.0, 0.0, 0.0
+    rows, tq, tv, tf, tc = [], 0.0, 0.0, 0.0, 0.0
     for e in db.query(models.LREntry).order_by(models.LREntry.recv_date,
                                                models.LREntry.id).all():
         d = date_svc.to_iso(e.recv_date)
@@ -264,11 +268,27 @@ def transport_report(db, date_from=None, date_to=None):
                      "transport": e.transport or "", "supplier": e.supplier_name or "",
                      "agent": e.agent or "", "bundles": _f(e.bundle), "boxes": _f(e.boxes),
                      "pieces": _f(e.qty), "goods_value": _r2(e.amount),
-                     "freight": _r2(e.freight_amount), "paid_topay": e.paid_topay or "",
+                     "freight": _r2(e.freight_amount),
+                     # falls back to the freight line for consignments booked
+                     # before the charge block was captured — those rows had no
+                     # other charges recorded, so freight IS their total
+                     "charges_total": _r2(_charges_total(e)),
+                     "paid_topay": e.paid_topay or "",
                      "received_by": e.received_by or "", "invoice": e.inv_no or ""})
         tq += _f(e.qty); tv += _f(e.amount); tf += _f(e.freight_amount)
+        tc += _f(_charges_total(e))
     return _rep(cols, rows, {"consignments": len(rows), "pieces": round(tq, 2),
-                             "goods_value": _r2(tv), "freight": _r2(tf)})
+                             "goods_value": _r2(tv), "freight": _r2(tf),
+                             "charges_total": _r2(tc)})
+
+
+def _charges_total(e):
+    """What this consignment's transporter is owed.
+
+    The printed G. TOTAL when the LR carried one, otherwise the freight line on
+    its own — which is all an entry keyed before the charge block existed can
+    honestly claim."""
+    return e.freight_total if e.freight_total is not None else e.freight_amount
 
 
 def transport_pending_bills(db):
@@ -277,26 +297,39 @@ def transport_pending_bills(db):
     'Owed' means every TOPAY consignment: this system records what freight applies
     to a consignment but has no transport payment ledger, so nothing can be marked
     settled. Read it as freight incurred, not as an outstanding balance."""
-    cols = ["transport", "consignments", "pieces", "goods_value", "freight"]
+    cols = ["transport", "consignments", "pieces", "goods_value", "freight",
+            "charges_total"]
     agg = defaultdict(lambda: {"consignments": 0, "pieces": 0.0,
-                               "goods_value": 0.0, "freight": 0.0})
+                               "goods_value": 0.0, "freight": 0.0,
+                               "charges_total": 0.0})
     for e in db.query(models.LREntry).all():
-        if not (e.freight_applicable and _f(e.freight_amount)):
+        # a consignment whose LR shows only sundry charges and no freight line
+        # still has a bill to pay, so the test is on what is OWED, not on freight
+        owed = _f(_charges_total(e))
+        if not (e.freight_applicable and owed):
             continue
-        if (e.paid_topay or "").upper() not in ("TOPAY", ""):
+        # normalised, because rows saved before the LR router normalised on write
+        # still hold whatever the page printed — "TO PAY" with a space among them
+        from ..routers.lr import normalise_paid_topay
+        if (normalise_paid_topay(e.paid_topay) or "") not in ("TOPAY", ""):
             continue                      # PAID = the supplier settled it
         a = agg[e.transport or "(none)"]
         a["consignments"] += 1
         a["pieces"] += _f(e.qty)
         a["goods_value"] += _f(e.amount)
         a["freight"] += _f(e.freight_amount)
+        a["charges_total"] += owed
     rows = [{"transport": k, **{f: round(v, 2) for f, v in a.items()}}
             for k, a in sorted(agg.items())]
     return _rep(cols, rows,
                 {"transporters": len(rows),
-                 "freight": _r2(sum(r["freight"] for r in rows))},
-                note="TOPAY consignments only. Freight is recorded per consignment; "
-                     "transport payments are not, so nothing here can be marked settled.")
+                 "freight": _r2(sum(r["freight"] for r in rows)),
+                 "charges_total": _r2(sum(r["charges_total"] for r in rows))},
+                note="TOPAY consignments only. `charges_total` is the transporter's "
+                     "G. TOTAL — freight plus L.R. charge, H.C., S.T. and the rest of "
+                     "the charge block — and is what the lorry is paid against. "
+                     "Transport payments are not recorded, so nothing here can be "
+                     "marked settled.")
 
 
 # ===========================================================================

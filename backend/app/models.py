@@ -150,6 +150,18 @@ class Product(Base):
     description = Column(String, nullable=False)
     hsn = Column(String, index=True)
     uom = Column(String, default="PCS")
+    # The unit this product is COUNTED in — its stock figure, its labels and its
+    # sale are all one of these. A pillow cover is a PAIR, so a dozen received is
+    # six of them; a handkerchief is a PCS, so a dozen is twelve. `uom` above is
+    # kept in step and is what screens display.
+    #
+    # `pieces_per_unit` is frozen here at creation rather than read from the
+    # UnitType master every time. The master is editable, and stock already on the
+    # shelf was counted, valued and labelled under the rule in force when it
+    # arrived — re-deriving it later would silently restate the quantity of goods
+    # nobody has touched. See services/unit_types.py.
+    unit_type = Column(String, index=True)             # UnitType.code
+    pieces_per_unit = Column(Float, default=1.0)       # individual items in one unit
     mrp = Column(Float)
     primary_supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
     # maintained by stock movements:
@@ -167,6 +179,16 @@ class Product(Base):
     product_type = Column(String)      # the video's "Type"
     material = Column(String)
     design_no = Column(String)
+    # From the stock master (Attributes Reference.xlsx, "Quanto Report"): the
+    # columns Essa actually keeps against 13,851 stock rows are PRODUCT, BRAND,
+    # COLOUR, PATTERN, STYLE, FIT, SLEEVE, TYPE, MATERIAL, SIZE. Everything but
+    # these three was already here; without them a t-shirt could not record whose
+    # label was on it, whether it was RNS or a straight cut, or whether it had
+    # sleeves — and brand in particular is not decoration, it is identity: an
+    # ESSA t-shirt and a YUVA t-shirt are different stock items.
+    brand = Column(String, index=True)
+    style = Column(String)             # RNS | Straight Cut | Umbrella | Casual | …
+    sleeve = Column(String)            # Full | Half | Sleeveless | 3/4th
     # category master classification, mapped from the invoice description by
     # services/categorize.py (auto-applied only when the match is confident)
     category = Column(String, index=True)          # e.g. LADIES-T-SHIRT
@@ -225,11 +247,35 @@ class PurchaseLine(Base):
     uom = Column(String)
     rate = Column(Float)
     amount = Column(Float)
+    # The size cell exactly as the supplier printed it — often the whole size
+    # mix in one string, "30:2, 32:4, 34:4, 36:2". Kept verbatim rather than
+    # parsed into the column, because it is the document's own words and the
+    # reading of it is offered, never imposed: services/size_split.py turns it
+    # into breakdown rows for a human to accept.
+    size = Column(String)
+    # Retail, per piece. `mrp` is off the invoice — suppliers print it and it was
+    # being dropped here, so an undivided line created a product with no MRP even
+    # though the bill stated one. The other two are not on any bill: nobody prints
+    # your shelf price for you. They are set on the invoice review screen
+    # (MRP − sale discount % = sell price) and applied at post, so a product is
+    # born priced instead of landing in Inventory with nothing on it.
+    #
+    # A breakdown row overrides all three per variant — a shop's price belongs to
+    # "L / Red", not to the bundle the supplier billed — and inherits these when
+    # it leaves them blank. See PurchaseLineSplit.
+    mrp = Column(Float)
+    sale_price = Column(Float)
+    sale_discount_pct = Column(Float)                 # off MRP; see Product.sale_discount_pct
     is_new_product = Column(Boolean, default=False)   # matched vs newly created
     # category master classification chosen at GRN time. Set here, the product is
     # born mapped instead of landing "unmapped" for someone to fix in Inventory;
     # left blank, services/categorize.py still auto-maps from the description.
     category = Column(String)
+    # What one of these IS — piece, pair, dozen. Chosen here, or left to the rule
+    # that reads it off the description, and applied at post: the billed quantity
+    # in `uom` is converted into this unit. `qty` / `uom` / `rate` above stay the
+    # supplier's own figures, so the invoice keeps reconciling either way.
+    unit_type = Column(String)
 
     purchase = relationship("Purchase", back_populates="lines")
     product = relationship("Product")
@@ -390,9 +436,17 @@ class PurchaseLineSplit(Base):
     fit = Column(String)
     product_type = Column(String)
     design_no = Column(String)
+    # the rest of the stock master's attribute set — see Product.brand
+    brand = Column(String)
+    style = Column(String)
+    sleeve = Column(String)
     # not part of identity — a classification the product carries (falls back to
     # the line's category, then to auto-mapping from the description)
     category = Column(String)
+    # nor is this: a variant is the same KIND of thing as its line, so it inherits
+    # the line's unit type unless someone says otherwise (a bundle of assorted
+    # goods where one row is sold in pairs and another by the piece)
+    unit_type = Column(String)
     qty = Column(Float, default=0.0)
     rate = Column(Float)                 # unit cost (defaults to the line's rate)
     mrp = Column(Float)                  # retail prices are per variant, not per bundle
@@ -410,8 +464,9 @@ class PurchaseLineSplit(Base):
     @property
     def variant_label(self):
         """The attributes as one readable string — "L · Red · Cotton"."""
-        bits = [self.size, self.color, self.material, self.pattern, self.fit,
-                self.product_type, self.design_no]
+        # brand first: on a rack it is what the eye reaches for before the size
+        bits = [self.brand, self.size, self.color, self.material, self.pattern,
+                self.fit, self.style, self.sleeve, self.product_type, self.design_no]
         return " · ".join(str(b) for b in bits if b)
 
     @property
@@ -775,6 +830,108 @@ class CategoryAlias(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
 
+class UnitType(Base):
+    """A unit of handling, and how many pieces are in one of it.
+
+    Suppliers bill in dozens; Essa stocks, labels and sells in whatever the item
+    actually is. A handkerchief is a piece, a pillow cover is a pair, a towel is a
+    piece — and a dozen of each is a different number of things to put a QR on.
+    One table answers both halves of that, because they are the same question
+    asked twice:
+
+      * **the billed unit** — DOZ on the invoice means `pieces` = 12,
+      * **the stock unit** — PAIR for a pillow cover means `pieces` = 2.
+
+    So 1 DOZ of pillow covers is 12 pieces is 6 pairs, and 6 is the number of
+    labels, the number of stock units and the number the shop sells. The
+    arithmetic is nothing more than pieces-in ÷ pieces-per-stock-unit, which is
+    exactly why both ends live in one master: add "HALF DOZEN = 6" once and it
+    works as a purchase unit and as a selling unit without a second thought.
+
+    `aliases` is what makes it survive real invoices, where the same unit is
+    printed DOZ, DZN, DZ, Doz. and DOZEN by five suppliers. `pieces` is a float
+    only so an odd trade unit (a "set" of 1.5?) is expressible; every seeded value
+    is a whole number.
+
+    Editing `pieces` here does NOT re-value existing stock: a product freezes its
+    own factor at creation (Product.pieces_per_unit), because the goods on the
+    shelf were counted under the rule that was in force when they arrived.
+    """
+    __tablename__ = "unit_types"
+    id = Column(Integer, primary_key=True)
+    code = Column(String, unique=True, index=True)    # PCS | PAIR | DOZEN | SET | BOX
+    name = Column(String)                             # "Pair"
+    pieces = Column(Float, default=1.0)               # individual items in one of these
+    aliases = Column(JSON, default=list)              # ["DOZ", "DZN", "DZ"]
+    countable = Column(Boolean, default=True)         # False for MTR/KG — no pieces to tag
+    is_seed = Column(Boolean, default=False)          # shipped with the system
+    sort = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+
+    @property
+    def pieces_per(self):
+        p = float(self.pieces or 0)
+        return p if p > 0 else 1.0
+
+
+class UnitRule(Base):
+    """Which unit type a product is, decided from what it is called.
+
+    "Make Unit Type configurable per product" cannot mean somebody choosing it on
+    every GRN line forever — the same twenty products come in every week, and a
+    setting that must be re-entered is a setting that will be got wrong. So the
+    rule is stated once against the wording ("pillow cover" → PAIR) and every line
+    that says pillow cover is born a pair.
+
+    Matched on a lower-cased substring of the description (or against a category
+    master name when `scope` is "category"), longest pattern first, so
+    "pillow cover" beats a broader "cover". A choice made by hand on a GRN line is
+    remembered here the same way category corrections are — see
+    services/unit_types.learn — which is what stops the list going stale.
+    """
+    __tablename__ = "unit_rules"
+    id = Column(Integer, primary_key=True)
+    pattern = Column(String, index=True)              # "pillow cover" (lower case)
+    scope = Column(String, default="keyword")         # keyword | category
+    unit_type = Column(String, index=True)            # UnitType.code
+    source = Column(String, default="seed")           # seed | human
+    hits = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
+class MasterRecord(Base):
+    """One row of any master, stored against its definition.
+
+    Seventeen master screens would otherwise be seventeen tables that differ only
+    in their column names, and a field added to one of them would mean a
+    migration before anyone could type it. The shape of each master lives in
+    services/master_defs.py; the values live here, in `data`.
+
+    What is NOT in `data` is deliberate: `code` and `name` are lifted out into
+    real columns because they are the two things every other master looks a
+    record up by — a dropdown sourced from `master:tax` needs to list and search
+    them without opening a JSON blob per row. Everything else is the definition's
+    business.
+
+    This backs the masters that had no home. Supplier, Agent and Transport keep
+    their own tables (they are created automatically from documents and are wired
+    into the LR and invoice flows); their extra ERP fields are stored here
+    against the same `code`, so neither copy has to know about the other.
+    """
+    __tablename__ = "master_records"
+    id = Column(Integer, primary_key=True)
+    master = Column(String, index=True)          # master_defs key: "tax", "brand", …
+    code = Column(String, index=True)            # the master's own code, when it has one
+    name = Column(String, index=True)            # what a dropdown shows
+    data = Column(JSON, default=dict)            # every other field, by key
+    grids = Column(JSON, default=dict)           # {grid_key: [row, …]} for child tables
+    matrix = Column(JSON, default=dict)          # {row: {column: bool}} — Product's switchboard
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
 class Agent(Base):
     __tablename__ = "agents"
     id = Column(Integer, primary_key=True)
@@ -833,7 +990,23 @@ class LREntry(Base):
     # yet quoted vs quoted at nil).
     paid_topay = Column(String)          # TOPAY | NO | PAID
     freight_applicable = Column(Boolean, default=False)
-    freight_amount = Column(Float)
+    freight_amount = Column(Float)       # the FREIGHT line alone
+    # What the transporter is actually owed — the "G. TOTAL" printed at the foot
+    # of an LR copy. Freight is only the first line of that bill: a Golden
+    # Transport LR reads Freight 425, H.C. 10, S.T. Charge 20, G. TOTAL 455, and
+    # for a long time this system recorded the 425 and dropped the 30. That made
+    # every transport payment report short by whatever the sundries came to, with
+    # nothing on screen to say a number was missing.
+    #
+    # Kept as its own column rather than derived, because the printed total is
+    # the document: if the charges do not add up to it, the LR is still what the
+    # lorry will be paid against. `freight_charges` holds the named lines that
+    # made it up — {"H.C.": 10, "S.T. Charge": 20} — as a map rather than a column
+    # apiece, because every transporter prints a different set of them and eight
+    # mostly-empty columns is exactly the trap this table was cleaned of once
+    # before.
+    freight_total = Column(Float)
+    freight_charges = Column(JSON, default=dict)
     # Columns dropped after they proved to be dead weight in this warehouse — no
     # consignment ever carried one: company, bundle_rack, section, remark,
     # due_date, pay_mode, package_slip_no, slip_date, actual_weight,
@@ -850,6 +1023,16 @@ class LREntry(Base):
     # Freight settlement is recorded as mode + amount only (paid_topay,
     # freight_amount). `paid_by`, `cash_receiver_mobile` and `cash_cheque` columns
     # may still exist in older databases; they are no longer mapped or read.
+    # --- what the page was written in, when it wasn't English ---
+    # A Tamil register is read in Tamil and stored in English, because that is
+    # what every search box, master and report downstream is in. The reading is
+    # not allowed to be the only copy though: `original_values` is {field: the
+    # text on the page} for each value that changed, so the row can always show
+    # what the clerk actually wrote — which is the record, and the thing anyone
+    # disputing a reading will ask for. Numbers never appear here; they are never
+    # translated. See services/translate.py.
+    source_language = Column(String)          # "Tamil" — None when it was English
+    original_values = Column(JSON, default=dict)
     # --- invoice linkage (cross-fill): set when a matching invoice is uploaded ---
     invoice_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
     matched = Column(Boolean, default=False, index=True)   # an invoice has been linked
@@ -880,6 +1063,61 @@ class LRAttachment(Base):
     entry = relationship("LREntry", back_populates="attachments")
 
 
+class LabelTemplate(Base):
+    """The DESIGN of a label — where each field sits on the sticker, never the
+    values that will be printed in those places.
+
+    This is the whole reason label design is its own module rather than a corner
+    of Inventory. A product's data belongs to the GRN that created it; how that
+    data is laid out on a 50×35mm sticker is a decision made once by a manager
+    and then used by the warehouse for months. Storing a product's name IN a
+    template would mean a template per product; storing the *reference*
+    ("product_name goes at 4mm/9mm, 8pt, bold") means one template prints the
+    whole warehouse, and a product renamed on its GRN prints correctly the next
+    day without anyone reopening the designer.
+
+    `elements` is the design: a list of
+
+        {"id": "e3", "field": "size", "x": 4, "y": 18, "w": 22, "h": 5,
+         "size": 8, "bold": true, "align": "left", "prefix": "Size: ",
+         "locked": false, "visible": true, "z": 3}
+
+    with x/y/w/h in MILLIMETRES from the label's top-left corner, because that is
+    what the printer works in and what the person holding a ruler against the
+    output can check. Field keys are the catalogue in services/label_designer.py;
+    an element naming a field that catalogue no longer has renders as blank
+    rather than breaking the sheet, so a template outlives a renamed attribute.
+
+    `locked` is per element and is enforced in the UI only — it stops a warehouse
+    user nudging the QR off the sticker by accident, which is a usability guard,
+    not a permission. Deleting or moving a locked element is still possible after
+    unlocking it, which is the point.
+
+    One template at a time may be `is_default`; that is the one the printing
+    screen opens on. Setting it is a router operation because it has to clear the
+    previous default in the same transaction — see routers/labels.set_default.
+    """
+    __tablename__ = "label_templates"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False, index=True)
+    description = Column(String)
+    # the sticker itself. Millimetres, and floats — 50 × 35 is common, so is 38.1.
+    width_mm = Column(Float, default=50.0)
+    height_mm = Column(Float, default=35.0)
+    padding_mm = Column(Float, default=2.0)
+    border = Column(Boolean, default=True)
+    #: what this template prints one of: "product" (one label per SKU) or
+    #: "unit" (one label per physical piece, carrying that piece's own code)
+    target = Column(String, default="product", index=True)
+    font = Column(String, default="Arial, Helvetica, sans-serif")
+    elements = Column(JSON, default=list)
+    is_default = Column(Boolean, default=False, index=True)
+    active = Column(Boolean, default=True, index=True)
+    created_by = Column(String)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
 class MasterOption(Base):
     """One entry in a small dropdown list, keyed by `kind`.
 
@@ -899,3 +1137,140 @@ class MasterOption(Base):
     value = Column(String, index=True)
     sort = Column(Integer, default=0)    # seeded lists keep their given order
     created_at = Column(DateTime, default=now)
+
+
+# ============================================================================
+#  Notifications
+# ============================================================================
+class NotificationState(Base):
+    """What has been READ of a standing queue — not a log of events.
+
+    Nearly everything worth telling someone about in this system is a condition
+    rather than an occurrence: "four GRNs are in draft", "eleven lines have been
+    dead for six months". Written as an event log it would file the same four
+    drafts again on every check and the list would be unreadable inside a day.
+
+    So the notices themselves are derived live (services/notifications.py) and
+    only the acknowledgement is stored: which key was read, and at what COUNT. A
+    queue read at four drafts goes quiet, and speaks up again at five — because
+    what someone acknowledged was four, and a fifth is news. It never re-alerts
+    for a queue that shrank; that is the direction nobody needs chasing about.
+
+    `muted` is the stronger form, for a queue a particular warehouse simply does
+    not work that way — it stays out of the list until it is unmuted, whatever
+    the count does."""
+    __tablename__ = "notification_states"
+    id = Column(Integer, primary_key=True)
+    key = Column(String, unique=True, index=True)   # see notifications.RULES
+    first_seen = Column(DateTime, default=now)      # since when this has been open
+    read_level = Column(Float, default=0.0)         # the count acknowledged
+    read_at = Column(DateTime, nullable=True)
+    read_by = Column(String)
+    muted = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
+class NotificationRecipient(Base):
+    """Who should be told, and on what number.
+
+    Delivery today is in-app: the bell on the desktop and the Notifications tab
+    on the warehouse phone. The number is held against the person so a channel
+    that sends to a phone can be switched on later without anybody re-collecting
+    the roster — and so the list answers "who is meant to be watching this",
+    which is a question the warehouse has an answer to and the software did not."""
+    __tablename__ = "notification_recipients"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    mobile = Column(String)                 # as dialled, +91… or ten digits
+    role = Column(String)                   # what they watch — free text
+    #: which levels reach them: ["critical", "warn", "info"]
+    levels = Column(JSON, default=list)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now)
+
+
+# ============================================================================
+#  Dead stock clearance  (Inventory → Dead Stock & Clearance)
+# ============================================================================
+class ClearanceCampaign(Base):
+    """A run at clearing slow-moving stock: which lines, at what discount, over
+    which dates.
+
+    It is a PLAN over stock that already exists, not stock of its own. There is
+    no quantity held here, no ledger and no movement — a line points at the
+    product it came from, and when that product sells at the till the campaign's
+    realisation moves because the sale moved. Anything else would be a second
+    stock record to keep in step with the first, and the first is the one the
+    business runs on (see services/dead_stock.campaign_lines).
+
+    The dates are what makes the reading possible: sold-and-realised are the
+    till's own figures for these products BETWEEN starts_on and ends_on, so two
+    campaigns over the same SKU in different months each own their own result."""
+    __tablename__ = "clearance_campaigns"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    status = Column(String, default="draft", index=True)   # draft | active | closed
+    starts_on = Column(String)                             # ISO YYYY-MM-DD
+    ends_on = Column(String)
+    note = Column(Text)
+    created_by = Column(String)
+    created_at = Column(DateTime, default=now)
+    closed_at = Column(DateTime, nullable=True)
+
+    lines = relationship("ClearanceLine", back_populates="campaign",
+                         cascade="all, delete-orphan", order_by="ClearanceLine.id")
+
+
+class ClearanceLine(Base):
+    """One product in a campaign, at the price the campaign was approved on.
+
+    The age, band, discount and price are frozen copies of what the register
+    showed when the line was added. Read live instead, every line would re-price
+    itself quietly as the stock went on ageing, and the campaign could no longer
+    say what it had promised — or be judged against it afterwards."""
+    __tablename__ = "clearance_lines"
+    id = Column(Integer, primary_key=True)
+    campaign_id = Column(Integer, ForeignKey("clearance_campaigns.id"), index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True)
+    qty = Column(Float)                    # what was put into the campaign
+    days_idle = Column(Integer)
+    bucket = Column(String)                # the age band, as labelled at the time
+    discount_pct = Column(Float)
+    cost_price = Column(Float)             # weighted-average cost, for the margin
+    mrp = Column(Float)
+    clearance_price = Column(Float)
+    expected_realisation = Column(Float)
+    action = Column(String, default="Review")   # see dead_stock.ACTIONS
+    note = Column(String)
+    added_at = Column(DateTime, default=now)
+
+    campaign = relationship("ClearanceCampaign", back_populates="lines")
+    product = relationship("Product")
+
+
+class User(Base):
+    """A person who can sign in, on the desktop app or the phone.
+
+    Three roles, ranked — see services/users.ROLE_RANK. `user` runs the floor
+    (receive, count, scan, print), `admin` also owns the setup the floor works
+    against (masters, suppliers, label design) and the money screens, and
+    `superadmin` additionally owns this table and the server's own settings.
+
+    The password is never stored. `password_hash` holds a PBKDF2 digest and its
+    salt; `token_seed` is folded into every token this user is issued, so
+    changing a password (or a super admin resetting one) invalidates the
+    sessions already out there instead of leaving them valid until they expire.
+    """
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="user")
+    full_name = Column(String)
+    active = Column(Boolean, default=True)
+    token_seed = Column(String)
+    # Kept so a super admin can see who has never signed in — a created-and-
+    # forgotten account is the one most worth deactivating.
+    last_login_at = Column(DateTime)
+    created_at = Column(DateTime, default=now)
+    created_by = Column(String)
