@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+from sqlalchemy import text
+
 from .database import Base, engine
 from . import models  # noqa: F401  (register tables)
 from .routers import (documents, suppliers, purchases, inventory, outward,
@@ -68,6 +70,10 @@ def _database_status(url: str) -> dict:
         "persistent": not ephemeral,
         "error": STARTUP_ERROR,
         "warning": warning,
+        # What the last start had to add. Normally empty; non-empty right after
+        # a deploy that introduced a column, and the place to look when a query
+        # complains about a column that the models plainly declare.
+        "columns_added": SCHEMA_ADDED,
         # Only shown when there is a problem: when it is working, the list of
         # variables that were not needed is noise on an endpoint the app polls.
         "checked": None if not ephemeral else database_url_report(),
@@ -84,6 +90,53 @@ try:
     Base.metadata.create_all(bind=engine)
 except Exception as exc:                       # noqa: BLE001 — reported, not raised
     _record_startup_failure(exc, "creating the schema")
+
+
+def _add_missing_columns():
+    """Add any column the models declare and the database has not got.
+
+    `create_all` creates missing TABLES and never touches an existing one, so a
+    column added to a model after the database was built simply is not there —
+    and the first insert fails with "column X does not exist" on a table that
+    plainly does. On SQLite that was handled by the hand-written ALTERs below;
+    on Postgres nothing handled it, because _migrate returns early there. A new
+    column therefore worked on the warehouse PC and broke the deployment, which
+    is the worst possible split.
+
+    Driven from the models rather than from a list, so the next column added
+    needs no entry anywhere. ADD COLUMN is standard SQL and the type is compiled
+    for whichever dialect is connected, so this is not a second SQLite-shaped
+    migration.
+
+    Deliberately narrow: it only ADDS. Dropping, renaming and retyping all
+    depend on what the existing data means, and guessing at that unattended is
+    how a migration loses a column somebody needed. Those stay hand-written.
+    """
+    from sqlalchemy import inspect
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    added = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in tables:
+            continue                       # create_all just made it, in full
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            # A NOT NULL column with no default cannot be added to a table that
+            # already has rows — there is no value to give them. Left alone and
+            # reported rather than guessed at.
+            if not col.nullable and col.server_default is None and col.default is None:
+                added.append(f"!{table.name}.{col.name} (not-null, needs a manual migration)")
+                continue
+            typ = col.type.compile(engine.dialect)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {typ}'))
+                added.append(f"{table.name}.{col.name}")
+            except Exception as exc:       # noqa: BLE001 — reported, not raised
+                added.append(f"!{table.name}.{col.name} ({type(exc).__name__})")
+    return added
 
 
 def _migrate():
@@ -260,7 +313,11 @@ def _migrate():
                         f"ALTER TABLE purchase_return_lines ADD COLUMN {name} {typ}"))
 
 
+SCHEMA_ADDED = []
 try:
+    # Dialect-agnostic first: this is what keeps a column added to a model from
+    # working locally and 500-ing on the deployment.
+    SCHEMA_ADDED = _add_missing_columns()
     _migrate()
 except Exception as exc:                       # noqa: BLE001 — reported, not raised
     _record_startup_failure(exc, "migrating the schema")
