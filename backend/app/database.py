@@ -45,6 +45,23 @@ else:
     engine = create_engine(DB_URL, poolclass=NullPool, pool_pre_ping=True,
                            connect_args={"connect_timeout": 10})
 
+if IS_SQLITE:
+    # SQLite ships with foreign keys OFF and must be told, per connection.
+    #
+    # Left off, a delete that orphans rows succeeds here and fails on Postgres —
+    # which is the worst way for the two to differ, because the database that
+    # would have objected is the one nobody develops against. Deleting a
+    # document referenced by an LR row did exactly that: fine on the warehouse
+    # PC for as long as it has existed, a 500 on the deployment the first time
+    # anybody tried it.
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _enforce_foreign_keys(dbapi_connection, _record):
+        cur = dbapi_connection.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

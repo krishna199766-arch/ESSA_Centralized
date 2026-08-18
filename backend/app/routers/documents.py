@@ -112,9 +112,8 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
     if posted:
         raise HTTPException(400, "This document's GRN is already posted to inventory. "
                                  "Use 'Clear all' to reset everything.")
-    for p in db.query(models.Purchase).filter(models.Purchase.document_id == doc_id).all():
-        db.delete(p)          # cascades purchase_lines
-    db.delete(doc)            # cascades extractions + line_items
+    _detach_document(db, doc)   # FKs from profiles, LR rows and GRNs
+    db.delete(doc)              # cascades extractions + line_items
     db.commit()
     return {"ok": True, "deleted_document": doc_id}
 
@@ -228,6 +227,46 @@ async def upload_and_extract(file: List[UploadFile] = File(...),
     return _extract_into(doc, db)
 
 
+def _detach_document(db: Session, doc: models.Document, move_to=None) -> None:
+    """Clear every reference to this document before it is deleted.
+
+    Six tables carry a foreign key to documents.id. SQLite does not enforce
+    them — `PRAGMA foreign_keys` is off unless switched on — so deleting a
+    referenced document has always worked on the warehouse PC and has always
+    been an integrity violation. Postgres enforces them, so the same delete
+    fails there with a 500 and no explanation. That is why this went unnoticed:
+    the only database that would have complained was the one nobody ran.
+
+    `move_to` re-points the references instead of clearing them, which is what a
+    merge wants — the consignment linked to the absorbed half is linked to the
+    invoice it is now part of, rather than quietly unlinked.
+    """
+    new_id = move_to.id if move_to is not None else None
+
+    # A trained format cites the document it was learned from. Keep the profile
+    # and forget the citation: the training is in the profile, not in the page.
+    db.query(models.SupplierProfile).filter(
+        models.SupplierProfile.trained_from_document_id == doc.id
+    ).update({"trained_from_document_id": new_id}, synchronize_session=False)
+
+    # The LR register points at documents twice: the page it was read FROM, and
+    # the invoice it was matched TO.
+    db.query(models.LREntry).filter(
+        models.LREntry.document_id == doc.id
+    ).update({"document_id": new_id}, synchronize_session=False)
+    db.query(models.LREntry).filter(
+        models.LREntry.invoice_document_id == doc.id
+    ).update({"invoice_document_id": new_id}, synchronize_session=False)
+
+    # A GRN is built FROM a reading, so it does not survive one being replaced.
+    # Moved rather than deleted when merging: the receipt was against this bill.
+    for p in db.query(models.Purchase).filter(models.Purchase.document_id == doc.id).all():
+        if move_to is not None:
+            p.document_id = new_id
+        else:
+            db.delete(p)                    # cascades purchase_lines
+
+
 class MergeIn(BaseModel):
     """The other half of this invoice — the document to fold in and remove."""
     from_id: int
@@ -280,8 +319,7 @@ def merge_documents(doc_id: int, body: MergeIn, db: Session = Depends(get_db)):
     target.status = "uploaded"
     for ex in list(target.extractions):
         db.delete(ex)                       # the old reading was of half a bill
-    for p in db.query(models.Purchase).filter(models.Purchase.document_id == other.id).all():
-        db.delete(p)
+    _detach_document(db, other, move_to=target)
     db.delete(other)
     db.commit()                             # the merge itself is now permanent
     db.refresh(target)
