@@ -23,6 +23,13 @@ jobs:
       - name: Check the scanner shim still matches the page
         run: node android/tools/shim_test.mjs
 
+      # The setup screen decides http-and-:8000 or https-and-:443 from the shape
+      # of what is typed, and the two want opposite answers. Getting it backwards
+      # reports a working server as unreachable, which reads as a server fault —
+      # so it is checked here rather than discovered on a phone.
+      - name: Check the server-address parsing
+        run: node android/tools/normalise_test.mjs
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
