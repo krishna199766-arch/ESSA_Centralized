@@ -92,6 +92,9 @@ export const api = {
     .then(r => { if (!r.ok) throw Object.assign(new Error(String(r.status)), { status: r.status }); return r.json() }),
   listDocuments: () => fetch('/api/documents').then(J),
   getDocument: (id) => fetch(`/api/documents/${id}`).then(J),
+  // Read an already-uploaded document again — for one whose reading ran out of
+  // time and left it with no extraction attached.
+  reExtract: (id) => fetch(`/api/documents/${id}/extract`, { method: 'POST' }).then(J),
   deleteDocument: (id) => fetch(`/api/documents/${id}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('del'), { detail: j.detail }); return j }),
   clearAllDocuments: (wipeMasters) => fetch('/api/documents/clear-all' + (wipeMasters ? '?wipe_masters=true' : ''), { method: 'DELETE' }).then(J),

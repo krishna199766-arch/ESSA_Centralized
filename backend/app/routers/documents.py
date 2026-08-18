@@ -118,43 +118,17 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "deleted_document": doc_id}
 
 
-@router.post("/upload")
-async def upload_and_extract(file: List[UploadFile] = File(...),
-                             db: Session = Depends(get_db)):
-    """One invoice, one or more pages.
+def _extract_into(doc: models.Document, db: Session) -> dict:
+    """Read this document's stored pages and attach an Extraction to it.
 
-    `file` is repeated rather than a second `files` field, so the same endpoint
-    serves a single photograph and a two-page bill and nothing had to be
-    versioned. A supplier's sixty-line invoice prints as "Tax Invoice" and "Tax
-    Invoice(Page 2)"; uploaded separately they became two documents, each with
-    half the lines and one of them with no totals at all, and the operator was
-    left to key the second half into the first by hand.
+    Split out of the upload so it can be run again on a document that already
+    exists. Reading a dense two-page invoice can take minutes, and a request
+    that runs out of time leaves the pages stored and the document with nothing
+    attached — re-uploading to get past that would store the same images a
+    second time and add another row to the list. The pages are already there;
+    only the reading needs repeating.
     """
-    if not file:
-        raise HTTPException(400, "no file uploaded")
-
-    raws = [await f.read() for f in file]
-    # Hashed over every page together: the same two-page invoice uploaded twice
-    # is one document, and page 1 alone is a different document from page 1 + 2.
-    content_hash = hashlib.sha256(b"".join(raws)).hexdigest()
-
-    refs = []
-    for i, (f, raw) in enumerate(zip(file, raws)):
-        ext = os.path.splitext(f.filename or "")[1] or ".bin"
-        page_hash = hashlib.sha256(raw).hexdigest()
-        refs.append(storage.save(raw, f"{page_hash[:16]}{ext}"))
-
-    doc = models.Document(filename=file[0].filename,
-                          stored_path=refs[0], pages=refs,
-                          content_hash=content_hash, mime=file[0].content_type,
-                          status="uploaded")
-    db.add(doc)
-    db.commit()
-    db.refresh(doc)
-
-    # The extraction engine opens paths, so give it real ones. On a laptop those
-    # are the stored files themselves; where storage is remote these are scratch
-    # copies that live as long as this request and no longer.
+    refs = doc.pages or [doc.stored_path]
     locals_ = [storage.materialise(r) or r for r in refs]
     local = locals_[0]
 
@@ -203,6 +177,81 @@ async def upload_and_extract(file: List[UploadFile] = File(...),
 
     # cross-fill: if this invoice matches an existing LR row, fill its blanks
     lr_filled = lr_link.fill_lr_from_invoice(db, ex.data, doc.id)
+
+    return {
+        "document": _doc_out(doc),
+        "extraction": {
+            "id": ex.id, "provider": ex.provider, "confidence": ex.confidence,
+            "warnings": ex.warnings, "field_flags": ex.field_flags, "data": ex.data,
+        },
+        "supplier_recognised": bool(supplier),
+        "profile_used": bool(profile),
+        "lr_filled": lr_filled,
+    }
+
+
+@router.post("/upload")
+async def upload_and_extract(file: List[UploadFile] = File(...),
+                             db: Session = Depends(get_db)):
+    """One invoice, one or more pages.
+
+    `file` is repeated rather than a second `files` field, so the same endpoint
+    serves a single photograph and a two-page bill and nothing had to be
+    versioned. A supplier's sixty-line invoice prints as "Tax Invoice" and "Tax
+    Invoice(Page 2)"; uploaded separately they became two documents, each with
+    half the lines and one of them with no totals at all, and the operator was
+    left to key the second half into the first by hand.
+    """
+    if not file:
+        raise HTTPException(400, "no file uploaded")
+
+    raws = [await f.read() for f in file]
+    # Hashed over every page together: the same two-page invoice uploaded twice
+    # is one document, and page 1 alone is a different document from page 1 + 2.
+    content_hash = hashlib.sha256(b"".join(raws)).hexdigest()
+
+    refs = []
+    for i, (f, raw) in enumerate(zip(file, raws)):
+        ext = os.path.splitext(f.filename or "")[1] or ".bin"
+        page_hash = hashlib.sha256(raw).hexdigest()
+        refs.append(storage.save(raw, f"{page_hash[:16]}{ext}"))
+
+    doc = models.Document(filename=file[0].filename,
+                          stored_path=refs[0], pages=refs,
+                          content_hash=content_hash, mime=file[0].content_type,
+                          status="uploaded")
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    return _extract_into(doc, db)
+
+
+@router.post("/{doc_id}/extract")
+def re_extract(doc_id: int, db: Session = Depends(get_db)):
+    """Read an already-uploaded document again.
+
+    What this is for: an upload whose reading ran out of time. The pages are
+    stored and the document exists, but nothing is attached to it — it sits in
+    the list as UPLOADED with no supplier and no total, and the only way past it
+    was to upload the same photographs again and leave the first behind.
+
+    Any existing extraction is replaced rather than added to, so a document that
+    has been read twice does not accumulate versions of the same answer. A
+    document already posted to inventory is refused: its GRN was built from the
+    reading, and replacing it underneath would leave the two disagreeing.
+    """
+    doc = db.get(models.Document, doc_id)
+    if not doc:
+        raise HTTPException(404, "document not found")
+    if doc.status == "posted":
+        raise HTTPException(400, "This document is already posted to inventory — "
+                                 "re-reading it would leave its GRN disagreeing with it.")
+    for ex in list(doc.extractions):
+        db.delete(ex)
+    db.commit()
+    db.refresh(doc)
+    return _extract_into(doc, db)
 
     return {
         "document": _doc_out(doc),

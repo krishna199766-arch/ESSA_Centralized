@@ -891,18 +891,55 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
   // standing preference about how they work, not a per-invoice decision.
   const [imgOpen, toggleImg] = useMinimized('rev.image', true)
 
+  // A document with no extraction is not a document still loading. Reading a
+  // dense two-page invoice can outlast the request that started it, and what is
+  // left behind is a stored, readable document with nothing attached — which
+  // showed "Loading…" for ever, because the screen had no way to tell the two
+  // apart.
+  const [unread, setUnread] = useState(false)
+  const [reading, setReading] = useState(false)
+
   useEffect(() => {
     if (!docId) return
-    setTab('party')
+    setTab('party'); setUnread(false)
     api.getDocument(docId).then((d) => {
       setDoc(d.document)
+      setUnread(!d.extraction)
       setData(structuredClone(d.extraction?.data || {}))
       setFlags(d.extraction?.field_flags || {})
       setWarnings(d.extraction?.warnings || [])
     })
   }, [docId])
 
+  const readAgain = async () => {
+    setReading(true)
+    try {
+      const d = await api.reExtract(docId)
+      setDoc(d.document); setUnread(false)
+      setData(structuredClone(d.extraction?.data || {}))
+      setFlags(d.extraction?.field_flags || {})
+      setWarnings(d.extraction?.warnings || [])
+      onSaved && onSaved()
+      toast(`Read ${d.extraction?.data?.line_items?.length || 0} lines`, 'ok')
+    } catch (e) {
+      toast(e.detail || 'Could not read it — try again', 'err')
+    }
+    setReading(false)
+  }
+
   if (!docId) return <div className="empty">Select a document from the left, or upload a new invoice to extract it.</div>
+  if (unread) return (
+    <div className="empty" style={{ margin: 'auto', maxWidth: 460, lineHeight: 1.7 }}>
+      <div style={{ fontSize: 26, marginBottom: 6 }}>📄</div>
+      <b>{doc?.filename || 'This document'}</b> was uploaded but never read.<br />
+      Reading a long invoice can take longer than the upload was given.
+      The pages are stored, so it can be read now without uploading them again.
+      <div style={{ marginTop: 14 }}>
+        <button className="btn primary" disabled={reading} onClick={readAgain}>
+          {reading ? 'Reading — this can take a minute…' : 'Read it now'}</button>
+      </div>
+    </div>
+  )
   if (!data) return <div className="empty">Loading…</div>
 
   const setPath = (obj, path, val) => {
