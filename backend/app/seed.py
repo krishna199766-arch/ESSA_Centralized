@@ -20,6 +20,7 @@ from app.database import Base, engine, SessionLocal
 from app import models
 from app.config import GROUND_TRUTH_DIR, SAMPLE_DIR, UPLOAD_DIR
 from app.extraction import engine as ext_engine
+from app.services import storage
 
 
 def load_ground_truth():
@@ -60,22 +61,20 @@ def ingest_sample(db, gt):
     if db.query(models.Document).filter(models.Document.content_hash == content_hash).first():
         print(f"  = already ingested: {src}")
         return
-    stored = os.path.join(UPLOAD_DIR, f"{content_hash[:16]}{os.path.splitext(src)[1]}")
     # write bytes (don't shutil.copy — that would inherit read-only perms from
     # the packaged sample and later block re-uploads of the same image)
-    with open(stored, "wb") as f:
-        f.write(raw)
-    os.chmod(stored, 0o644)
+    stored = storage.save(raw, f"{content_hash[:16]}{os.path.splitext(src)[1]}")
 
     doc = models.Document(filename=src, stored_path=stored, content_hash=content_hash,
                           mime="image/jpeg", status="uploaded")
     db.add(doc)
     db.flush()
 
-    ocr_text = ext_engine._ocr_text(stored)
+    local = storage.materialise(stored) or stored
+    ocr_text = ext_engine._ocr_text(local)
     suppliers = db.query(models.Supplier).all()
     supplier, _ = ext_engine.detect_supplier(ocr_text, suppliers)
-    result = ext_engine.run_extraction(stored, profile=None, ocr_text=ocr_text)
+    result = ext_engine.run_extraction(local, profile=None, ocr_text=ocr_text)
     if not supplier:
         gstin = (result["data"].get("supplier") or {}).get("gstin")
         supplier = next((s for s in suppliers if s.gstin == gstin), None)

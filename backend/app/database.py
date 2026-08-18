@@ -1,9 +1,50 @@
+"""
+The engine and session factory.
+
+SQLite on a laptop, Postgres when deployed. The difference matters more than a
+URL swap, because a serverless deployment runs many short-lived instances rather
+than one long-lived process, and the pooling that is right for one is wrong for
+the other.
+"""
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import NullPool
+
 from .config import DATABASE_URL
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+
+def _normalise(url: str) -> str:
+    """`postgres://` is what most dashboards hand out and what SQLAlchemy has
+    refused since 1.4 — it wants `postgresql://`. Rewriting it here means the
+    connection string can be pasted from the provider without editing, which is
+    where this otherwise goes wrong once per deployment."""
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://"):]
+    return url
+
+
+DB_URL = _normalise(DATABASE_URL)
+IS_SQLITE = DB_URL.startswith("sqlite")
+
+if IS_SQLITE:
+    # One process, many threads: the connection is shared across them and
+    # SQLite's own check would refuse that.
+    engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+else:
+    # NullPool, deliberately. A pool assumes the process outlives the request;
+    # a serverless instance does not, so pooled connections are abandoned rather
+    # than reused and the database runs out of slots while most of them sit idle
+    # in instances that will never be called again. Connect per request, hand it
+    # back at the end, and let the provider's own pooler do the pooling — which
+    # is what its pooled connection string is for.
+    #
+    # pre_ping because the other end may have closed a connection that this side
+    # still believes in — the first query then fails on a fault nobody caused.
+    engine = create_engine(DB_URL, poolclass=NullPool, pool_pre_ping=True,
+                           connect_args={"connect_timeout": 10})
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

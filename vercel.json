@@ -3,12 +3,19 @@
   "buildCommand": "cd frontend && npm ci && npm run build",
   "outputDirectory": "frontend/dist",
   "framework": null,
+  "functions": {
+    "api/index.py": {
+      "runtime": "@vercel/python@4.3.1",
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://REPLACE-ME.onrender.com/api/:path*" },
-    { "source": "/pos", "destination": "https://REPLACE-ME.onrender.com/pos" },
-    { "source": "/pos/:path*", "destination": "https://REPLACE-ME.onrender.com/pos/:path*" },
-    { "source": "/m", "destination": "https://REPLACE-ME.onrender.com/m" },
-    { "source": "/m/:path*", "destination": "https://REPLACE-ME.onrender.com/m/:path*" },
+    { "source": "/api/:path*", "destination": "/api/index" },
+    { "source": "/m", "destination": "/api/index" },
+    { "source": "/m/:path*", "destination": "/api/index" },
+    { "source": "/pos", "destination": "/api/index" },
+    { "source": "/pos/:path*", "destination": "/api/index" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "headers": [

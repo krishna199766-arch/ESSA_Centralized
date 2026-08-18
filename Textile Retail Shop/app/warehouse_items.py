@@ -24,8 +24,10 @@ the warehouse has but the shop hasn't seen yet is imported on the spot, so a tag
 that exists is never a tag that fails to scan.
 """
 import os
-import sqlite3
 from pathlib import Path
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
 from app.dbpatch import apply_all
@@ -73,22 +75,105 @@ SHOP_UNITS = {"pcs", "mtr", "kg", "set"}
 
 
 def warehouse_db_path():
-    """The warehouse database. ESSA_WAREHOUSE_DB overrides it, which is what lets
-    the shop run somewhere the warehouse folder isn't a sibling."""
+    """The warehouse SQLite file, when there is one. ESSA_WAREHOUSE_DB overrides
+    it, which is what lets the shop run somewhere the warehouse folder isn't a
+    sibling. Returns None when the warehouse is not a file at all — see
+    warehouse_url."""
     return Path(os.environ.get("ESSA_WAREHOUSE_DB") or DEFAULT_WAREHOUSE_DB)
 
 
-def _connect():
-    """A read-only connection, or None when there's no warehouse to read."""
+def warehouse_url():
+    """How to reach the warehouse database, as a SQLAlchemy URL.
+
+    This used to be a path and nothing else: the shop opened the warehouse's
+    SQLite file directly, read-only, because both halves sat in one folder on one
+    PC. Deployed, they do not — the warehouse is a Postgres database and there is
+    no file to open, so `available()` would answer False and the till would
+    quietly stop importing warehouse items on a scan. That is the failure this
+    exists to prevent, and it is a quiet one: everything keeps working except the
+    link between the two halves of the business.
+
+    ESSA_DATABASE_URL is the warehouse's own variable, so on a deployment where
+    both run this is already set and correct.
+    """
+    url = os.environ.get("ESSA_DATABASE_URL", "").strip()
+    if url:
+        # what SQLAlchemy wants, versus what most dashboards hand out
+        return "postgresql://" + url[len("postgres://"):] if url.startswith("postgres://") else url
     path = warehouse_db_path()
-    if not path.is_file():
+    return f"sqlite:///{path.as_posix()}" if path and path.is_file() else ""
+
+
+_engine = None
+
+
+def _get_engine():
+    """One engine per process, built lazily. Built on first use rather than at
+    import because the shop is importable without a warehouse at all."""
+    global _engine
+    url = warehouse_url()
+    if not url:
+        return None
+    if _engine is None or str(_engine.url) != url:
+        try:
+            _engine = create_engine(url, pool_pre_ping=True)
+        except SQLAlchemyError:
+            return None
+    return _engine
+
+
+class _Con:
+    """The read-only handle the rest of this module expects.
+
+    It keeps the shape the sqlite3 connection had — `execute(...).fetchall()`,
+    rows accessed as `row["column"]` — so the queries below did not have to be
+    rewritten around a different result object. Rows come back as plain dicts,
+    which answer both `row["x"]` and `row.keys()` the way sqlite3.Row did.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        # The queries here were written with sqlite3's positional `?`. Named
+        # parameters are the portable spelling, so the marker is translated
+        # rather than every call site being rewritten.
+        if params:
+            named = {f"p{i}": v for i, v in enumerate(params)}
+            for i in range(len(params)):
+                sql = sql.replace("?", f":p{i}", 1)
+        else:
+            named = {}
+        return _Result(self._conn.execute(text(sql), named))
+
+    def close(self):
+        try:
+            self._conn.close()
+        except SQLAlchemyError:
+            pass
+
+
+class _Result:
+    def __init__(self, res):
+        self._res = res
+
+    def fetchall(self):
+        return [dict(r._mapping) for r in self._res]
+
+    def fetchone(self):
+        r = self._res.fetchone()
+        return dict(r._mapping) if r is not None else None
+
+
+def _connect():
+    """A connection to the warehouse, or None when there is no warehouse to read."""
+    eng = _get_engine()
+    if eng is None:
         return None
     try:
-        con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
-    except sqlite3.Error:
+        return _Con(eng.connect())
+    except SQLAlchemyError:
         return None
-    con.row_factory = sqlite3.Row
-    return con
 
 
 def available():
@@ -184,7 +269,7 @@ def fetch_items():
         return []
     try:
         return con.execute("SELECT * FROM products ORDER BY id").fetchall()
-    except sqlite3.Error:
+    except SQLAlchemyError:
         return []
     finally:
         con.close()
@@ -210,7 +295,7 @@ def fetch_units(warehouse_id):
             "WHERE product_id = ? ORDER BY seq", (warehouse_id,)).fetchall()
         return [{"code": r["code"], "seq": r["seq"], "status": r["status"],
                  "qr": unit_qr_payload(r, product)} for r in rows]
-    except sqlite3.Error:
+    except SQLAlchemyError:
         return []
     finally:
         con.close()
@@ -225,12 +310,15 @@ def fetch_item(sku=None, warehouse_id=None, unit_code=None):
         if unit_code:
             row = con.execute(
                 "SELECT p.* FROM products p JOIN product_units u ON u.product_id = p.id "
-                "WHERE u.code = ? COLLATE NOCASE", (unit_code,)).fetchone()
+                # COLLATE NOCASE is SQLite's alone. lower() on both sides is the
+                # case-insensitive match every dialect agrees on, and a scanned
+                # piece code arrives in whatever case the scanner produced.
+                "WHERE lower(u.code) = lower(?)", (unit_code,)).fetchone()
             if row:
                 return row
         if sku:
             row = con.execute(
-                "SELECT * FROM products WHERE sku = ? COLLATE NOCASE", (sku,)).fetchone()
+                "SELECT * FROM products WHERE lower(sku) = lower(?)", (sku,)).fetchone()
             if row:
                 return row
         if warehouse_id:
@@ -238,7 +326,7 @@ def fetch_item(sku=None, warehouse_id=None, unit_code=None):
                 "SELECT * FROM products WHERE id = ?", (warehouse_id,)).fetchone()
             if row:
                 return row
-    except sqlite3.Error:
+    except SQLAlchemyError:
         return None
     finally:
         con.close()
@@ -393,15 +481,37 @@ def _warehouse_signature():
     stat() is enough to know. The -wal is checked anyway, cheaply, in case that
     ever changes.
     """
-    path = warehouse_db_path()
-    stamps = []
-    for candidate in (path, path.with_name(path.name + "-wal")):
-        try:
-            st = candidate.stat()
-        except OSError:
-            continue
-        stamps.append((st.st_mtime_ns, st.st_size))
-    return tuple(stamps) or None
+    url = warehouse_url()
+    if url.startswith("sqlite"):
+        path = warehouse_db_path()
+        stamps = []
+        for candidate in (path, path.with_name(path.name + "-wal")):
+            try:
+                st = candidate.stat()
+            except OSError:
+                continue
+            stamps.append((st.st_mtime_ns, st.st_size))
+        return tuple(stamps) or None
+
+    # No file to stat when the warehouse is Postgres, so the stamp is read from
+    # the rows instead: how many products there are, the highest id, and the
+    # latest detailing. That covers the three ways the warehouse changes in a way
+    # the shop cares about — a product added, a product detailed, a product
+    # removed — which is what this is asked to notice. It costs one aggregate
+    # query rather than a stat(), so `sync_if_stale` is no longer free; it is
+    # still far cheaper than the sync it decides against.
+    con = _connect()
+    if con is None:
+        return None
+    try:
+        row = con.execute(
+            "SELECT count(*) AS n, max(id) AS mx, max(detailed_at) AS det FROM products"
+        ).fetchone()
+        return (row["n"], row["mx"], str(row["det"])) if row else None
+    except SQLAlchemyError:
+        return None
+    finally:
+        con.close()
 
 
 def sync_if_stale():

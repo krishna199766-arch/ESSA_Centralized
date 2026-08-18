@@ -1,0 +1,34 @@
+# What Vercel installs for the serverless function in api/index.py.
+#
+# Deliberately NOT the same list as backend/requirements.txt, because the
+# platform is not the same:
+#
+#   uvicorn      — Vercel runs the ASGI app itself; there is no server to start.
+#   pytesseract  — needs a `tesseract` binary, which this runtime has not got.
+#                  Extraction is vision-only here (see below).
+#   pdf2image    — needs poppler, likewise absent. It was never actually called
+#                  anywhere; PDFs now go to the model as documents instead.
+#
+# Dropping tesseract means there is no offline OCR fallback: a deployment with
+# no ANTHROPIC_API_KEY cannot read an invoice at all. Everything else — GRN,
+# inventory, labels, dispatch, the phone app, the shop — works regardless.
+fastapi==0.115.5
+sqlalchemy==2.0.36
+pydantic==2.10.3
+python-multipart==0.0.19
+pillow==11.0.0
+rapidfuzz==3.10.1
+anthropic==0.40.0
+python-barcode==0.15.1
+segno==1.6.1
+
+# Postgres. SQLite is a file, and this runtime has nowhere to keep one.
+psycopg2-binary==2.9.10
+
+# The retail shop, mounted at /pos by backend/app/pos_mount.py.
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
+Flask-WTF==1.2.1
+WTForms==3.1.2
+email-validator==2.2.0

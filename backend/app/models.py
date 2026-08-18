@@ -1274,3 +1274,22 @@ class User(Base):
     last_login_at = Column(DateTime)
     created_at = Column(DateTime, default=now)
     created_by = Column(String)
+
+
+class AppSetting(Base):
+    """Settings changed from the UI rather than from the environment — the
+    vision key and model, the provider preference, the dead-stock ladder.
+
+    These used to be a JSON file beside the database, which worked while there
+    was one long-running server with a disk. There no longer always is: on a
+    serverless deployment the filesystem is read-only, and each instance holds
+    its own module memory, so a key saved by whichever instance served the
+    settings screen would be invisible to the one that served the next upload —
+    vision would appear to switch itself off at random.
+
+    A row is the same for everyone and outlives every instance.
+    """
+    __tablename__ = "app_settings"
+    key = Column(String, primary_key=True)
+    value = Column(JSON)
+    updated_at = Column(DateTime, default=now, onupdate=now)

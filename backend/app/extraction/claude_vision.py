@@ -101,7 +101,25 @@ class ClaudeVisionProvider(ExtractionProvider):
     def _media_type(self, path: str) -> str:
         ext = os.path.splitext(path)[1].lower()
         return {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".webp": "image/webp"}.get(ext, "image/jpeg")
+                ".webp": "image/webp", ".pdf": "application/pdf"}.get(ext, "image/jpeg")
+
+    def _source_block(self, path: str, b64: str) -> Dict[str, Any]:
+        """The content block for this file — a PDF is a `document`, not an `image`.
+
+        A PDF used to be sent as an image labelled image/jpeg, which the API
+        refuses, so a supplier who emails a PDF bill could not be read at all.
+        (`pdf2image` is in requirements and was never called; turning the pages
+        into images locally was started and not finished.) Sending the PDF
+        itself is both the smaller change and the better one — the model reads
+        every page in one request, and no page-rasterising binary has to exist
+        on the machine, which is what lets this run somewhere without poppler.
+        """
+        media = self._media_type(path)
+        if media == "application/pdf":
+            return {"type": "document",
+                    "source": {"type": "base64", "media_type": media, "data": b64}}
+        return {"type": "image",
+                "source": {"type": "base64", "media_type": media, "data": b64}}
 
     def extract(self, image_path: str, profile: Optional[Dict[str, Any]] = None,
                 ocr_text: Optional[str] = None) -> ProviderResult:
@@ -132,8 +150,7 @@ class ClaudeVisionProvider(ExtractionProvider):
             max_tokens=32000,
             system=SYSTEM,
             messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64",
-                 "media_type": self._media_type(image_path), "data": b64}},
+                self._source_block(image_path, b64),
                 {"type": "text", "text": guidance + "\n\nReturn the JSON now."},
             ]}],
         ) as stream:

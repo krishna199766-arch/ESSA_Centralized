@@ -11,6 +11,7 @@ from ..database import get_db
 from .. import models
 from ..config import UPLOAD_DIR, COMPANY_GSTIN
 from ..extraction import engine
+from ..services import storage
 from ..schemas import ConfirmRequest
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -122,13 +123,10 @@ async def upload_and_extract(file: UploadFile = File(...), db: Session = Depends
     raw = await file.read()
     content_hash = hashlib.sha256(raw).hexdigest()
     ext = os.path.splitext(file.filename)[1] or ".bin"
-    stored = os.path.join(UPLOAD_DIR, f"{content_hash[:16]}{ext}")
-    # Filename is the content hash, so an existing file has identical bytes —
-    # don't rewrite it (also avoids clobbering read-only seeded sample files).
-    if not os.path.exists(stored):
-        with open(stored, "wb") as f:
-            f.write(raw)
-        os.chmod(stored, 0o644)
+    # The name is the content hash, so the same invoice uploaded twice is one
+    # stored object rather than two. `storage` decides where that object lives —
+    # a file under data/uploads on a laptop, Vercel Blob on a deployment.
+    stored = storage.save(raw, f"{content_hash[:16]}{ext}")
 
     doc = models.Document(filename=file.filename, stored_path=stored,
                           content_hash=content_hash, mime=file.content_type,
@@ -137,8 +135,13 @@ async def upload_and_extract(file: UploadFile = File(...), db: Session = Depends
     db.commit()
     db.refresh(doc)
 
+    # The extraction engine opens a path, so give it one. On a laptop that is
+    # the stored file itself; where storage is remote this is a scratch copy
+    # that lives as long as this request and no longer.
+    local = storage.materialise(stored) or stored
+
     # detect supplier via OCR header, load its learned profile
-    ocr_text = engine._ocr_text(stored)
+    ocr_text = engine._ocr_text(local)
     suppliers = db.query(models.Supplier).all()
     supplier, _ = engine.detect_supplier(ocr_text, suppliers)
     profile = None
@@ -146,7 +149,7 @@ async def upload_and_extract(file: UploadFile = File(...), db: Session = Depends
         doc.supplier_id = supplier.id
         profile = _profile_dict(supplier.active_profile)
 
-    result = engine.run_extraction(stored, profile=profile, ocr_text=ocr_text)
+    result = engine.run_extraction(local, profile=profile, ocr_text=ocr_text)
 
     # Back-fill the consignment fields (LR no & date, transporter, booking city)
     # from the matching LR register row BEFORE the extraction is stored, so the
@@ -214,9 +217,10 @@ def get_document(doc_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{doc_id}/image")
 def get_image(doc_id: int, db: Session = Depends(get_db)):
-    from fastapi.responses import FileResponse
+    from fastapi.responses import Response
     doc = db.get(models.Document, doc_id)
-    if not doc or not os.path.exists(doc.stored_path):
+    raw = storage.read(doc.stored_path) if doc else None
+    if raw is None:
         raise HTTPException(404, "image not found")
     # This URL is not content-addressed — it names a row, and rows are recycled:
     # "Clear all" empties the table, and SQLite hands the next upload the same id
@@ -224,13 +228,16 @@ def get_image(doc_id: int, db: Session = Depends(get_db)):
     # freshness (a fraction of the file's age) and reuses the bytes it cached
     # under this URL without asking, so the viewer shows the invoice that used to
     # be document 2 next to the data of the one that is document 2 now.
-    # no-cache means "ask before reusing". FileResponse sends an ETag but does
-    # not answer conditional requests with 304, so in practice every view of a
-    # document re-fetches the file — a couple of hundred KB over localhost, which
-    # is the cheap half of this trade. Caching it properly would mean putting the
-    # content hash in the URL so the URL changes when the bytes do; until the
+    # no-cache means "ask before reusing". Caching it properly would mean putting
+    # the content hash in the URL so the URL changes when the bytes do; until the
     # payload carries that hash, correct beats clever here.
-    return FileResponse(doc.stored_path, headers={"Cache-Control": "no-cache"})
+    #
+    # The bytes are served from here rather than by redirecting to where they are
+    # stored. On a deployment that store is Vercel Blob, whose URLs are public
+    # and do not expire — handing one to the browser would put a supplier invoice
+    # outside the login for good, and this route is policed like every other.
+    return Response(raw, media_type=doc.mime or "application/octet-stream",
+                    headers={"Cache-Control": "no-cache"})
 
 
 def _searched_for(data):

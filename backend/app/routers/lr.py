@@ -1,7 +1,7 @@
 import os
 import hashlib
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from ..database import get_db
 from .. import models
 from ..config import UPLOAD_DIR
 from ..services import lr as lr_svc
+from ..services import storage
 from ..services import lr_link
 from ..services import masters as masters_svc
 from ..services import dates
@@ -158,17 +159,13 @@ async def extract(file: UploadFile = File(...), db: Session = Depends(get_db)):
     raw = await file.read()
     h = hashlib.sha256(raw).hexdigest()
     ext = os.path.splitext(file.filename)[1] or ".bin"
-    stored = os.path.join(UPLOAD_DIR, f"{h[:16]}{ext}")
-    if not os.path.exists(stored):
-        with open(stored, "wb") as f:
-            f.write(raw)
-        os.chmod(stored, 0o644)
+    stored = storage.save(raw, f"{h[:16]}{ext}")
     doc = models.Document(filename=file.filename, stored_path=stored, content_hash=h,
                           mime=file.content_type, status="uploaded", document_type="lr_register")
     db.add(doc)
     db.commit()
     db.refresh(doc)
-    res = lr_svc.extract_lr(stored)
+    res = lr_svc.extract_lr(storage.materialise(stored) or stored)
     # flag rows that already exist in the DB (or repeat within this upload)
     rows, dup_summary = lr_link.annotate_duplicates(db, res.get("rows", []))
     res["rows"] = rows
@@ -387,10 +384,7 @@ def delete_entry(entry_id: int, db: Session = Depends(get_db)):
     if e.matched:
         raise HTTPException(400, "This entry is linked to an invoice — unlink it first.")
     for a in e.attachments:
-        try:
-            os.remove(a.stored_path)
-        except OSError:
-            pass                      # file already gone; the row still goes
+        storage.delete(a.stored_path)   # already gone is fine; the row still goes
     db.delete(e)
     db.commit()
     return {"ok": True}
@@ -457,11 +451,7 @@ async def add_attachment(entry_id: int, file: UploadFile = File(...),
         raise HTTPException(400, "empty file")
     h = hashlib.sha256(raw).hexdigest()
     ext = os.path.splitext(file.filename or "")[1] or ".bin"
-    stored = os.path.join(UPLOAD_DIR, f"lr{entry_id}_{h[:16]}{ext}")
-    if not os.path.exists(stored):
-        with open(stored, "wb") as f:
-            f.write(raw)
-        os.chmod(stored, 0o644)
+    stored = storage.save(raw, f"lr{entry_id}_{h[:16]}{ext}")
     a = models.LRAttachment(lr_id=e.id, doc_type=(doc_type or "").strip() or "Other",
                             filename=file.filename, stored_path=stored,
                             mime=file.content_type)
@@ -474,10 +464,14 @@ async def add_attachment(entry_id: int, file: UploadFile = File(...),
 @router.get("/attachments/{att_id}/file")
 def attachment_file(att_id: int, db: Session = Depends(get_db)):
     a = db.get(models.LRAttachment, att_id)
-    if not a or not os.path.exists(a.stored_path):
+    raw = storage.read(a.stored_path) if a else None
+    if raw is None:
         raise HTTPException(404, "attachment not found")
-    return FileResponse(a.stored_path, media_type=a.mime or "application/octet-stream",
-                        filename=a.filename)
+    # Served from here rather than redirected to, for the same reason as the
+    # invoice images in documents.py: where these are stored on a deployment the
+    # URLs are public and permanent, and an LR copy belongs behind the login.
+    return Response(raw, media_type=a.mime or "application/octet-stream",
+                    headers={"Content-Disposition": f'inline; filename="{a.filename or "attachment"}"'})
 
 
 @router.delete("/attachments/{att_id}")
@@ -492,10 +486,7 @@ def delete_attachment(att_id: int, db: Session = Depends(get_db)):
         models.LRAttachment.stored_path == a.stored_path,
         models.LRAttachment.id != a.id).count()
     if not others:
-        try:
-            os.remove(a.stored_path)
-        except OSError:
-            pass
+        storage.delete(a.stored_path)
     db.delete(a)
     db.commit()
     return {"ok": True}

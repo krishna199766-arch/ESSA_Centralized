@@ -20,8 +20,20 @@ Base.metadata.create_all(bind=engine)
 
 def _migrate():
     """Add columns introduced after a DB was first created (SQLite), so existing
-    installs pick up new Product attributes without losing data."""
+    installs pick up new Product attributes without losing data.
+
+    SQLite only, and that is not a limitation — it is the whole point. Every
+    statement below patches a database that already holds Essa's data and was
+    created before the column existed. There is exactly one such database and it
+    is the SQLite file on the warehouse PC. A Postgres deployment is created by
+    `create_all` above, from today's models, with every one of these columns
+    already present — so running these against it would at best be a long series
+    of no-ops and at worst fail on syntax SQLite accepts and Postgres does not
+    (`ALTER TABLE … DROP COLUMN` inside a try/except being the clearest case).
+    """
     from sqlalchemy import inspect, text
+    if engine.dialect.name != "sqlite":
+        return
     insp = inspect(engine)
     if "products" not in insp.get_table_names():
         return
