@@ -4752,6 +4752,11 @@ const LR_REG_COLS = [
   { k: 'supplier_name', h: 'Supplier', w: 168, sub: 'agent' },
   { k: 'lr_no', h: 'LR No', w: 112, sub: 'lr_date', mono: 1 },
   { k: 'inv_no', h: 'Invoice', w: 112, sub: 'inv_date', mono: 1 },
+  // The receipt raised against this consignment. Next to the invoice it
+  // belongs to, because the two are quoted together when a delivery is
+  // queried — and blank until the goods are actually received, which is
+  // itself the answer to "has this come in yet?".
+  { k: 'grn_no', h: 'GRN No', w: 116, mono: 1 },
   { k: 'item', h: 'Item', w: 92 },
   { k: 'bundle', h: 'Bdl / Box', w: 68, num: 1, pair: 'boxes' },
   { k: 'qty', h: 'Pieces', w: 58, num: 1 },

@@ -1044,6 +1044,10 @@ class LREntry(Base):
     original_values = Column(JSON, default=dict)
     # --- invoice linkage (cross-fill): set when a matching invoice is uploaded ---
     invoice_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
+    # The receipt raised against this consignment, once one exists. Written here
+    # as well as on the GRN because this is the row the transport desk has open
+    # when a delivery is queried — see services/inventory._publish_grn_no.
+    grn_no = Column(String, index=True)
     matched = Column(Boolean, default=False, index=True)   # an invoice has been linked
     # fields where the linked invoice DISAGREES with the register value we kept:
     # [{"field","register","invoice"}] — register value is retained, conflict flagged

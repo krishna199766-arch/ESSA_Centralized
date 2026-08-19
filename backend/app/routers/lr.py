@@ -268,6 +268,9 @@ def _row_out(e: models.LREntry):
         "id": e.id, "lr_entry_no": e.lr_entry_no, "entry_source": e.entry_source,
         "document_id": e.document_id, "received_by": e.received_by,
         "matched": bool(e.matched), "invoice_document_id": e.invoice_document_id,
+        # The receipt raised against this consignment, once one exists — filled
+        # by services/inventory when the GRN is created for the linked invoice.
+        "grn_no": e.grn_no,
         "mismatches": e.mismatches or [],
         # set only when the page was NOT in English — the grid shows a badge and
         # the original text behind it, so a translated reading is never presented

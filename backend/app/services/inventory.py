@@ -80,6 +80,32 @@ def _next_sku(db):
     return f"ESSA-{n:05d}"
 
 
+def next_grn_no(db, when=None):
+    """The next GRN number: GRN-2026-00001, GRN-2026-00002, …
+
+    Numbered per calendar year, so the year in the number says when the goods
+    were received without anyone opening the row, and the count restarts each
+    January instead of climbing forever.
+
+    The sequence is read from the numbers already issued rather than from a
+    counter, and it steps over any that are taken. A counter would have to be
+    kept in step with rows that get deleted, and the first time the two
+    disagreed it would hand out a number that already existed — on the one field
+    people quote to each other when a delivery is queried.
+    """
+    year = (when or dt.datetime.utcnow()).year
+    prefix = f"GRN-{year}-"
+    taken = {
+        (row[0] or "") for row in
+        db.query(models.Purchase.grn_no)
+          .filter(models.Purchase.grn_no.like(f"{prefix}%")).all()
+    }
+    n = 1
+    while f"{prefix}{n:05d}" in taken:
+        n += 1
+    return f"{prefix}{n:05d}"
+
+
 def build_grn_from_document(db, doc):
     """Create (or return existing) a draft GRN for a confirmed document."""
     existing = db.query(models.Purchase).filter(
@@ -93,9 +119,16 @@ def build_grn_from_document(db, doc):
     tot = data.get("totals", {}) or {}
     meta = data.get("meta", {}) or {}
 
+    # A number the invoice itself carried is kept — some suppliers print the
+    # buyer's GRN reference on the bill, and ours must not talk over theirs.
+    # Otherwise one is allocated HERE, at the moment a receipt actually exists.
+    # Allocating earlier, on the review screen, would spend numbers on invoices
+    # that are never received and leave gaps nobody can account for.
+    grn_no = (meta.get("grn_no") or "").strip() or next_grn_no(db)
+
     purchase = models.Purchase(
         document_id=doc.id, supplier_id=doc.supplier_id,
-        grn_no=meta.get("grn_no"), invoice_number=inv.get("number"),
+        grn_no=grn_no, invoice_number=inv.get("number"),
         invoice_date=inv.get("date"),
         taxable_total=tot.get("taxable_total") or 0.0,
         tax_total=tot.get("tax_total") or 0.0,
@@ -126,7 +159,35 @@ def build_grn_from_document(db, doc):
             is_new_product=match is None,
         ))
     db.flush()
+    _publish_grn_no(db, doc, purchase.grn_no)
     return purchase
+
+
+def _publish_grn_no(db, doc, grn_no):
+    """Put the allocated number back where people will look for it.
+
+    Three places carry it and they are read by three different people: the
+    invoice's own GRN & Notes panel, which is where whoever keyed the bill looks;
+    the GRN itself; and the consignment row in the LR register, which is what the
+    transport desk has in front of it when a delivery is queried. A number that
+    existed only on the GRN would have to be looked up from the other two.
+
+    The extraction's data is REPLACED rather than mutated in place: SQLAlchemy
+    does not notice a change made inside a JSON column, so a mutated dict is
+    quietly never written.
+    """
+    if not grn_no:
+        return
+    ex = doc.latest_extraction
+    if ex and not ((ex.data.get("meta") or {}).get("grn_no") or "").strip():
+        data = dict(ex.data or {})
+        data["meta"] = {**(data.get("meta") or {}), "grn_no": grn_no}
+        ex.data = data
+
+    # The consignment this invoice was matched to, if the register knows it.
+    db.query(models.LREntry).filter(
+        models.LREntry.invoice_document_id == doc.id
+    ).update({"grn_no": grn_no}, synchronize_session=False)
 
 
 # ---------------------------------------------------------------------------
