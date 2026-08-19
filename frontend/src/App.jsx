@@ -6805,12 +6805,70 @@ function LabelPrinting({ toast }) {
     return n + (perPiece ? (p?.live_units || 0) : (+picked[id] || 0))
   }, 0)
 
-  const toggle = (p) => setPicked((s) => {
-    const n = { ...s }
-    if (n[p.id] != null) delete n[p.id]
-    else n[p.id] = Math.max(1, Math.round(p.stock_qty || 1))
+  const defaultQty = (p) => Math.max(1, Math.round(p.stock_qty || 1))
+
+  // The last row clicked, so shift-click can select the run between it and the
+  // next one. A whole delivery of one design is thirty consecutive rows — six
+  // sizes across five colours, all wanting labels — and ticking those one at a
+  // time is where this screen actually costs somebody their morning.
+  const lastClicked = useRef(null)
+
+  const toggle = (p, shiftKey = false) => {
+    const rows = page.slice
+    const here = rows.findIndex((r) => r.id === p.id)
+
+    if (shiftKey && lastClicked.current != null) {
+      const from = rows.findIndex((r) => r.id === lastClicked.current)
+      if (from >= 0 && here >= 0) {
+        const [a, b] = from < here ? [from, here] : [here, from]
+        // The run takes the state the ANCHOR row is about to have, so
+        // shift-clicking always does one thing to the whole range rather than
+        // inverting each row and leaving a stripe of the ones already on.
+        const turningOn = picked[p.id] == null
+        setPicked((sel) => {
+          const n = { ...sel }
+          for (let i = a; i <= b; i++) {
+            const r = rows[i]
+            if (turningOn) n[r.id] = n[r.id] ?? defaultQty(r)
+            else delete n[r.id]
+          }
+          return n
+        })
+        lastClicked.current = p.id
+        return
+      }
+    }
+
+    lastClicked.current = p.id
+    setPicked((sel) => {
+      const n = { ...sel }
+      if (n[p.id] != null) delete n[p.id]
+      else n[p.id] = defaultQty(p)
+      return n
+    })
+  }
+
+  // Everything on THIS page, not every row the filter matched. A search for
+  // "Cherry" can be four hundred products across sixteen pages, and a tick box
+  // that quietly selected all of them is how somebody prints four hundred
+  // labels meaning to print twenty. The count beside it says which it is.
+  const pageIds = page.slice.map((r) => r.id)
+  const allOnPage = pageIds.length > 0 && pageIds.every((id) => picked[id] != null)
+  const someOnPage = pageIds.some((id) => picked[id] != null)
+  const toggleAllOnPage = () => setPicked((sel) => {
+    const n = { ...sel }
+    if (allOnPage) pageIds.forEach((id) => delete n[id])
+    else page.slice.forEach((r) => { n[r.id] = n[r.id] ?? defaultQty(r) })
     return n
   })
+
+  const allMatching = visible.length > 0 && visible.every((r) => picked[r.id] != null)
+  const selectAllMatching = () => setPicked((sel) => {
+    const n = { ...sel }
+    visible.forEach((r) => { n[r.id] = n[r.id] ?? defaultQty(r) })
+    return n
+  })
+
   const setQty = (id, v) => setPicked((s) => ({ ...s, [id]: Math.max(1, Math.min(+v || 1, 2000)) }))
 
   // The proof is drawn from one of the selected products rather than from sample
@@ -6859,6 +6917,18 @@ function LabelPrinting({ toast }) {
                 ))}
               </select></div>
             <div className="spacer" />
+            {/* Everything the search matched, across every page — the thing you
+                want after filtering to one supplier or one design. Separate
+                from the header tick box, and it says the number, because
+                "select all" meaning four hundred rows when the screen shows
+                fifty is how the wrong run gets printed. */}
+            {visible.length > page.slice.length && (
+              <button className="btn" onClick={selectAllMatching}
+                disabled={allMatching}
+                title={`Select every product the current search matched (${visible.length})`}>
+                Select all {visible.length}{q ? ' matching' : ''}
+              </button>
+            )}
             <button className="btn" onClick={() => setPicked({})} disabled={!ids.length}>Clear selection</button>
           </div>
 
@@ -6871,7 +6941,16 @@ function LabelPrinting({ toast }) {
           <div className="tablewrap">
           <table className="items">
             <thead><tr>
-              <th style={{ width: 34 }}></th><th>SKU</th><th>Product</th>
+              <th style={{ width: 34 }}>
+                {/* Indeterminate when only part of the page is selected, so the
+                    box shows the three states it actually has rather than
+                    reading as "none" whenever it is not all. */}
+                <input type="checkbox" checked={allOnPage}
+                  ref={(el) => { if (el) el.indeterminate = someOnPage && !allOnPage }}
+                  onChange={toggleAllOnPage} disabled={!page.slice.length}
+                  title={allOnPage ? 'Clear the products on this page'
+                    : `Select all ${page.slice.length} products on this page`} />
+              </th><th>SKU</th><th>Product</th>
               <th>Size</th><th>Colour</th>
               {/* Who it came from — on screen only, to tell two identical-looking
                   rows apart before printing a hundred tags of the wrong one. It
@@ -6887,8 +6966,13 @@ function LabelPrinting({ toast }) {
                 return (
                   <tr key={p.id} className={on ? 'sel' : ''}
                     style={p.can_print === false ? { color: 'var(--muted)' } : undefined}>
-                    <td><input type="checkbox" checked={on} onChange={() => toggle(p)}
-                      title={p.can_print === false ? p.print_block : 'Select for printing'} /></td>
+                    {/* onClick, not onChange: the modifier keys are on the mouse
+                        event and a change event has none, so shift-click has to
+                        be read here. */}
+                    <td><input type="checkbox" checked={on} readOnly
+                      onClick={(e) => toggle(p, e.shiftKey)}
+                      title={p.can_print === false ? p.print_block
+                        : 'Select for printing — shift-click to take a run of rows'} /></td>
                     <td className="mono">{p.sku || '—'}</td>
                     <td>{p.name || p.description}
                       {p.can_print === false && <span className="badge needs_review" style={{ marginLeft: 6 }}
