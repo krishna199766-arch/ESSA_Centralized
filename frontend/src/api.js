@@ -288,6 +288,9 @@ export const api = {
     fetch('/api/inventory/categorize?description=' + encodeURIComponent(description || '')).then(J),
   // the full product record as the stock screens show it — QR, name, size,
   // colour, batch. Takes anything scannable: a product QR, a piece label, a SKU.
+  // Item Locator: one scanned code, everything known about that item —
+  // where it came from, where it is, where it went.
+  locateItem: (code) => fetch('/api/inventory/locate?code=' + encodeURIComponent(code)).then(J),
   productCard: (code) => fetch('/api/inventory/product-card?code=' + encodeURIComponent(code || ''))
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('card'), { detail: j.detail }); return j }),
 

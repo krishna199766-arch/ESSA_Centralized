@@ -685,3 +685,115 @@ def adjust_stock(prod_id: int, body: StockAdjust, db: Session = Depends(get_db))
     db.commit()
     db.refresh(p)
     return _product_out(p)
+
+
+@router.get("/locate")
+def locate(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
+    """Item Locator: one scanned code, everything known about that item.
+
+    Scanning a tag answers "what is this?" — and then, always, four more
+    questions that today need four screens: where did it come from, where is it
+    now, where has it gone, and what has it cost. This gathers those into one
+    reply so a garment in somebody's hand can be accounted for without them
+    knowing which screen holds which part of the answer.
+
+    Every kind of tag the warehouse prints is accepted, because the person
+    holding one does not know which kind it is: a product QR, a per-piece code
+    off a single garment, a carton label, a barcode, or a typed SKU.
+
+    A CARTON is answered as a carton rather than as one of the products inside
+    it. A bundle label names a box, and quietly resolving it to a garment would
+    answer a question nobody asked with a stock figure for the wrong thing.
+    """
+    from ..services import stock_view, bundles as bundle_svc
+
+    code = (code or "").strip()
+    if not code and not product_id:
+        raise HTTPException(400, "give a code to look up")
+
+    # A carton first: bundle_svc.resolve is the only reader that can tell a
+    # bundle label apart, and barcode_svc deliberately refuses them.
+    if code:
+        bundle = bundle_svc.resolve(db, code)
+        if bundle:
+            from .bundles import _out as _bundle_out
+            return {"kind": "bundle", "code": code, "bundle": _bundle_out(bundle, with_items=True)}
+
+    unit = barcode_svc._resolve_unit_row(db, code) if code else None
+    product = (db.get(models.Product, product_id) if product_id
+               else barcode_svc.resolve(db, code))
+    if not product:
+        raise HTTPException(404, f"Nothing matches '{code}'. It is not a product QR, "
+                                 "a piece code, a carton label, a barcode or a SKU.")
+
+    # --- where it came from: the receipts that brought it in ---
+    receipts = []
+    for pl in (db.query(models.PurchaseLine)
+                 .filter(models.PurchaseLine.product_id == product.id)
+                 .order_by(models.PurchaseLine.id.desc()).limit(25).all()):
+        pur = pl.purchase
+        receipts.append({
+            "purchase_id": pur.id if pur else None,
+            "grn_no": pur.grn_no if pur else None,
+            "status": pur.status if pur else None,
+            "invoice_number": pur.invoice_number if pur else None,
+            "invoice_date": pur.invoice_date if pur else None,
+            "posted_at": pur.posted_at.isoformat() if pur and pur.posted_at else None,
+            "supplier": pur.supplier.name if pur and pur.supplier else None,
+            "qty": pl.qty, "rate": pl.rate, "amount": pl.amount,
+        })
+
+    # --- where it is: the cartons holding it, and their locations ---
+    cartons = [{
+        "id": b.id, "code": b.code, "location": b.location, "status": b.status,
+        "qty": b.qty, "grn_no": b.grn_no, "invoice_number": b.invoice_number,
+    } for b in (db.query(models.Bundle)
+                  .join(models.PurchaseLine, models.Bundle.line_id == models.PurchaseLine.id)
+                  .filter(models.PurchaseLine.product_id == product.id)
+                  .order_by(models.Bundle.id.desc()).limit(25).all())]
+
+    # --- where it went: dispatches out of the warehouse ---
+    dispatches = []
+    for ol in (db.query(models.StockOutwardLine)
+                 .filter(models.StockOutwardLine.product_id == product.id)
+                 .order_by(models.StockOutwardLine.id.desc()).limit(25).all()):
+        ow = ol.outward
+        dispatches.append({
+            "outward_id": ow.id if ow else None,
+            "code": ow.code if ow else None,
+            "date": ow.date if ow else None,
+            "to": ow.to_destination if ow else None,
+            "status": ow.status if ow else None,
+            "qty": ol.qty, "accepted_qty": ol.accepted_qty, "rate": ol.rate,
+        })
+
+    # --- the ledger: every movement, which is the audit trail behind the figure ---
+    movements = [{
+        "at": m.created_at.isoformat() if m.created_at else None,
+        "kind": m.kind, "qty_delta": m.qty_delta, "balance_after": m.balance_after,
+        "rate": m.rate, "note": m.note,
+    } for m in (db.query(models.StockMovement)
+                  .filter(models.StockMovement.product_id == product.id)
+                  .order_by(models.StockMovement.id.desc()).limit(30).all())]
+
+    units = db.query(models.ProductUnit).filter(
+        models.ProductUnit.product_id == product.id)
+    return {
+        "kind": "product",
+        "code": code,
+        # The card the stock screens already show, so the identity block here is
+        # the same one seen everywhere else rather than a second opinion.
+        "product": stock_view.product_card(db, product),
+        # Set when the code scanned was a single garment's, not the SKU's — the
+        # difference between "this design" and "this exact piece".
+        "unit": ({"code": unit.code, "seq": unit.seq, "status": unit.status,
+                  "printed": unit.print_count} if unit else None),
+        "unit_counts": {
+            "total": units.count(),
+            "in_stock": units.filter(models.ProductUnit.status == "in_stock").count(),
+        },
+        "receipts": receipts,
+        "cartons": cartons,
+        "dispatches": dispatches,
+        "movements": movements,
+    }

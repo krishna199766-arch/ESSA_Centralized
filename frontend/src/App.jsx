@@ -8246,6 +8246,165 @@ function DsRules({ toast, onSaved }) {
 //  it — a number nobody can act on is decoration.
 // ==========================================================================
 
+// ==========================================================================
+//  Item Locator — one scanned tag, the whole account of an item
+//  ------------------------------------------------------------------------
+//  Somebody is holding a garment and wants to know what it is. That question is
+//  never only "what is it": it is followed, every time, by where it came from,
+//  where it is meant to be, where it has gone and what it cost — and those live
+//  on four different screens, each of which has to be found first.
+//
+//  Every tag the warehouse prints is accepted, because the person holding one
+//  does not know which kind it is. A product QR, the per-piece code off a single
+//  garment, a carton label, a printed barcode, or a SKU typed in from a
+//  scribbled note all go into the same box.
+// ==========================================================================
+
+function LocatorRows({ title, rows, cols, empty }) {
+  if (!rows || !rows.length) return (
+    <div className="section"><h4>{title}</h4>
+      <div className="empty" style={{ margin: '6px 0', fontSize: 13 }}>{empty}</div></div>
+  )
+  return (
+    <div className="section">
+      <h4>{title} <span className="panelsum">{rows.length}</span></h4>
+      <div className="tablewrap">
+        <table className="items">
+          <thead><tr>{cols.map(([, h, num]) =>
+            <th key={h} className={num ? 'num' : undefined}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((r, i) => (
+            <tr key={i}>{cols.map(([k, h, num, fmt]) => (
+              <td key={h} className={num ? 'num' : undefined}>
+                {fmt ? fmt(r[k], r) : (r[k] ?? '—')}</td>
+            ))}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ItemLocator() {
+  const [code, setCode] = useState('')
+  const [res, setRes] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const box = useRef(null)
+
+  // The box holds focus because a scanner IS a keyboard: it types the code and
+  // presses Enter. A screen that has to be clicked first turns every scan into a
+  // scan plus a click, which is the whole saving gone.
+  useEffect(() => { box.current?.focus() }, [])
+
+  const look = async () => {
+    const c = code.trim()
+    if (!c) return
+    setBusy(true); setErr('')
+    try {
+      const r = await api.locateItem(c)
+      setRes(r); setCode('')
+    } catch (e) {
+      setRes(null)
+      setErr(e.detail || 'Could not look that up')
+    }
+    setBusy(false)
+    box.current?.focus()
+  }
+
+  const p = res?.product
+  const money2 = (v) => (v == null ? '—' : '₹ ' + money(v))
+  const day = (v) => (v ? String(v).slice(0, 10) : '—')
+
+  return (
+    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+      <div className="pagehead"><h2>Item Locator</h2></div>
+
+      <div className="section" style={{ maxWidth: 760 }}>
+        <div className="field">
+          <label>Scan a tag, or type a code</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input ref={box} value={code} style={{ flex: 1, fontSize: 15 }}
+              placeholder="Product QR, piece code, carton label, barcode or SKU"
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') look() }} />
+            <button className="btn primary" disabled={busy || !code.trim()}
+              onClick={look}>{busy ? 'Looking…' : 'Go'}</button>
+          </div>
+        </div>
+        {err && <div className="empty" style={{ margin: '10px 0' }}>{err}</div>}
+      </div>
+
+      {res?.kind === 'bundle' && (
+        <div className="section">
+          <h4>Carton {res.bundle?.code}</h4>
+          <div className="small" style={{ lineHeight: 1.8 }}>
+            This is a CARTON label, not a garment — it names a box, so the answer
+            is about the box.<br />
+            Location <b>{res.bundle?.location || 'not put away yet'}</b> ·
+            status <b>{res.bundle?.status || '—'}</b> ·
+            GRN <b>{res.bundle?.grn_no || '—'}</b> ·
+            invoice <b>{res.bundle?.invoice_number || '—'}</b> ·
+            <b> {res.bundle?.qty ?? '—'}</b> inside
+          </div>
+        </div>
+      )}
+
+      {res?.kind === 'product' && (
+        <>
+          <div className="section">
+            <h4>{p?.description || p?.name || 'Item'}
+              <span className="panelsum">{p?.sku}</span></h4>
+            {res.unit && (
+              <div className="small" style={{ marginBottom: 8 }}>
+                Scanned ONE piece: <b className="mono">{res.unit.code}</b>
+                {' '}(#{res.unit.seq}) · {res.unit.status}
+              </div>
+            )}
+            <div className="grid">
+              {[['Stock on hand', p?.stock_qty], ['UOM', p?.uom],
+                ['Size', p?.size], ['Colour', p?.color], ['Brand', p?.brand],
+                ['Design', p?.design_no], ['Material', p?.material],
+                ['HSN', p?.hsn], ['Barcode', p?.barcode],
+                ['MRP', p?.mrp == null ? null : money2(p.mrp)],
+                ['Avg cost', p?.avg_cost == null ? null : money2(p.avg_cost)],
+                ['Piece codes', (res.unit_counts?.in_stock ?? 0) + ' in stock of ' + (res.unit_counts?.total ?? 0)],
+              ].map(([l, v]) => (
+                <div className="field" key={l}><label>{l}</label>
+                  <div className="ro">{v == null || v === '' ? '—' : String(v)}</div></div>
+              ))}
+            </div>
+          </div>
+
+          <LocatorRows title="Where it came from" rows={res.receipts}
+            empty="No receipt recorded — this item has not been booked in against a GRN."
+            cols={[['grn_no', 'GRN'], ['supplier', 'Supplier'],
+                   ['invoice_number', 'Invoice'], ['invoice_date', 'Inv date', false, day],
+                   ['qty', 'Qty', true], ['rate', 'Rate', true, money2],
+                   ['status', 'Status']]} />
+
+          <LocatorRows title="Where it is" rows={res.cartons}
+            empty="Not in any carton — either never bundled, or already opened."
+            cols={[['code', 'Carton'], ['location', 'Location'],
+                   ['qty', 'Qty', true], ['status', 'Status'],
+                   ['grn_no', 'GRN'], ['invoice_number', 'Invoice']]} />
+
+          <LocatorRows title="Where it went" rows={res.dispatches}
+            empty="Never dispatched — it has not left this warehouse."
+            cols={[['code', 'Dispatch'], ['date', 'Date', false, day],
+                   ['to', 'To'], ['qty', 'Sent', true],
+                   ['accepted_qty', 'Accepted', true], ['status', 'Status']]} />
+
+          <LocatorRows title="Stock movements" rows={res.movements}
+            empty="No movements recorded against this item."
+            cols={[['at', 'When', false, day], ['kind', 'Kind'],
+                   ['qty_delta', 'Change', true],
+                   ['balance_after', 'Balance', true], ['note', 'Note']]} />
+        </>
+      )}
+    </div>
+  )
+}
+
 const DASHBOARD = { key: 'dashboard', icon: '🏠', label: 'Dashboard',
   blurb: 'What is waiting on someone, across every module' }
 
@@ -8483,6 +8642,9 @@ const MODULES = [
   { key: 'inventory', icon: '📦', label: 'Inventory', blurb: 'Stock on hand, labels and per-piece codes' },
   // Beside Inventory because it is a question about the same stock — not what
   // we hold, but what has stopped moving and what clearing it is worth.
+  // Beside Inventory because it is a question about the same stock, asked from
+  // the other end: not what we hold, but what THIS ONE is.
+  { key: 'locator', icon: '🔎', label: 'Item Locator', blurb: 'Scan any tag — what it is, where it came from, where it is, where it went' },
   { key: 'deadstock', icon: '🧊', label: 'Dead Stock & Clearance', blurb: 'Stock nobody is buying, the discount ladder, and whether the clearance worked', min: 'admin' },
   // Design and printing are two entries because they are two jobs, and they are
   // also two roles: the designer is opened when a new roll of label stock is
@@ -9687,6 +9849,8 @@ export default function App() {
           onIntentUsed={() => setDsIntent(null)} />
       ) : tab === 'labels' ? (
         <LabelDesigner toast={toast} role={role} />
+      ) : tab === 'locator' ? (
+        <ItemLocator />
       ) : tab === 'labelprint' ? (
         <LabelPrinting toast={toast} />
       ) : tab === 'outward' ? (
