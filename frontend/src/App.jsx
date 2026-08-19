@@ -4705,7 +4705,10 @@ function LREntryView({ toast }) {
   const shown = found ? found.rows : saved
   // the register, and the rows just read off a page — both grow without limit,
   // and both are read a screenful at a time
-  const savedPage = usePaged(shown, 50)
+  // 25, matching the invoice's line-items table rather than the 50 this had:
+  // the register is a wide table and the pager stays hidden below 25 rows
+  // anyway, so a page of 50 meant the control appeared only past 51 entries.
+  const savedPage = usePaged(shown, 25)
   const extractPage = usePaged(rows, 50)
   const openNew = () => { setForm({}); setRows([]) }
   const openEdit = async (r) => {
