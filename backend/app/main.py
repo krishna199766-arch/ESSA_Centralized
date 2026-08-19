@@ -363,6 +363,10 @@ try:
     from .services import label_designer as _label_designer
     _label_designer.ensure_default(_db)
     _lr_link.backfill_linked_rows(_db)
+    # GRNs raised before numbering existed, and numbers that never reached
+    # the consignment row beside them — see inventory.backfill_grn_numbers.
+    from .services import inventory as _inv
+    _inv.backfill_grn_numbers(_db)
     _db.close()
 except Exception:
     pass

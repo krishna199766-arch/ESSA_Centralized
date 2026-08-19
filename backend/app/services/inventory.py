@@ -163,6 +163,41 @@ def build_grn_from_document(db, doc):
     return purchase
 
 
+def backfill_grn_numbers(db):
+    """Give already-created GRNs their number, and push it to the register.
+
+    Two kinds of row need it. GRNs raised before numbering existed have none at
+    all; GRNs raised before the number was PUBLISHED have one that never reached
+    the consignment it belongs to. Both look the same from the LR register — an
+    empty GRN column beside a delivery that has plainly been received.
+
+    Runs at startup and is a no-op once there is nothing to fill. Numbers are
+    handed out in posting order, so the sequence follows the order the goods
+    actually came in rather than the order the rows happen to be read.
+    """
+    filled = 0
+    unnumbered = (db.query(models.Purchase)
+                    .filter((models.Purchase.grn_no.is_(None))
+                            | (models.Purchase.grn_no == ""))
+                    .order_by(models.Purchase.posted_at.asc().nullslast(),
+                              models.Purchase.id.asc()).all())
+    for p in unnumbered:
+        p.grn_no = next_grn_no(db, p.posted_at or p.created_at)
+        db.flush()                       # so the next call sees this one taken
+        filled += 1
+
+    # …and every GRN whose number never reached the register row beside it.
+    for p in db.query(models.Purchase).filter(
+            models.Purchase.grn_no.isnot(None),
+            models.Purchase.document_id.isnot(None)).all():
+        db.query(models.LREntry).filter(
+            models.LREntry.invoice_document_id == p.document_id,
+            (models.LREntry.grn_no.is_(None)) | (models.LREntry.grn_no == "")
+        ).update({"grn_no": p.grn_no}, synchronize_session=False)
+    db.commit()
+    return filled
+
+
 def _publish_grn_no(db, doc, grn_no):
     """Put the allocated number back where people will look for it.
 
