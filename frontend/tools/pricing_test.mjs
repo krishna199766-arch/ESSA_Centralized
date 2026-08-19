@@ -85,5 +85,28 @@ const back = recalcLine({ qty: 1, rate: 320, sale_price: 448 }, 'rate', {});
 check(near(bufferOf(448, 320), 40), '448 against 320 is 40%');
 function bufferOf(top, base) { return Math.round((top / base - 1) * 10000) / 100; }
 
+console.log('');
+console.log('filling a column applies to every line, and re-prices each one:');
+// what "Apply all" does: the same recalcLine each row would get if the number
+// had been typed into it by hand
+const invoice = [
+  { qty: 1, rate: 320 }, { qty: 5, rate: 290 }, { qty: 15, rate: 205 },
+];
+const withBuffer = invoice.map((it) => recalcLine({ ...it, buffer_pct: 40 }, 'buffer_pct', it));
+check(withBuffer.every((r) => near(r.sale_price, Math.round(r.rate * 1.4))),
+  'every line priced at cost + 40%',
+  withBuffer.map((r) => r.rate + '->' + r.sale_price).join(' '));
+
+const withMrp = withBuffer.map((it) => recalcLine({ ...it, mrp_buffer_pct: 25 }, 'mrp_buffer_pct', it));
+check(withMrp.every((r) => near(r.mrp, Math.round(r.sale_price * 1.25))),
+  'every MRP is sell + 25%',
+  withMrp.map((r) => r.sale_price + '->' + r.mrp).join(' '));
+check(near(withMrp[0].sale_price, 448) && near(withMrp[0].mrp, 560),
+  'the worked line still reads 320 / 448 / 560',
+  withMrp[0].rate + ' / ' + withMrp[0].sale_price + ' / ' + withMrp[0].mrp);
+check(withMrp.every((r) => near(r.amount, r.qty * r.rate)),
+  'line amounts are untouched by a pricing fill',
+  withMrp.map((r) => r.amount).join(' '));
+
 console.log(fails ? `\n${fails} failing` : '\nall passing');
 process.exit(fails ? 1 : 0);

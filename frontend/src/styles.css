@@ -1360,3 +1360,24 @@ table.items tbody tr.sel { background: var(--brand-100); }
   padding-right: 6px; font-variant-numeric: tabular-nums;
   background: var(--panel-2); user-select: none;
 }
+
+/* ---------- fill a column with one percentage ----------
+   A second header row under the headings, carrying the control for the two
+   buffer columns. Sticky with the head it belongs to, and quiet: it is a tool,
+   not a heading, so it must not compete with the column names above it. */
+.items thead tr.fillrow th {
+  background: var(--panel-2); border-bottom: 1px solid var(--line);
+  padding: 3px 4px; font-weight: 400; text-transform: none; letter-spacing: 0;
+}
+.fillbox { display: flex; gap: 3px; align-items: center; }
+.fillbox input {
+  width: 46px; min-width: 0; padding: 2px 4px; text-align: right;
+  font-size: var(--fs-xs); border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel);
+}
+.fillbox .btn {
+  padding: 2px 6px; font-size: 10px; line-height: 1.4; white-space: nowrap;
+}
+/* Disabled until there is a number to apply — the button is the whole safety
+   of this control, so it must never look ready when it would do nothing. */
+.fillbox .btn:disabled { opacity: .45; cursor: default; }

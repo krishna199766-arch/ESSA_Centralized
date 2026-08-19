@@ -751,7 +751,7 @@ const ITEM_COLS = [
   // Rate they describe: MRP −discount→ Rate, and Rate +buffer→ MRP. Which one
   // somebody types depends on which price they already know, and that is the
   // whole point of carrying both.
-  ['buffer_pct', 'Buffer %', true, 88, 'On top of COST: Sell price = Rate × (1 + buffer) — e.g. 320 + 40% = 448. Type it and the sell price is worked out.'],
+  ['buffer_pct', 'Buffer %', true, 124, 'On top of COST: Sell price = Rate × (1 + buffer) — e.g. 320 + 40% = 448. Type it and the sell price is worked out.'],
   // The retail end of the same MRP. Not on the supplier's bill — nobody prints
   // your shelf price for you — but set here the product is born priced instead
   // of landing in Inventory with nothing on it. Kept well clear of the purchase
@@ -759,7 +759,7 @@ const ITEM_COLS = [
   // The second half of the chain. Two markups because they answer two
   // questions: what to charge, and how much room to leave above that for a
   // discount the customer can see on the tag.
-  ['mrp_buffer_pct', 'MRP Buffer %', true, 104, 'On top of the SELL price: MRP = Sell × (1 + this) — e.g. 448 + 25% = 560. The room above your price that the printed tag shows.'],
+  ['mrp_buffer_pct', 'MRP Buffer %', true, 128, 'On top of the SELL price: MRP = Sell × (1 + this) — e.g. 448 + 25% = 560. The room above your price that the printed tag shows.'],
   ['sale_discount_pct', 'Sale Disc %', true, 96, 'Off MRP for the SHOP — what the tag shows the customer saving. Follows from the two buffers; type a sell price instead and this fills itself.'],
   ['sale_price', 'Sell Price', true, 92, 'What you CHARGE: MRP less the sale discount — e.g. 995 − 20% = 796. Type it and its % follows.'],
   ['taxable_value', 'Taxable', true, 90, 'Line total. The Amount, unless the invoice states its own.'],
@@ -805,6 +805,36 @@ function LineItems({ items, setItems }) {
     return it[k] ?? ''
   }
   const delRow = (i) => setItems(items.filter((_, j) => j !== i))
+  // Fill a whole column with one percentage.
+  //
+  // Both buffers are usually one decision for the whole delivery — everything on
+  // this bill is marked up the same — and typing 40 into fifty-nine rows is the
+  // kind of work that gets abandoned halfway, leaving half the lines priced and
+  // half not, which is worse than none.
+  //
+  // On a button rather than as you type: a column that rewrote itself on every
+  // keystroke would overwrite the rows somebody had already set by hand, and
+  // "4" is a value on the way to "40". Applied, each row still edits normally.
+  const [fill, setFill] = useState({ buffer_pct: '', mrp_buffer_pct: '' })
+  const applyFill = (key) => {
+    const v = num(fill[key])
+    if (v == null || v === '') return
+    // Through recalcLine, not a bare assignment: setting the number without
+    // re-pricing would show a 40% buffer over prices that never moved.
+    setItems(items.map((it) => recalcLine({ ...it, [key]: v }, key, it)))
+  }
+  const fillCell = (key, label) => (
+    <div className="fillbox">
+      <input value={fill[key]} inputMode="decimal" placeholder="%"
+        title={`Set ${label} on every line of this invoice`}
+        onChange={(e) => setFill({ ...fill, [key]: e.target.value })}
+        onKeyDown={(e) => { if (e.key === 'Enter') applyFill(key) }} />
+      <button className="btn" disabled={num(fill[key]) == null}
+        onClick={() => applyFill(key)}
+        title={`Apply ${fill[key] || '…'}% to all ${items.length} line(s)`}>Apply all</button>
+    </div>
+  )
+
 
   const qtySum = items.reduce((s, x) => s + (+x.qty || 0), 0)
   const amtSum = items.reduce((s, x) => s + (+(x.taxable_value ?? x.amount) || 0), 0)
@@ -826,7 +856,18 @@ function LineItems({ items, setItems }) {
         <thead><tr><th style={{ minWidth: 34 }} title="Line number on the invoice">#</th>
           {ITEM_COLS.map(([k, l, , w, tip]) =>
           <th key={k} style={{ minWidth: w }} title={tip}
-            className={ITEM_CALC.has(k) ? 'calc' : undefined}>{l}{tip ? ' ƒ' : ''}</th>)}<th></th></tr></thead>
+            className={ITEM_CALC.has(k) ? 'calc' : undefined}>{l}{tip ? ' ƒ' : ''}</th>)}<th></th></tr>
+          {/* Under the headings, not in a toolbar above the table: the control
+              belongs to the column it fills, and aligned under it there is
+              nothing to explain about which is which. */}
+          <tr className="fillrow"><th></th>
+            {ITEM_COLS.map(([k, l]) => (
+              <th key={k}>
+                {k === 'buffer_pct' ? fillCell(k, 'Buffer %')
+                  : k === 'mrp_buffer_pct' ? fillCell(k, 'MRP Buffer %') : null}
+              </th>
+            ))}<th></th></tr>
+        </thead>
         <tbody>
           {page.slice.map((it, j) => {
             const i = page.from - 1 + j          // its index in the whole invoice
