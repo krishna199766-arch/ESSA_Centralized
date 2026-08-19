@@ -479,7 +479,12 @@ function fromMrp(mrp, pct, price, edited) {
 //: can move the discount — correcting a description or an HSN must not make a
 //: discount appear on a line that never had one.
 const PRICE_KEYS = new Set(['mrp', 'discount_pct', 'discount_amount', 'rate',
-                            'buffer_pct', 'amount'])
+                            'buffer_pct', 'mrp_buffer_pct', 'amount'])
+
+//: the edits that re-run the upward chain (cost → sell → MRP). `sale_price` is
+//: in it so typing a shelf price back-solves the buffer above the cost, and
+//: `mrp` is NOT: correcting a printed tag must not re-price the goods.
+const CHAIN_KEYS = new Set(['rate', 'buffer_pct', 'mrp_buffer_pct', 'sale_price', 'amount'])
 
 // ---- the gap between cost and MRP, named from both ends ----
 //
@@ -499,24 +504,23 @@ const PRICE_KEYS = new Set(['mrp', 'discount_pct', 'discount_amount', 'rate',
 // Buffer is DERIVED, never stored: it is recomputed from Rate and MRP whenever
 // either moves, so a line reloaded from a saved invoice shows the same buffer it
 // was entered at without a column existing to go stale.
-function bufferFrom(mrp, rate) {
-  if (mrp == null || !rate) return null
-  return r2((mrp / rate - 1) * 100)
+function bufferFrom(top, base) {
+  if (top == null || !base) return null
+  return r2((top / base - 1) * 100)
 }
-function mrpFromBuffer(rate, buffer) {
-  if (rate == null || buffer == null) return null
-  // A WHOLE rupee, not two decimals. An MRP is a printed price — 995, never
-  // 995.02 — and the buffer behind it is a round figure somebody chose (50%,
-  // 53%), so the product of the two always carries paise no tag would show.
-  // Rounding here is what makes the reverse direction produce a price that can
-  // actually go on a label, and it closes the round trip: 650 + 53.08% → 995,
-  // and 995 against 650 reads back as 53.08%. An MRP that was TYPED is never
-  // touched — only one derived from a buffer.
-  return Math.round(rate * (1 + buffer / 100))
+function markup(base, pct) {
+  if (base == null || pct == null) return null
+  // A WHOLE rupee, not two decimals. These are printed prices — 448 and 560,
+  // never 447.99 — and the percentage behind them is a round figure somebody
+  // chose, so the product always carries paise no tag would show. Rounding here
+  // is what makes the chain produce prices that can go on a label, and it
+  // closes the round trip: 320 + 40% → 448, and 448 against 320 reads back as
+  // 40%.
+  return Math.round(base * (1 + pct / 100))
 }
-function rateFromBuffer(mrp, buffer) {
-  if (mrp == null || buffer == null || buffer <= -100) return null
-  return r2(mrp / (1 + buffer / 100))
+function unmarkup(top, pct) {
+  if (top == null || pct == null || pct <= -100) return null
+  return r2(top / (1 + pct / 100))
 }
 
 // The SELLING side of the triangle above: MRP − Discount % = Sale price, in
@@ -553,15 +557,9 @@ function recalcLine(row, edited, prev = row) {
   // between them that quietly switched to a line total could not be checked
   // against either. 995 − 650 = 345 is a sum anyone can do against the invoice;
   // 4140 is one nobody can.
-  if (edited === 'buffer_pct') {
-    // REVERSE pricing: cost + buffer % → MRP. The direction that matters for
-    // goods arriving with no printed tag — the cost is known and the retail
-    // price is the thing being decided.
-    if (rate != null) mrp = mrpFromBuffer(rate, buffer)
-    // …and its mirror, for a line that has an MRP but no cost yet: the same
-    // buffer says what the cost behind that tag must have been.
-    else if (mrp != null) rate = rateFromBuffer(mrp, buffer)
-    if (mrp) disc = rate == null ? disc : r2((1 - rate / mrp) * 100)
+  if (edited === 'buffer_pct' || edited === 'mrp_buffer_pct') {
+    // Handled by the markup chain below — both percentages build prices
+    // upwards from the cost, so neither belongs in this MRP-down block.
   } else if (edited === 'discount_amount' && mrp != null && discAmt != null) {
     // the one corner fromMrp does not carry: rupees off rather than percent off
     rate = r2(mrp - discAmt)
@@ -579,10 +577,55 @@ function recalcLine(row, edited, prev = row) {
     amount = r2(qty * rate)
   }
 
+  // --- the markup chain: cost → sell price → MRP ------------------------
+  //
+  //     rate 320  ─ +40% ─►  sell 448  ─ +25% ─►  MRP 560
+  //
+  // Prices are built UPWARDS from what the goods cost, which is the direction
+  // the shop actually prices in: the cost is the known number and both the
+  // shelf price and the printed tag are decisions taken on top of it. The two
+  // percentages are different questions — what to charge, and how much room to
+  // leave above it for a visible discount — so they are two columns.
+  //
+  // The MRP-down block above is untouched and still runs for a bill that STATES
+  // its retail price and a discount off it; this is the other half, for goods
+  // that arrive with no tag.
+  const mrpBuffer = nf(L.mrp_buffer_pct)
+  let sell = nf(L.sale_price)
+
+  if (CHAIN_KEYS.has(edited)) {
+    // A sell price that was TYPED stands — it is the decision, and the buffer
+    // above the cost is what follows from it (restated at the foot of this
+    // function). Recomputing it from the cost here would overwrite the number
+    // somebody just entered with the one it used to be.
+    if (edited === 'sale_price') {
+      if (rate == null && buffer != null) rate = unmarkup(sell, buffer)
+    } else if (buffer != null && rate != null) sell = markup(rate, buffer)
+    // …and its mirror, for a line priced from the shelf back down: the same
+    // buffer says what the cost behind that price must have been.
+    else if (buffer != null && sell != null && rate == null) rate = unmarkup(sell, buffer)
+
+    // An MRP the invoice PRINTED is what the supplier billed and what the tag
+    // says, so it stands. The chain fills it only where there is none — except
+    // when the MRP buffer is what was just typed, which is somebody saying
+    // plainly what the tag should be.
+    if (mrpBuffer != null && sell != null && (mrp == null || edited === 'mrp_buffer_pct')) {
+      mrp = markup(sell, mrpBuffer)
+    }
+    // Both discounts restated from wherever the prices landed. They are the
+    // same gaps read from the top: what the supplier gave off the tag, and what
+    // the shop shows off it.
+    if (mrp) {
+      if (rate != null) disc = r2((1 - rate / mrp) * 100)
+      if (sell != null) L.sale_discount_pct = r2((1 - sell / mrp) * 100)
+    }
+    L.sale_price = sell
+  }
+
   L.rate = rate
   L.discount_pct = disc
   L.amount = amount
-  L.mrp = mrp                     // moved only by a buffer edit; see above
+  L.mrp = mrp                     // moved only by the markup chain; see above
   // The discount in rupees, PER PIECE — the same base as the % beside it and as
   // the MRP and Rate it sits between. Touched only when one of those actually
   // moved: an edit to the description or the HSN has nothing to say about
@@ -594,8 +637,19 @@ function recalcLine(row, edited, prev = row) {
   // The buffer, restated from wherever the two prices ended up. Skipped when the
   // buffer is what was typed — recomputing it from the MRP it just produced is a
   // round trip that only introduces rounding, and it would fight the cursor.
-  if (PRICE_KEYS.has(edited) && edited !== 'buffer_pct') {
-    L.buffer_pct = bufferFrom(mrp, rate)
+  // Each markup restated from the two prices it spans — buffer over the cost,
+  // MRP buffer over the shelf price. Skipped for whichever was just typed:
+  // recomputing it from the price it produced is a round trip that only adds
+  // rounding, and it would fight the cursor.
+  // CHAIN_KEYS as well as PRICE_KEYS: typing a SELL price moves the buffer above
+  // the cost, and sale_price is deliberately not a PRICE_KEY — it says nothing
+  // about what the supplier charged, so it must not stir the purchase discount.
+  const movedPrices = PRICE_KEYS.has(edited) || CHAIN_KEYS.has(edited)
+  if (movedPrices && edited !== 'buffer_pct') {
+    L.buffer_pct = bufferFrom(L.sale_price, rate)
+  }
+  if (movedPrices && edited !== 'mrp_buffer_pct') {
+    L.mrp_buffer_pct = bufferFrom(mrp, L.sale_price)
   }
   // The taxable value is the line amount unless the invoice states its own. It
   // keeps up while it merely echoes the amount; the moment someone types a
@@ -697,18 +751,22 @@ const ITEM_COLS = [
   // Rate they describe: MRP −discount→ Rate, and Rate +buffer→ MRP. Which one
   // somebody types depends on which price they already know, and that is the
   // whole point of carrying both.
-  ['buffer_pct', 'Buffer %', true, 88, 'REVERSE pricing: on top of cost. MRP = Rate × (1 + buffer) — e.g. 650 + 53% = 995. Type it and the MRP is worked out.'],
+  ['buffer_pct', 'Buffer %', true, 88, 'On top of COST: Sell price = Rate × (1 + buffer) — e.g. 320 + 40% = 448. Type it and the sell price is worked out.'],
   // The retail end of the same MRP. Not on the supplier's bill — nobody prints
   // your shelf price for you — but set here the product is born priced instead
   // of landing in Inventory with nothing on it. Kept well clear of the purchase
   // discount above: same MRP, two different percentages, never the same number.
-  ['sale_discount_pct', 'Sale Disc %', true, 96, 'Off MRP for the SHOP. Nothing to do with the supplier discount. Type a sell price instead and this fills itself.'],
+  // The second half of the chain. Two markups because they answer two
+  // questions: what to charge, and how much room to leave above that for a
+  // discount the customer can see on the tag.
+  ['mrp_buffer_pct', 'MRP Buffer %', true, 104, 'On top of the SELL price: MRP = Sell × (1 + this) — e.g. 448 + 25% = 560. The room above your price that the printed tag shows.'],
+  ['sale_discount_pct', 'Sale Disc %', true, 96, 'Off MRP for the SHOP — what the tag shows the customer saving. Follows from the two buffers; type a sell price instead and this fills itself.'],
   ['sale_price', 'Sell Price', true, 92, 'What you CHARGE: MRP less the sale discount — e.g. 995 − 20% = 796. Type it and its % follows.'],
   ['taxable_value', 'Taxable', true, 90, 'Line total. The Amount, unless the invoice states its own.'],
   ['amount', 'Amount', true, 90, 'Line total: Qty × Rate. Type an amount and the rate is worked back out of it.'],
 ]
-const ITEM_CALC = new Set(['rate', 'discount_pct', 'buffer_pct', 'mrp', 'amount',
-  'taxable_value', 'sale_discount_pct', 'sale_price'])
+const ITEM_CALC = new Set(['rate', 'discount_pct', 'buffer_pct', 'mrp_buffer_pct',
+  'mrp', 'amount', 'taxable_value', 'sale_discount_pct', 'sale_price'])
 
 function LineItems({ items, setItems }) {
   // A two-page invoice runs to sixty lines and more, and the whole set in one
@@ -737,7 +795,11 @@ function LineItems({ items, setItems }) {
   // blank until somebody types in the column to find out what is already true.
   const cell = (it, k) => {
     if (k === 'buffer_pct' && (it.buffer_pct == null || it.buffer_pct === '')) {
-      const b = bufferFrom(nf(it.mrp), nf(it.rate))
+      const b = bufferFrom(nf(it.sale_price), nf(it.rate))
+      return b == null ? '' : b
+    }
+    if (k === 'mrp_buffer_pct' && (it.mrp_buffer_pct == null || it.mrp_buffer_pct === '')) {
+      const b = bufferFrom(nf(it.mrp), nf(it.sale_price))
       return b == null ? '' : b
     }
     return it[k] ?? ''
