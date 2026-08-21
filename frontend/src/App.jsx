@@ -882,6 +882,7 @@ function LineItems({ items, setItems }) {
   const [runFor, setRunFor] = useState(null)
   const [runSpec, setRunSpec] = useState('')
   const [runNote, setRunNote] = useState('')     // where a suggested run came from
+  const [runRows, setRunRows] = useState([])     // the size/qty list, before it is applied
   // the edited field is the input; recalcLine moves only what depends on it
   const upd = (i, k, v) => setItems(items.map((x, j) =>
     (j === i ? recalcLine({ ...x, [k]: num(v) }, k, x) : { ...x })))
@@ -920,14 +921,21 @@ function LineItems({ items, setItems }) {
   // whole amount would multiply the bill by six. Σ qty and Σ value come out of
   // this exactly as they went in, which is what makes it safe to do on a
   // document that has already been checked against its image.
-  const expandRun = (it, sizes) => {
-    const qtys = spreadQty(nf(it.qty) ?? 0, sizes.length)
+  // One line, spread across a list of {size, qty} — the list the operator has in
+  // front of them, not one recomputed behind their back, so a count they changed
+  // is the count that lands on the invoice. A size with nothing against it is
+  // dropped: zero of a size means that size did not come, and a line of no
+  // pieces is not a line.
+  const expandRows = (it, rows) => {
+    const kept = rows.filter((r) => String(r.size ?? '').trim() !== '' && +r.qty > 0)
+    if (!kept.length) return [it]
+    const qtys = kept.map((r) => +r.qty)
     // a line total, shared in the same proportion as the quantity, with the
     // rounding drift on the last line so the column still adds up to what it did
     const share = (total) => {
-      if (total == null) return sizes.map(() => null)
+      if (total == null) return kept.map(() => null)
       const sum = qtys.reduce((a, b) => a + b, 0)
-      const out = qtys.map((q) => r2(sum ? total * q / sum : total / sizes.length))
+      const out = qtys.map((q) => r2(sum ? total * q / sum : total / kept.length))
       out[out.length - 1] = r2(total - out.slice(0, -1).reduce((a, b) => a + b, 0))
       return out
     }
@@ -937,29 +945,53 @@ function LineItems({ items, setItems }) {
     // amount where the line has a rate, and a taxable value that was merely
     // echoing the amount keeps echoing it, while one the invoice STATED in its
     // own right keeps the share worked out above
-    return sizes.map((size, n) => recalcLine(
-      { ...it, size, qty: qtys[n], amount: amounts[n], taxable_value: taxables[n] }, 'qty', it))
+    return kept.map((r, n) => recalcLine(
+      { ...it, size: String(r.size).trim(), qty: qtys[n],
+        amount: amounts[n], taxable_value: taxables[n] }, 'qty', it))
   }
-  const closeRun = () => { setRunFor(null); setRunSpec(''); setRunNote('') }
-  const splitRun = (i) => {
+  //: what a freshly generated run is, before anybody touches it: the sizes, and
+  //: the line's pieces spread evenly over them
+  const evenRows = (it, sizes) => {
+    const qtys = spreadQty(nf(it.qty) ?? 0, sizes.length)
+    return sizes.map((size, n) => ({ size, qty: String(qtys[n]) }))
+  }
+  const closeRun = () => { setRunFor(null); setRunSpec(''); setRunNote(''); setRunRows([]) }
+  // Generate makes a LIST, not lines. Nothing on the invoice moves until Split is
+  // pressed, and that gap is the whole point of the list: an even spread is only
+  // ever a guess about what is in the carton, and the person holding the packing
+  // slip is the one who knows that 22 came four short and 18 came four over. So
+  // the arithmetic offers its answer and they correct it — change a count, drop a
+  // size that was not sent, add one the run did not cover.
+  const genRows = (i) => {
     const { sizes } = parseSizeRun(runSpec)
-    if (!sizes.length) return
-    setItems([...items.slice(0, i), ...expandRun(items[i], sizes), ...items.slice(i + 1)])
+    if (sizes.length) setRunRows(evenRows(items[i], sizes))
+  }
+  const updRunRow = (n, k, v) => setRunRows(runRows.map((r, j) => (j === n ? { ...r, [k]: v } : r)))
+  const dropRunRow = (n) => setRunRows(runRows.filter((_, j) => j !== n))
+  const addRunRow = () => setRunRows([...runRows, { size: '', qty: '' }])
+  const splitRun = (i) => {
+    if (!runRows.length) return
+    setItems([...items.slice(0, i), ...expandRows(items[i], runRows), ...items.slice(i + 1)])
     closeRun()
   }
-  // …and the same run against every line that reads the same way.
+  // …and the same sizes against every line that reads the same way.
   //
-  // A bill written like this one writes it on EVERY line: six Frocks, six design
+  // A bill written as a size run writes it on EVERY line: six Frocks, six design
   // numbers, "16*22" in all six size cells. Splitting them one at a time is the
   // same decision taken six times, and on a fifty-nine-line bill it is the kind
   // of work that gets abandoned halfway — which leaves an invoice where some
-  // lines carry sizes and some do not, and that is worse than none of them
-  // doing.
+  // lines carry sizes and some do not, and that is worse than none of them doing.
   //
-  // "Reads the same way" is the size cell, matched as text. Not the run it
-  // would suggest: two lines can suggest the same run from different quantities
-  // and different size cells, and rewriting a line somebody never looked at is
-  // exactly what a button this blunt must not do. A blank size matches nothing —
+  // It takes the SIZES off the list, so a size dropped there is dropped
+  // everywhere — but each line's own quantity is spread evenly over them, because
+  // a count hand-set for a line of four means nothing to a line of eight. The
+  // confirm says so: this button is blunt by nature and must not be quiet about
+  // it.
+  //
+  // "Reads the same way" is the size cell, matched as text. Deliberately not the
+  // run a line would suggest: two lines can suggest the same run from different
+  // quantities and different size cells, and rewriting a line somebody never
+  // looked at is exactly what this must not do. A blank size matches nothing —
   // there is nothing there to have read.
   const sameSizeAs = (i) => {
     const key = String(items[i]?.size ?? '').trim().toLowerCase()
@@ -968,35 +1000,19 @@ function LineItems({ items, setItems }) {
       (String(x.size ?? '').trim().toLowerCase() === key ? [...out, j] : out), [])
   }
   const splitRunAll = (i) => {
-    const { sizes } = parseSizeRun(runSpec)
+    const sizes = runRows.map((r) => String(r.size ?? '').trim()).filter(Boolean)
     const targets = new Set(sameSizeAs(i))
     if (!sizes.length || !targets.size) return
     if (!window.confirm(
-      `Split all ${targets.size} line(s) whose Size reads “${items[i].size}” into ${runSpec}?\n\n`
+      `Split all ${targets.size} line(s) whose Size reads “${items[i].size}” into these sizes?\n\n`
       + `${sizes.join(', ')}\n\n`
+      + `Each line's OWN quantity is spread evenly across them, so a count you set `
+      + `by hand above applies to line ${i + 1} only.\n`
       + `${targets.size} line(s) become ${targets.size * sizes.length}. `
       + 'Σ qty and Σ value do not move.')) return
-    setItems(items.flatMap((x, j) => (targets.has(j) ? expandRun(x, sizes) : [x])))
+    setItems(items.flatMap((x, j) => (targets.has(j) ? expandRows(x, evenRows(x, sizes)) : [x])))
     closeRun()
   }
-  // A supplier who printed the run in the size column has already said it, so it
-  // arrives typed rather than keyed again off the screen it is already on.
-  //
-  // Written out in full — "28-2-38" — there is nothing to work out. Written with
-  // its ends only — "16*22", sixteen to twenty-two, which is how one of these
-  // suppliers writes every line — the STEP is missing, and that is the whole
-  // difference between four sizes and seven.
-  //
-  // So the quantity decides, which is the same test the server applies before it
-  // will trust an ambiguous separator on the bill itself (services/size_split.py):
-  // the step is the one that makes the line's pieces divide evenly across the
-  // sizes it produces. Four pieces over 16-2-22 is one of each; over 16-1-22 it
-  // is four pieces among seven sizes, which is not a run anybody packed. When
-  // nothing divides — "127 X 200" is a bedsheet, and 73 does not divide by
-  // anything — there is no suggestion and the operator types what they know.
-  //
-  // A suggestion is all it is. It arrives in the box with its preview, and a
-  // human presses the button.
   const SIZE_STEPS = [2, 1, 3, 4, 5]     // garment runs go up in twos far more often than ones
   const runFromSize = (v, qty) => {
     const nums = String(v || '').trim().split(/[^0-9.]+/).filter(Boolean).map(Number)
@@ -1020,6 +1036,10 @@ function LineItems({ items, setItems }) {
     const it = items[i]
     const spec = runFromSize(it.size, nf(it.qty))
     setRunFor(i); setRunSpec(spec)
+    // a run that was READ rather than typed has already been proved against the
+    // quantity, so its list is shown straight away — the answer belongs on screen,
+    // not one press away
+    setRunRows(spec ? evenRows(it, parseSizeRun(spec).sizes) : [])
     setRunNote(spec ? `read off the size column — “${it.size}”, and ${nf(it.qty)} divides across it exactly` : '')
   }
   // Fill a whole column with one percentage.
@@ -1095,6 +1115,17 @@ function LineItems({ items, setItems }) {
             const listed = !run ? '' : run.sizes.length > 10
               ? `${run.sizes.slice(0, 9).join(', ')}, … ${run.sizes[run.sizes.length - 1]}`
               : run.sizes.join(', ')
+            // the running check, and what it is checked against. The line's
+            // quantity is what the supplier BILLED, and the sizes are how that
+            // quantity breaks down — so they have to come to the same number or
+            // the invoice stops agreeing with the paper it was read off.
+            const billed = nf(it.qty) ?? 0
+            const assigned = round3(runRows.reduce((n2, r) => n2 + (+r.qty || 0), 0))
+            const balanced = billed ? sameQty(assigned, billed) : assigned > 0
+            const keeping = runRows.filter((r) => String(r.size ?? '').trim() && +r.qty > 0).length
+            // per piece: the rate where the bill states one, otherwise whatever
+            // the line amount works out to across the pieces
+            const unit = nf(it.rate) ?? (billed ? (nf(it.amount) || 0) / billed : 0)
             return (
               <React.Fragment key={i}>
               <tr>
@@ -1129,36 +1160,90 @@ function LineItems({ items, setItems }) {
               </tr>
               {run && (
                 <tr>
-                  <td colSpan={ITEM_COLS.length + 2}
-                    style={{ background: 'var(--panel-2)', padding: '10px 12px' }}>
+                  <td colSpan={ITEM_COLS.length + 2} className="runcell">
+                    {/* the run, and what it would make */}
                     <div className="rowedit-bar sizerun">
-                      <span className="runlabel">Line {i + 1} · size run</span>
-                      <input value={runSpec} placeholder="28-2-38" autoFocus
+                      <span className="runlabel">Line {i + 1} · size detail</span>
+                      <input value={runSpec} placeholder="Start-Increment-End" autoFocus
                         onChange={(e) => { setRunSpec(e.target.value); setRunNote('') }}
-                        onKeyDown={(e) => { if (e.key === 'Enter') splitRun(i) }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') genRows(i) }}
                         title={'Start – step – end, the way the packing slip writes it.\n'
                           + '28-2-38 is 28, 30, 32, 34, 36, 38 — and 28-38 steps by one.'} />
-                      <button className="btn primary" disabled={!run.sizes.length}
-                        onClick={() => splitRun(i)}>
-                        {run.sizes.length ? `Split into ${run.sizes.length} lines` : 'Split into lines'}</button>
-                      {alike.length > 1 && (
-                        <button className="btn" disabled={!run.sizes.length}
-                          title={`Apply this run to all ${alike.length} lines whose Size reads “${it.size}” `
-                            + '— each keeps its own quantity, shared across the same sizes'}
-                          onClick={() => splitRunAll(i)}>Split all {alike.length} lines</button>
-                      )}
-                      <button className="btn" onClick={closeRun}>Cancel</button>
+                      <button className="btn" disabled={!run.sizes.length} onClick={() => genRows(i)}
+                        title={run.sizes.length
+                          ? `List ${run.sizes.join(', ')} with the ${billed} pieces spread over them`
+                          : 'Write the run as start-step-end first'}>⊕ Generate</button>
                       {runNote && <span className="runfrom">↳ {runNote}</span>}
                       <span className={'why' + (run.why ? ' bad' : '')}>
                         {run.why || (run.sizes.length
                           ? <><b>{listed}</b>
-                              {` — ${run.sizes.length} lines, `}
-                              {even ? `${qtys[0]} each` : `${Math.min(...qtys)}–${Math.max(...qtys)} each`}
-                              {nf(it.qty) ? '. Σ qty and Σ value do not move.'
-                                : ' — this line has no quantity to share out yet.'}</>
-                          : 'Start–step–end. This line becomes one line per size with the quantity '
-                            + 'shared out; description, design, HSN and the pricing carry across.')}
+                              {` — ${run.sizes.length} sizes, `}
+                              {even ? `${qtys[0]} each` : `${Math.min(...qtys)}–${Math.max(...qtys)} each`}</>
+                          : 'Start–step–end. Generates the sizes below with the quantity spread over '
+                            + 'them — change any of it before splitting.')}
                       </span>
+                    </div>
+
+                    {/* …and the list it makes, which is the part that gets
+                        corrected. Nothing on the invoice has moved yet. */}
+                    {runRows.length > 0 && (
+                      <div className="runrows">
+                        <table>
+                          <thead><tr>
+                            <th style={{ width: 24 }} />
+                            <th>Size</th><th className="num">Qty</th>
+                            <th className="num">Value</th><th style={{ width: 30 }} />
+                          </tr></thead>
+                          <tbody>
+                            {runRows.map((r, n2) => (
+                              <tr key={n2}>
+                                <td className="rowno">{n2 + 1})</td>
+                                <td><input value={r.size}
+                                  onChange={(e) => updRunRow(n2, 'size', e.target.value)} /></td>
+                                <td className="num"><input value={r.qty} inputMode="decimal"
+                                  onChange={(e) => updRunRow(n2, 'qty', e.target.value)} /></td>
+                                <td className="num money">{money((+r.qty || 0) * unit)}</td>
+                                <td><button className="btn" style={{ padding: '1px 6px' }}
+                                  title="Drop this size — it was not in the carton"
+                                  onClick={() => dropRunRow(n2)}>×</button></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <div className="runfoot">
+                          <button className="btn" onClick={addRunRow}
+                            title="A size the run did not cover">+ add size</button>
+                          <span className={'tally ' + (balanced ? 'ok' : 'bad')}>
+                            {billed
+                              ? <>{assigned} of {round3(billed)} assigned{balanced ? ' ✓'
+                                  : assigned < billed
+                                    ? ` · ${round3(billed - assigned)} still to place`
+                                    : ` · ${round3(assigned - billed)} more than the line was billed`}</>
+                              : <>{assigned} assigned · this line was billed no quantity</>}
+                          </span>
+                          <span className="tally">{money(assigned * unit)}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* what to do with it */}
+                    <div className="rowedit-bar sizerun">
+                      <button className="btn primary" disabled={!keeping || !balanced}
+                        title={!keeping ? 'Generate the sizes first'
+                          : balanced ? `Line ${i + 1} becomes ${keeping} lines`
+                            : 'The sizes have to account for every piece the line was billed'}
+                        onClick={() => splitRun(i)}>
+                        {keeping ? `Split into ${keeping} lines` : 'Split into lines'}</button>
+                      {alike.length > 1 && (
+                        <button className="btn" disabled={!keeping}
+                          title={`Apply these sizes to all ${alike.length} lines whose Size reads “${it.size}” `
+                            + '— each line\'s own quantity is spread evenly over them'}
+                          onClick={() => splitRunAll(i)}>Split all {alike.length} lines</button>
+                      )}
+                      <button className="btn" disabled={!runRows.length}
+                        title="Empty the list and start again"
+                        onClick={() => setRunRows([])}>Clear</button>
+                      <button className="btn" onClick={closeRun}>Close</button>
                     </div>
                   </td>
                 </tr>
