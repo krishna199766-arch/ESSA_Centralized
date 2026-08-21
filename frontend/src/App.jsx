@@ -899,10 +899,7 @@ function LineItems({ items, setItems }) {
   // whole amount would multiply the bill by six. Σ qty and Σ value come out of
   // this exactly as they went in, which is what makes it safe to do on a
   // document that has already been checked against its image.
-  const splitRun = (i) => {
-    const { sizes } = parseSizeRun(runSpec)
-    if (!sizes.length) return
-    const it = items[i]
+  const expandRun = (it, sizes) => {
     const qtys = spreadQty(nf(it.qty) ?? 0, sizes.length)
     // a line total, shared in the same proportion as the quantity, with the
     // rounding drift on the last line so the column still adds up to what it did
@@ -919,10 +916,47 @@ function LineItems({ items, setItems }) {
     // amount where the line has a rate, and a taxable value that was merely
     // echoing the amount keeps echoing it, while one the invoice STATED in its
     // own right keeps the share worked out above
-    const rows = sizes.map((size, n) => recalcLine(
+    return sizes.map((size, n) => recalcLine(
       { ...it, size, qty: qtys[n], amount: amounts[n], taxable_value: taxables[n] }, 'qty', it))
-    setItems([...items.slice(0, i), ...rows, ...items.slice(i + 1)])
-    setRunFor(null); setRunSpec('')
+  }
+  const closeRun = () => { setRunFor(null); setRunSpec(''); setRunNote('') }
+  const splitRun = (i) => {
+    const { sizes } = parseSizeRun(runSpec)
+    if (!sizes.length) return
+    setItems([...items.slice(0, i), ...expandRun(items[i], sizes), ...items.slice(i + 1)])
+    closeRun()
+  }
+  // …and the same run against every line that reads the same way.
+  //
+  // A bill written like this one writes it on EVERY line: six Frocks, six design
+  // numbers, "16*22" in all six size cells. Splitting them one at a time is the
+  // same decision taken six times, and on a fifty-nine-line bill it is the kind
+  // of work that gets abandoned halfway — which leaves an invoice where some
+  // lines carry sizes and some do not, and that is worse than none of them
+  // doing.
+  //
+  // "Reads the same way" is the size cell, matched as text. Not the run it
+  // would suggest: two lines can suggest the same run from different quantities
+  // and different size cells, and rewriting a line somebody never looked at is
+  // exactly what a button this blunt must not do. A blank size matches nothing —
+  // there is nothing there to have read.
+  const sameSizeAs = (i) => {
+    const key = String(items[i]?.size ?? '').trim().toLowerCase()
+    if (!key) return []
+    return items.reduce((out, x, j) =>
+      (String(x.size ?? '').trim().toLowerCase() === key ? [...out, j] : out), [])
+  }
+  const splitRunAll = (i) => {
+    const { sizes } = parseSizeRun(runSpec)
+    const targets = new Set(sameSizeAs(i))
+    if (!sizes.length || !targets.size) return
+    if (!window.confirm(
+      `Split all ${targets.size} line(s) whose Size reads “${items[i].size}” into ${runSpec}?\n\n`
+      + `${sizes.join(', ')}\n\n`
+      + `${targets.size} line(s) become ${targets.size * sizes.length}. `
+      + 'Σ qty and Σ value do not move.')) return
+    setItems(items.flatMap((x, j) => (targets.has(j) ? expandRun(x, sizes) : [x])))
+    closeRun()
   }
   // A supplier who printed the run in the size column has already said it, so it
   // arrives typed rather than keyed again off the screen it is already on.
@@ -961,7 +995,7 @@ function LineItems({ items, setItems }) {
     return ''
   }
   const openRun = (i) => {
-    if (runFor === i) { setRunFor(null); setRunSpec(''); setRunNote(''); return }
+    if (runFor === i) { closeRun(); return }
     const it = items[i]
     const spec = runFromSize(it.size, nf(it.qty))
     setRunFor(i); setRunSpec(spec)
@@ -1036,6 +1070,7 @@ function LineItems({ items, setItems }) {
             const run = runFor === i ? parseSizeRun(runSpec) : null
             const qtys = run?.sizes.length ? spreadQty(nf(it.qty) ?? 0, run.sizes.length) : []
             const even = qtys.length > 0 && qtys.every((q) => q === qtys[0])
+            const alike = run ? sameSizeAs(i) : []
             const listed = !run ? '' : run.sizes.length > 10
               ? `${run.sizes.slice(0, 9).join(', ')}, … ${run.sizes[run.sizes.length - 1]}`
               : run.sizes.join(', ')
@@ -1084,8 +1119,13 @@ function LineItems({ items, setItems }) {
                       <button className="btn primary" disabled={!run.sizes.length}
                         onClick={() => splitRun(i)}>
                         {run.sizes.length ? `Split into ${run.sizes.length} lines` : 'Split into lines'}</button>
-                      <button className="btn"
-                        onClick={() => { setRunFor(null); setRunSpec(''); setRunNote('') }}>Cancel</button>
+                      {alike.length > 1 && (
+                        <button className="btn" disabled={!run.sizes.length}
+                          title={`Apply this run to all ${alike.length} lines whose Size reads “${it.size}” `
+                            + '— each keeps its own quantity, shared across the same sizes'}
+                          onClick={() => splitRunAll(i)}>Split all {alike.length} lines</button>
+                      )}
+                      <button className="btn" onClick={closeRun}>Cancel</button>
                       {runNote && <span className="runfrom">↳ {runNote}</span>}
                       <span className={'why' + (run.why ? ' bad' : '')}>
                         {run.why || (run.sizes.length
