@@ -5020,9 +5020,23 @@ function ScanningOverlay({ url, name, vision }) {
 // this is for the consignment that arrives with no page to photograph, and for
 // correcting one that did.
 //
+//: How long goods are bought to stand before they are expected to have moved.
+//: It is a house policy rather than a fact about any one consignment, so it
+//: arrives filled in and is changed on the deliveries that differ, not typed on
+//: the ninety-nine that do not. Left blank it was simply never recorded, and the
+//: Item Locator's stock age then had nothing to call late. The server carries
+//: the same default for rows that never pass through this form — see
+//: models.LREntry.stock_holding_days.
+const DEFAULT_HOLDING_DAYS = 90
+
 // [key, label, type, opts]. `req` marks the boxes the server also enforces
 // (REQUIRED_MANUAL in routers/lr.py); `list` names a master dropdown, `src` a
 // master with its own table. combo = dropdown you can also type a new value into.
+//
+// NOTE: this array is EVALUATED when the module loads, so anything interpolated
+// into it must already be declared above — a `const` further down the file is in
+// its temporal dead zone here, and the ReferenceError takes the whole bundle
+// with it. A blank page, not a broken form.
 const LR_FORM_LEFT = [
   ['lr_mode', 'LR Mode', 'select', { req: 1, list: 'lr_mode' }],
   ['lr_no', 'LR No', 'text', { req: 1 }],
@@ -5124,14 +5138,6 @@ function LRField({ spec, form, set, opts, lists }) {
 }
 
 const today = () => new Date().toISOString().slice(0, 10)
-//: How long goods are bought to stand before they are expected to have moved.
-//: It is a house policy rather than a fact about any one consignment, so it
-//: arrives filled in and is changed on the deliveries that differ, not typed on
-//: the ninety-nine that do not. Left blank it was simply never recorded, and the
-//: Item Locator's stock age then had nothing to call late. The server carries
-//: the same default for rows that never pass through this form — see
-//: models.LREntry.stock_holding_days.
-const DEFAULT_HOLDING_DAYS = 90
 // A fresh form: the two dates default to today, exactly as their screen does.
 const blankLR = () => ({ lr_entry_date: today(), lr_date: today(), recv_date: today(),
   auto_transfer_location: 'NONE', freight_applicable: false,
