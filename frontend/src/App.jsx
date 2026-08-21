@@ -5244,11 +5244,18 @@ function LREntryForm({ editing, opts, lists, onDone, onCancel, toast, reloadOpts
 }
 
 // ---------- LR search ----------
+//: [key, label, width, which master list stands behind it]. Supplier and
+//: Transport are the same two masters the entry form offers, and they have to be
+//: offered here for the same reason: a register searched for a supplier spelled
+//: the other way finds nothing and says "no rows", which reads as "no such
+//: consignment" rather than "not how it is spelled in here". `q` has no list —
+//: it searches four different columns at once and no single master covers it.
 const LR_SEARCH_FIELDS = [
-  ['q', 'LR / Invoice / Entry no / item', 240], ['supplier', 'Supplier', 160],
-  ['transport', 'Transport', 130],
+  ['q', 'LR / Invoice / Entry no / item', 240, null],
+  ['supplier', 'Supplier', 160, 'suppliers'],
+  ['transport', 'Transport', 130, 'transports'],
 ]
-function LRSearchPanel({ onResults, onClear, toast }) {
+function LRSearchPanel({ onResults, onClear, toast, lists }) {
   const [f, setF] = useState({})
   const set = (k, v) => setF((x) => ({ ...x, [k]: v }))
   const run = async () => {
@@ -5267,11 +5274,25 @@ function LRSearchPanel({ onResults, onClear, toast }) {
         hint={activeCount
           ? `${activeCount} filter(s) — Apply, or press Enter in any box`
           : 'Set any of these, then Apply. Enter runs it too.'}>
-        {LR_SEARCH_FIELDS.map(([k, label, w]) => (
-          <div key={k} className="field" style={{ width: w }}><label>{label}</label>
-            <input value={f[k] || ''} onChange={(e) => set(k, e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') run() }} /></div>
-        ))}
+        {LR_SEARCH_FIELDS.map(([k, label, w, src]) => {
+          const choices = (src && lists?.[src]) || []
+          return (
+            <div key={k} className="field" style={{ width: w }}><label>{label}</label>
+              {/* a combo, not a select: the register holds names typed off a
+                  register page long before anybody made a master of them, so the
+                  list has to guide without refusing what is not on it */}
+              <input value={f[k] || ''} list={choices.length ? 'lrs-' + k : undefined}
+                placeholder={choices.length ? 'pick one, or type' : undefined}
+                onChange={(e) => set(k, e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') run() }} />
+              {choices.length > 0 && (
+                <datalist id={'lrs-' + k}>
+                  {choices.map((c) => <option key={c} value={c} />)}
+                </datalist>
+              )}
+            </div>
+          )
+        })}
         <DateField label="Received from" width={140} value={f.date_from || ''}
           onChange={(v) => set('date_from', v)} />
         <DateField label="to" width={140} value={f.date_to || ''}
@@ -5482,7 +5503,8 @@ function LREntryView({ toast }) {
             onDone={afterSave} onCancel={() => setForm(null)} toast={toast} reloadOpts={loadOpts} />
         )}
         {searching && (
-          <LRSearchPanel toast={toast} onResults={setFound} onClear={() => setFound(null)} />
+          <LRSearchPanel toast={toast} lists={lists}
+            onResults={setFound} onClear={() => setFound(null)} />
         )}
         {found && (
           <div className="warnbox clean" style={{ marginBottom: 14 }}>
