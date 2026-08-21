@@ -1037,6 +1037,20 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
   background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok-line); }
 .agechip.late { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
 
+/* The print block on the locator: the code itself, and the three sheets it can
+   open. The QR is shown at label size rather than as an icon — somebody whose
+   sticker has come off can read this one off the screen with the scanner. */
+.locprint-row { display: flex; gap: var(--sp-4); align-items: flex-start; flex-wrap: wrap; }
+.locprint-qr { width: 104px; height: 104px; background: #fff; padding: 6px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); flex: 0 0 auto; }
+.locprint-acts { display: flex; gap: var(--sp-2); align-items: flex-end; flex-wrap: wrap;
+  flex: 1; min-width: 260px; }
+.locprint-acts .field { margin: 0; }
+.locprint .small { margin-top: var(--sp-3); line-height: var(--lh); }
+.locprint .small.printblocked { color: var(--warn); font-weight: 600; }
+/* an <a> standing among buttons has to sit on their baseline, not text's */
+.locprint-acts a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+
 /* ---------- suppliers ---------- */
 .sup-detail { padding: var(--sp-5); overflow-y: auto; flex: 1; }
 .kv { display: grid; grid-template-columns: 170px 1fr; gap: var(--sp-2) var(--sp-4);

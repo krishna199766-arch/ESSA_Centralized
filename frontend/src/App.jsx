@@ -8874,6 +8874,109 @@ function KV({ rows }) {
   )
 }
 
+// Print the sticker from here.
+//
+// The commonest reason anybody is on this screen holding a garment is that its
+// tag has come off or cannot be read. Sending them to QR / Label Printing to
+// find the item a second time — by the code they have just established they
+// cannot read — is the one thing this screen exists to avoid. So the same sheet
+// the printing screen opens is opened from here, against the item already on
+// the page.
+//
+// Three sheets, because there are three questions: how many stickers of this
+// DESIGN, every remaining PIECE of it, and the one piece in your hand. The last
+// is only offered when a piece code was what was scanned, because only then is
+// there a particular garment to mean.
+function LocatorPrint({ res, toast }) {
+  const p = res.product
+  const [templates, setTemplates] = useState([])
+  const [tpl, setTpl] = useState(0)
+  const [copies, setCopies] = useState('1')
+  // Active ones only, and the default pre-picked — the same shape the printing
+  // screen loads, so the two offer the same list rather than two opinions of it.
+  // A failure is silent here: the print endpoint falls back to the default
+  // template on its own, so a locator that could not reach the designer can
+  // still print.
+  useEffect(() => {
+    api.labelTemplates().then((ts) => {
+      const live = (ts || []).filter((t) => t.active)
+      setTemplates(live)
+      const def = live.find((t) => t.is_default) || live[0]
+      if (def) setTpl(def.id)
+    }).catch(() => {})
+  }, [])
+
+  const ok = res.printing?.can_print !== false
+  const why = res.printing?.why
+  const open = (url) => window.open(url, '_blank')
+  const guard = () => {
+    if (ok) return true
+    toast(why || 'Labels cannot be printed for this item', 'err')
+    return false
+  }
+  const n = Math.max(1, Math.min(999, Math.round(+copies || 1)))
+  const pieces = res.unit_counts?.in_stock || 0
+
+  return (
+    <div className="section locprint">
+      <h4>QR &amp; labels</h4>
+      <div className="locprint-row">
+        <img className="locprint-qr" alt="QR code"
+          src={api.qrSvgUrl(p.product_id, 4)}
+          title={p.qr_payload || p.sku} />
+        <div className="locprint-acts">
+          <div className="field" style={{ width: 200 }}>
+            <label>Template</label>
+            <select value={tpl} onChange={(e) => setTpl(+e.target.value)}
+              title="Laid out in Label Designer. Without a choice the default is used.">
+              {!templates.length && <option value={0}>Default template</option>}
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}{t.is_default ? ' · default' : ''}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field" style={{ width: 92 }}>
+            <label>Copies</label>
+            <input value={copies} inputMode="numeric"
+              onChange={(e) => setCopies(e.target.value)}
+              title="How many stickers of this design" />
+          </div>
+          <button className="btn primary" disabled={!ok}
+            title={ok ? `Open a sheet of ${n} label(s) for ${p.sku}` : why}
+            onClick={() => guard() && open(api.labelPrintUrl(tpl, [{ id: p.product_id, qty: n }]))}>
+            🖨 Print {n} label{n === 1 ? '' : 's'}
+          </button>
+          {/* every remaining piece, each carrying its OWN code — not n copies of
+              one sticker. A garment's tag is unique to that garment. */}
+          {pieces > 0 && (
+            <button className="btn" disabled={!ok}
+              title={ok ? `One label per piece — ${pieces} in stock, each with its own code` : why}
+              onClick={() => guard() && open(api.labelPrintUrl(tpl, [], { unitProducts: [p.product_id] }))}>
+              🏷 All {pieces} piece label{pieces === 1 ? '' : 's'}
+            </button>
+          )}
+          {res.unit?.id && (
+            <button className="btn" disabled={!ok}
+              title={ok ? `Reprint the tag for piece ${res.unit.code}` : why}
+              onClick={() => guard() && open(api.labelPrintUrl(tpl, [], { units: [res.unit.id] }))}>
+              ⧉ This piece only
+            </button>
+          )}
+          <a className="btn" href={api.labelUrl(p.product_id)} target="_blank" rel="noreferrer"
+            title="The plain label this product prints without a template">Plain label</a>
+        </div>
+      </div>
+      <div className={'small' + (ok ? '' : ' printblocked')}>
+        {ok
+          ? <>Opens in a new tab, ready for the printer. Piece labels count as printed,
+              so Inventory offers a reprint afterwards rather than pretending they were not.</>
+          : <>⚠ {why}</>}
+      </div>
+    </div>
+  )
+}
+
 // How long it has been standing. The number of days is the single most useful
 // thing anyone can say about a garment nobody has sold, and the transport
 // register already carries the holding period it was bought against — so this
@@ -8914,7 +9017,7 @@ function LocatorRows({ title, rows, cols, empty }) {
   )
 }
 
-function ItemLocator() {
+function ItemLocator({ toast }) {
   const [code, setCode] = useState('')
   const [res, setRes] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -9097,6 +9200,8 @@ function ItemLocator() {
               ]} />
             </div>
           </div>
+
+          <LocatorPrint res={res} toast={toast} />
 
           <LocatorRows title="Retail stock — where the pieces are now" rows={res.locations}
             empty="Nothing has been dispatched, so every piece is still in this warehouse."
@@ -10818,7 +10923,7 @@ export default function App() {
       ) : tab === 'labels' ? (
         <LabelDesigner toast={toast} role={role} />
       ) : tab === 'locator' ? (
-        <ItemLocator />
+        <ItemLocator toast={toast} />
       ) : tab === 'labelprint' ? (
         <LabelPrinting toast={toast} />
       ) : tab === 'outward' ? (

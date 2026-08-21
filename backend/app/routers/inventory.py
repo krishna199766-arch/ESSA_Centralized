@@ -705,7 +705,7 @@ def locate(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
     it. A bundle label names a box, and quietly resolving it to a garment would
     answer a question nobody asked with a stock figure for the wrong thing.
     """
-    from ..services import (stock_view, bundles as bundle_svc,
+    from ..services import (stock_view, bundles as bundle_svc, integrity,
                             locator as loc, pos_sales)
 
     code = (code or "").strip()
@@ -797,9 +797,17 @@ def locate(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
         # the same one seen everywhere else rather than a second opinion.
         "product": stock_view.product_card(db, product),
         # Set when the code scanned was a single garment's, not the SKU's — the
-        # difference between "this design" and "this exact piece".
-        "unit": ({"code": unit.code, "seq": unit.seq, "status": unit.status,
-                  "printed": unit.print_count} if unit else None),
+        # difference between "this design" and "this exact piece". The id rides
+        # along so that ONE piece can be reprinted from here: somebody holding a
+        # garment whose sticker has come off is the commonest reason to be on
+        # this screen at all.
+        "unit": ({"id": unit.id, "code": unit.code, "seq": unit.seq,
+                  "status": unit.status, "printed": unit.print_count} if unit else None),
+        # Whether labels may be printed for this item at all, and why not. The
+        # same rule Inventory prints under (services/integrity): no stock means
+        # no garments to label, and a piece-code count that disagrees with the
+        # stock figure means the sheet would be wrong before it left the printer.
+        "printing": dict(zip(("can_print", "why"), integrity.can_print(db, product))),
         "unit_counts": {
             "total": units.count(),
             "in_stock": units.filter(models.ProductUnit.status == "in_stock").count(),
