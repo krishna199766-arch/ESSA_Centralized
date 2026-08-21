@@ -8833,6 +8833,41 @@ function DsRules({ toast, onSaved }) {
 //  scribbled note all go into the same box.
 // ==========================================================================
 
+// A block of labelled figures. Rows whose value is null are dropped rather than
+// printed as dashes: eleven attributes with three filled in is a card about three
+// attributes, and eight empty lines between them is eight lines of nothing to
+// read past. A row that must show even when empty passes a value of ''.
+function KV({ rows }) {
+  const shown = rows.filter((r) => r && r[1] !== null && r[1] !== undefined)
+  if (!shown.length) return <div className="empty" style={{ margin: '4px 0', fontSize: 13 }}>Nothing recorded.</div>
+  return (
+    <div className="kv">
+      {shown.map(([k, v]) => (
+        <React.Fragment key={k}>
+          <div className="k">{k}</div>
+          <div>{v === '' ? '—' : v}</div>
+        </React.Fragment>
+      ))}
+    </div>
+  )
+}
+
+// How long it has been standing. The number of days is the single most useful
+// thing anyone can say about a garment nobody has sold, and the transport
+// register already carries the holding period it was bought against — so this
+// can say it is LATE, which is the part that needs acting on.
+function AgeChip({ age }) {
+  if (!age) return null
+  const late = age.overdue_by > 0
+  return (
+    <span className={'agechip' + (late ? ' late' : '')}
+      title={`Received ${age.received_on}`
+        + (age.holding_days ? ` · bought against a ${age.holding_days}-day holding period` : '')}>
+      {age.days} day{age.days === 1 ? '' : 's'}{late ? ` · ${age.overdue_by} over` : ''}
+    </span>
+  )
+}
+
 function LocatorRows({ title, rows, cols, empty }) {
   if (!rows || !rows.length) return (
     <div className="section"><h4>{title}</h4>
@@ -8885,6 +8920,11 @@ function ItemLocator() {
   }
 
   const p = res?.product
+  const con = res?.consignment
+  const pr = res?.pricing
+  const ws = res?.warehouse_stock
+  //: the newest receipt — what the consignment, the age and the money hang off
+  const first = res?.receipts?.[0]
   const money2 = (v) => (v == null ? '—' : '₹ ' + money(v))
   const day = (v) => (v ? String(v).slice(0, 10) : '—')
 
@@ -8927,26 +8967,155 @@ function ItemLocator() {
           <div className="section">
             <h4>{p?.description || p?.name || 'Item'}
               <span className="panelsum">{p?.sku}</span></h4>
+            <div className="small" style={{ marginBottom: 2 }}>
+              {[p?.name !== p?.description ? p?.name : null, p?.variant,
+                p?.category].filter(Boolean).join(' · ') || 'No attributes recorded yet'}
+            </div>
             {res.unit && (
-              <div className="small" style={{ marginBottom: 8 }}>
+              <div className="small" style={{ marginTop: 6 }}>
                 Scanned ONE piece: <b className="mono">{res.unit.code}</b>
-                {' '}(#{res.unit.seq}) · {res.unit.status}
+                {' '}(#{res.unit.seq}) · {res.unit.status} — the difference between
+                {' '}this design and this exact garment.
               </div>
             )}
-            <div className="grid">
-              {[['Stock on hand', p?.stock_qty], ['UOM', p?.uom],
-                ['Size', p?.size], ['Colour', p?.color], ['Brand', p?.brand],
-                ['Design', p?.design_no], ['Material', p?.material],
-                ['HSN', p?.hsn], ['Barcode', p?.barcode],
-                ['MRP', p?.mrp == null ? null : money2(p.mrp)],
-                ['Avg cost', p?.avg_cost == null ? null : money2(p.avg_cost)],
-                ['Piece codes', (res.unit_counts?.in_stock ?? 0) + ' in stock of ' + (res.unit_counts?.total ?? 0)],
-              ].map(([l, v]) => (
-                <div className="field" key={l}><label>{l}</label>
-                  <div className="ro">{v == null || v === '' ? '—' : String(v)}</div></div>
-              ))}
+          </div>
+
+          {/* Four blocks that used to be four screens. Somebody holding the
+              garment asks all of these in one breath — what is it, where did it
+              come from, what did it cost, and how much of it is left — so they
+              are answered side by side rather than one tab at a time. */}
+          <div className="locgrid">
+            <div className="section">
+              <h4>Consignment &amp; invoice</h4>
+              <KV rows={[
+                ['Barcode', <span className="mono">{p?.supplier_barcode || p?.barcode || p?.sku}</span>],
+                ['LR entry no / stock age',
+                  (con?.lr_entry_no || res.age) ? (
+                    <>{con?.lr_entry_no || '—'} <AgeChip age={res.age} /></>
+                  ) : null],
+                ['LR no / date', con ? `${con.lr_no || '—'} / ${con.lr_date || '—'}` : null],
+                ['Mode / transport', con
+                  ? [con.mode, con.transport].filter(Boolean).join(' · ') || null : null],
+                ['Supplier', con?.supplier_name || first?.supplier || p?.supplier || ''],
+                ['Agent', con?.agent
+                  ? con.agent + (con.agent_commission ? ` · ${con.agent_commission}%` : '') : null],
+                ['GRN', first?.grn_no || null],
+                ['Invoice no', first?.invoice_number || con?.inv_no || ''],
+                ['Invoice date', day(first?.invoice_date || con?.inv_date)],
+                ['Entry date', con?.lr_entry_date || null],
+                ['Received on', res.age?.received_on || null],
+                ['Consignment', con
+                  ? [con.qty ? `${con.qty} pcs` : null, con.amount ? money2(con.amount) : null,
+                     con.boxes ? `${con.boxes} box(es)` : null].filter(Boolean).join(' · ') || null
+                  : null],
+                ['Purchase manager', con?.purchase_manager || null],
+                ['Onward branch', con?.auto_transfer_location || null],
+                ['Freight', con?.paid_topay || null],
+              ]} />
+            </div>
+
+            <div className="section">
+              <h4>Cost &amp; margin</h4>
+              <KV rows={[
+                ['Base / cost price', pr?.cost ? money2(pr.cost) : ''],
+                ['Last purchase rate',
+                  pr?.last_rate && pr.last_rate !== pr.cost ? money2(pr.last_rate) : null],
+                ['Net cost (incl. purchase tax)', pr?.net_cost
+                  ? <>{money2(pr.net_cost)}{pr.purchase_tax_pct
+                      ? <span className="small"> &nbsp;[{money2(pr.net_cost - pr.cost)} @ {pr.purchase_tax_pct}%]</span>
+                      : null}</>
+                  : null],
+                ['MRP', pr?.mrp ? money2(pr.mrp) : ''],
+                ['Selling price', pr?.sale_price
+                  ? <>{money2(pr.sale_price)}{pr.discount
+                      ? <span className="small"> &nbsp;[{money2(pr.mrp)} − {money2(pr.discount)}]</span>
+                      : null}</>
+                  : ''],
+                ['Margin', pr?.margin != null
+                  ? <>{money2(pr.margin)} <span className="small">&nbsp;{pr.margin_pct}% of the sell price</span></>
+                  : null],
+                ['Net margin', pr?.net_margin != null
+                  ? <>{money2(pr.net_margin)} <span className="small">&nbsp;{pr.net_margin_pct}% — after the purchase tax</span></>
+                  : null],
+                ['Mark-up on cost', pr?.markup_pct != null
+                  ? <span title="The same gap read from the other end: margin over COST, not over the sell price.">{pr.markup_pct}%</span>
+                  : null],
+              ]} />
+            </div>
+
+            <div className="section">
+              <h4>Product attributes</h4>
+              <KV rows={[
+                ['Brand', p?.brand || ''], ['Colour', p?.color || ''],
+                ['Pattern', p?.pattern], ['Style', p?.style],
+                ['Material', p?.material], ['Type', p?.product_type],
+                ['Sleeve', p?.sleeve], ['Fit', p?.fit],
+                ['Design', p?.design_no || ''], ['Size', p?.size || ''],
+                ['Category', p?.category], ['HSN', p?.hsn],
+                ['UOM', p?.uom], ['SKU', <span className="mono">{p?.sku}</span>],
+              ]} />
+            </div>
+
+            <div className="section">
+              <h4>Warehouse stock</h4>
+              {/* The stock figure is one number and it is the END of a story.
+                  These are the story, and they add up to it. */}
+              <KV rows={[
+                ['Purchase qty', ws?.purchased ?? ''],
+                ['Transferred out', ws?.transferred ?? ''],
+                ['Returned to supplier', ws?.returned ?? ''],
+                ['Damaged at the dock', ws?.damaged || null],
+                ['Short on the bill', ws?.short || null],
+                ['Excess over the bill', ws?.excess || null],
+                ['Journal (physical audit)', ws?.adjusted || null],
+                ['Reversed (unposted GRN)', ws?.reversed || null],
+                ['Stock', <b>{ws?.stock ?? p?.stock_qty ?? 0}</b>],
+                ['Stock value', p?.stock_value == null ? null : money2(p.stock_value)],
+                ['Piece codes', `${res.unit_counts?.in_stock ?? 0} in stock of ${res.unit_counts?.total ?? 0} printed`],
+              ]} />
             </div>
           </div>
+
+          <LocatorRows title="Retail stock — where the pieces are now" rows={res.locations}
+            empty="Nothing has been dispatched, so every piece is still in this warehouse."
+            cols={[['location', 'Location'], ['sent', 'Sent', true],
+                   ['accepted', 'Accepted', true],
+                   ['short_by', 'Short', true, (v) => (v ? <b style={{ color: 'var(--warn)' }}>{v}</b> : '—')],
+                   ['sold', 'Sold', true], ['price', 'Price', true, money2],
+                   ['discount', 'Discount', true, money2],
+                   ['selling_price', 'Selling price', true, money2]]} />
+
+          <LocatorRows title="Transfers" rows={res.transfers}
+            empty="Never transferred out of the warehouse."
+            cols={[['code', 'Code'], ['from', 'From'], ['to', 'To'],
+                   ['packed_on', 'Packed on', false, day], ['packed_qty', 'Packed', true],
+                   ['received_on', 'Received on', false, day],
+                   ['received_qty', 'Received', true],
+                   ['short_by', 'Short', true, (v) => (v ? <b style={{ color: 'var(--warn)' }}>{v}</b> : '—')],
+                   ['status', 'Status']]} />
+
+          {/* Whether it SOLD or is merely gone. From this side of the wall those
+              two look identical — stock zero, nothing on the shelf — so the till
+              is asked, read-only, and says so when it is not there to ask. */}
+          {res.sales?.available ? (
+            <LocatorRows
+              title={`Sold at the till${res.sales.bills
+                ? ` — ${res.sales.qty} on ${res.sales.bills} bill(s), ${money2(res.sales.amount)}` : ''}`}
+              rows={res.sales.rows}
+              empty="Never sold. It has not been through the till."
+              cols={[['bill_no', 'Bill'], ['date', 'Date', false, day],
+                     ['kind', 'Kind', false, (v) => (v === 'return' ? 'RETURN' : 'sale')],
+                     ['customer', 'Customer'], ['qty', 'Qty', true],
+                     ['rate', 'Rate', true, money2], ['tax', 'Tax', true, money2],
+                     ['amount', 'Amount', true, money2]]} />
+          ) : (
+            <div className="section"><h4>Sold at the till</h4>
+              <div className="empty" style={{ margin: '6px 0', fontSize: 13 }}>
+                The shop's own database is not beside this warehouse, so nothing is
+                known here about what has sold.
+              </div>
+            </div>
+          )}
 
           <LocatorRows title="Where it came from" rows={res.receipts}
             empty="No receipt recorded — this item has not been booked in against a GRN."

@@ -141,6 +141,62 @@ def sales_by_product(start=None, end=None):
     return out
 
 
+def bills_for_product(product_id, limit=50):
+    """Every till bill one warehouse item appears on, newest first.
+
+    The Item Locator's last question. Somebody holding a garment that is no
+    longer in the warehouse wants to know whether it SOLD or whether it is lost,
+    and those two answers look identical from this side of the wall: stock zero,
+    nothing on the shelf. The shop knows, so the shop is asked.
+
+    Returns are listed too, as negative quantities against their own credit note,
+    because a piece sold and brought back is not a piece that sold — and a row
+    saying so is the only way the totals here agree with the ones on the
+    dead-stock report, which nets them off the same way.
+    """
+    if not available():
+        return {"available": False, "rows": [], "qty": 0.0, "amount": 0.0}
+    sold = _rows(
+        "SELECT i.invoice_number, i.invoice_date, ii.quantity, ii.unit_price, "
+        "       ii.gst_rate, ii.tax_amount, ii.line_total, c.name, c.phone "
+        "FROM invoice_items ii "
+        "JOIN invoices i ON i.id = ii.invoice_id "
+        "JOIN products p ON p.id = ii.product_id "
+        "LEFT JOIN customers c ON c.id = i.customer_id "
+        "WHERE p.warehouse_id = ? "
+        "ORDER BY i.invoice_date DESC, i.id DESC LIMIT ?", (int(product_id), int(limit)))
+    rows = [{
+        "kind": "sale", "bill_no": r[0], "date": (r[1] or "")[:10] or None,
+        "qty": float(r[2] or 0), "rate": float(r[3] or 0),
+        "gst_rate": r[4], "tax": float(r[5] or 0), "amount": float(r[6] or 0),
+        "customer": r[7], "phone": r[8],
+    } for r in sold]
+
+    returned = _rows(
+        "SELECT cn.number, cn.created_at, ci.quantity, ci.unit_price, "
+        "       ci.gst_rate, ci.tax_amount, ci.line_total, ci.condition "
+        "FROM credit_note_items ci "
+        "JOIN credit_notes cn ON cn.id = ci.credit_note_id "
+        "JOIN products p ON p.id = ci.product_id "
+        "WHERE p.warehouse_id = ? "
+        "ORDER BY cn.created_at DESC LIMIT ?", (int(product_id), int(limit)))
+    rows += [{
+        "kind": "return", "bill_no": r[0], "date": (r[1] or "")[:10] or None,
+        "qty": -float(r[2] or 0), "rate": float(r[3] or 0),
+        "gst_rate": r[4], "tax": -float(r[5] or 0), "amount": -float(r[6] or 0),
+        "customer": r[7], "phone": None,
+    } for r in returned]
+
+    rows.sort(key=lambda x: (x["date"] or "", x["bill_no"] or ""), reverse=True)
+    return {
+        "available": True, "rows": rows,
+        "qty": round(sum(r["qty"] for r in rows), 3),
+        "amount": round(sum(r["amount"] for r in rows), 2),
+        "bills": len({r["bill_no"] for r in rows if r["kind"] == "sale"}),
+        "last_sold": next((r["date"] for r in rows if r["kind"] == "sale" and r["date"]), None),
+    }
+
+
 def last_sold_index():
     """{product_id: ISO date} — the most recent till sale of each warehouse item.
 

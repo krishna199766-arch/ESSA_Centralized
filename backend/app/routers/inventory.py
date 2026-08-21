@@ -705,7 +705,8 @@ def locate(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
     it. A bundle label names a box, and quietly resolving it to a garment would
     answer a question nobody asked with a stock figure for the wrong thing.
     """
-    from ..services import stock_view, bundles as bundle_svc
+    from ..services import (stock_view, bundles as bundle_svc,
+                            locator as loc, pos_sales)
 
     code = (code or "").strip()
     if not code and not product_id:
@@ -776,6 +777,17 @@ def locate(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
                   .filter(models.StockMovement.product_id == product.id)
                   .order_by(models.StockMovement.id.desc()).limit(30).all())]
 
+    # --- the newest receipt, which is what the money and the lorry hang off ---
+    newest = (db.query(models.PurchaseLine)
+                .filter(models.PurchaseLine.product_id == product.id)
+                .order_by(models.PurchaseLine.id.desc()).first())
+    newest_purchase = newest.purchase if newest is not None else None
+    consignment = loc.consignment_of(db, newest_purchase)
+
+    # What the till knows. Read-only, and absent rather than wrong when the shop
+    # is not installed beside us — see services/pos_sales.
+    sales = pos_sales.bills_for_product(product.id)
+
     units = db.query(models.ProductUnit).filter(
         models.ProductUnit.product_id == product.id)
     return {
@@ -796,4 +808,24 @@ def locate(code: str = "", product_id: int = 0, db: Session = Depends(get_db)):
         "cartons": cartons,
         "dispatches": dispatches,
         "movements": movements,
+        # --- and the rest of the account, gathered from the other modules ---
+        # The lorry that brought it, out of the transport register: a garment can
+        # be traced back past its own invoice to the consignment it arrived on.
+        "consignment": consignment,
+        # How long it has been standing, against the holding period it was bought
+        # under. The single most useful thing to say about a piece nobody sold.
+        "age": loc.stock_age(newest_purchase, consignment),
+        # Cost, cost with purchase tax, selling price and the margin between —
+        # four figures that live on four screens and are never seen together.
+        "pricing": loc.pricing_of(product, newest, newest_purchase),
+        # The stock figure taken apart: purchased, transferred, returned,
+        # adjusted, plus what was short or damaged and never became stock at all.
+        "warehouse_stock": loc.warehouse_stock(db, product),
+        # One row per destination these pieces went to, sent against accepted.
+        "locations": loc.locations_of(db, product,
+                                      sold=(sales.get("qty") if sales.get("available") else None)),
+        "transfers": loc.transfers_of(db, product),
+        # Whether it SOLD or is merely gone — two answers that look identical
+        # from this side of the wall.
+        "sales": sales,
     }

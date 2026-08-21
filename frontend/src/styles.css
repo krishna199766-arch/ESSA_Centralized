@@ -1019,6 +1019,24 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .catchip:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-50); }
 .catchip i { color: var(--muted); font-style: normal; margin-left: 4px; }
 
+/* ---------- item locator ---------- */
+/* Four blocks that used to be four screens, side by side while there is room and
+   stacked when there is not. Somebody holding a garment asks what it is, where it
+   came from, what it cost and how much is left in one breath. */
+.locgrid { display: grid; gap: var(--sp-4); align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+.locgrid .section { margin-bottom: 0; }
+.locgrid .kv { grid-template-columns: 150px 1fr; gap: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm); }
+.locgrid .kv .k { font-weight: 600; }
+/* how long it has stood. Green while it is inside the holding period it was
+   bought against, amber once it is not — the figure and the judgement together,
+   because "48 days" means nothing without the 30 it was supposed to be. */
+.agechip { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+  font-size: var(--fs-xs); font-weight: 700; font-variant-numeric: tabular-nums;
+  background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok-line); }
+.agechip.late { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
+
 /* ---------- suppliers ---------- */
 .sup-detail { padding: var(--sp-5); overflow-y: auto; flex: 1; }
 .kv { display: grid; grid-template-columns: 170px 1fr; gap: var(--sp-2) var(--sp-4);
