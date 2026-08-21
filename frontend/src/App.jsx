@@ -803,6 +803,18 @@ const spreadQty = (total, n) => {
   return Array.from({ length: n }, (_, i) => (i === n - 1 ? round3(t - each * (n - 1)) : each))
 }
 
+// The attribute vocabularies — the masters in data/product_attributes.json, merged
+// with whatever is already recorded against a product. The same lists the GRN
+// breakdown and the phone's detail form offer, and that is the point of them
+// being one call: a brand typed three ways is three brands, and the way to stop
+// that is to show the operator the nine that already exist before they type a
+// tenth. Free text still goes through — the list guides, it does not gate.
+function useProductOptions() {
+  const [opts, setOpts] = useState({})
+  useEffect(() => { api.productOptions().then(setOpts).catch(() => {}) }, [])
+  return opts
+}
+
 // ---------- line items ----------
 // Full per-line field set; the table scrolls horizontally so nothing is dropped.
 //
@@ -843,6 +855,14 @@ const ITEM_COLS = [
   ['taxable_value', 'Taxable', true, 90, 'Line total. The Amount, unless the invoice states its own.'],
   ['amount', 'Amount', true, 90, 'Line total: Qty × Rate. Type an amount and the rate is worked back out of it.'],
 ]
+//: The invoice columns that have a master vocabulary behind them, as
+//: column -> the key it is listed under. Brand is the one that matters here: it
+//: is identity — an ESSA t-shirt and a YUVA t-shirt in the same size are two
+//: stock items — so it is the field where a spelling invents a product, and the
+//: cure is showing the three hundred that exist before somebody types the three
+//: hundred and first. `uom` and `size` have lists too and take one line each,
+//: but a size cell on this screen is as often a run as a size.
+const ITEM_LISTED = { brand: 'brand' }
 const ITEM_CALC = new Set(['rate', 'discount_pct', 'buffer_pct', 'mrp_buffer_pct',
   'mrp', 'amount', 'taxable_value', 'sale_discount_pct', 'sale_price'])
 
@@ -856,6 +876,7 @@ function LineItems({ items, setItems }) {
   // is item 25, and passing the position on the page would silently edit the
   // first row of the invoice instead. `from` is 1-based, hence the −1.
   const page = usePaged(items, 25)
+  const opts = useProductOptions()
   // Which line has its size run open, and what has been typed into it. One box
   // serves the whole table because only one line is ever being split.
   const [runFor, setRunFor] = useState(null)
@@ -1099,7 +1120,8 @@ function LineItems({ items, setItems }) {
                           onClick={() => openRun(i)}>{runFor === i ? '×' : '≡'}</button>
                       </div>
                     ) : (
-                      <input value={cell(it, k)} onChange={(e) => upd(i, k, e.target.value)} />
+                      <input value={cell(it, k)} list={ITEM_LISTED[k] ? 'essa-item-' + k : undefined}
+                        onChange={(e) => upd(i, k, e.target.value)} />
                     )}
                   </td>
                 ))}
@@ -1148,6 +1170,12 @@ function LineItems({ items, setItems }) {
       </table>
       </div>
       <Pager {...page} noun="line" />
+      {/* one datalist for the whole table, not one per row */}
+      {Object.entries(ITEM_LISTED).map(([k, src]) => (
+        <datalist key={k} id={'essa-item-' + k}>
+          {(opts[src] || []).map((v) => <option key={v} value={v} />)}
+        </datalist>
+      ))}
       <div className="items-foot">
         <span>{items.length} lines</span>
         <span>Σ qty <b>{qtySum.toLocaleString('en-IN')}</b></span>
@@ -1812,7 +1840,7 @@ function Purchases({ selId, setSelId, toast }) {
   const [list, setList] = useState([])
   const [grn, setGrn] = useState(null)
   const [q, setQ] = useState('')
-  const [opts, setOpts] = useState({})             // attribute option lists (phone app's)
+  const opts = useProductOptions()                 // attribute option lists
   const [cats, setCats] = useState([])             // category master names
   const [splitFor, setSplitFor] = useState(null)   // line id whose breakdown is open
   const [srows, setSrows] = useState([])           // editable variant rows
@@ -1824,7 +1852,6 @@ function Purchases({ selId, setSelId, toast }) {
   const refresh = useCallback(() => api.listPurchases().then(setList), [])
   useEffect(() => { refresh() }, [refresh])
   useEffect(() => { if (selId) api.getPurchase(selId).then(setGrn); else setGrn(null) }, [selId])
-  useEffect(() => { api.productOptions().then(setOpts).catch(() => {}) }, [])
   useEffect(() => { api.unitTypes().then(setUnits).catch(() => {}) }, [])
   useEffect(() => { api.categories().then((c) => setCats((c.items || []).map((i) => i.name))).catch(() => {}) }, [])
   useEffect(() => { api.shortageOptions().then(setShortOpts).catch(() => {}) }, [])
