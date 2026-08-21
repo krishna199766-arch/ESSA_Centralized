@@ -34,6 +34,75 @@ const blankRow = (rate, category) => ({
   mrp: '', sale_price: '', sale_discount_pct: '',
 });
 
+// --- size runs: "28-2-38" is six rows of three ---
+// A garment bundle is bought as a RUN, not as a list. 28 to 38 in twos is six
+// sizes with the eighteen pieces spread evenly over them — and keying that on a
+// phone, standing over an open carton, is six rows, six sizes and six identical
+// quantities typed on a glass keyboard. So it is typed the way the packing slip
+// writes it, once. They are ordinary rows afterwards: change a quantity, drop a
+// size, add one the run didn't cover.
+//
+// Mind the separator. In a size COLUMN "30-2" means two of size 30 — that is what
+// the server's services/size_split.py reads off the supplier's own bill, and it
+// is careful about it because guessing wrong invents stock. Here it cannot mean
+// that: this box is only ever start-step-end. Two numbers ("28-38") step by one.
+//
+// The desk app has the same box (frontend/src/App.jsx) and the same arithmetic,
+// because a breakdown started on the floor and one started at a desk have to come
+// out as the same rows.
+// A step keyed as .2 instead of 2 turns a six-size run into fifty-one rows, and
+// nothing in this trade is a run of forty sizes — so that is a typo, not a run.
+const SIZE_RUN_MAX = 40;
+const parseSizeRun = (spec) => {
+  const text = String(spec || '').trim();
+  if (!text) return { sizes: [], why: '' };
+  // "16*22" written with an x or a * is two numbers and NO step. On one supplier's
+  // bills it is a size range — sixteen to twenty-two, in twos — and on another
+  // "127 X 200" is a bedsheet. Nothing in the text itself separates them, and
+  // reading either as a run off a dash would turn one line into seven sizes that
+  // were never on the bill.
+  //
+  // So this form is never a run on its own say-so. It becomes one only where the
+  // quantity proves the step (runFromSize, on the invoice grid: four pieces over
+  // 16-2-22 is one of each, and the bedsheet's 73 divides by nothing) — and what
+  // that produces is a SUGGESTION in this box, written out in full, for a human
+  // to look at. Typed in by hand it is refused, and the message asks for the step
+  // rather than pretending the run cannot be read.
+  //
+  // The server guards the same ambiguity from the other end, on what the supplier
+  // printed: services/size_split.py, where "30x2" is refused unless the
+  // arithmetic proves it.
+  if (/[x×*]/i.test(text)) {
+    return { sizes: [], why: `“${text}” does not say its step — write it start-step-end, like 16-2-22.` };
+  }
+  const nums = text.split(/[^0-9.]+/).filter(Boolean).map(Number);
+  if (nums.length < 2 || nums.length > 3 || nums.some((n) => Number.isNaN(n))) {
+    return { sizes: [], why: 'Write the run as start-step-end — 28-2-38.' };
+  }
+  const [start, step, end] = nums.length === 3 ? nums : [nums[0], 1, nums[1]];
+  if (!(step > 0)) return { sizes: [], why: 'The step has to be more than zero — 28-2-38.' };
+  const count = Math.floor(qtyOf(Math.abs(end - start) / step)) + 1;
+  if (count > SIZE_RUN_MAX) return { sizes: [], why: `That is ${count} sizes — check the step.` };
+  // 38-2-28 is the same six sizes counted down, which is how some slips write it
+  const stride = end < start ? -step : step;
+  return { sizes: Array.from({ length: count }, (_, i) => String(qtyOf(start + i * stride))), why: '' };
+};
+// 18 over 6 sizes is 3 each. 20 over 6 is 4, 4, 3, 3, 3, 3 — what will not divide
+// goes to the first rows rather than being dropped, because the thing that has to
+// be true before this GRN can post is that every piece is placed somewhere.
+const spreadQty = (total, n) => {
+  const t = Math.max(0, +total || 0);
+  if (n <= 0) return [];
+  if (Number.isInteger(t)) {
+    const base = Math.floor(t / n);
+    return Array.from({ length: n }, (_, i) => base + (i < t - base * n ? 1 : 0));
+  }
+  // metres and kilos divide unevenly; the rounding drift lands on the last row so
+  // the rows still add up to exactly what arrived
+  const each = qtyOf(t / n);
+  return Array.from({ length: n }, (_, i) => (i === n - 1 ? qtyOf(t - each * (n - 1)) : each));
+};
+
 // ---------------------------------------------------------------- GRN list ---
 function GrnList({ api, onPick, onLogout }) {
   const [list, setList] = useState([]);
@@ -286,6 +355,7 @@ function Breakdown({ api, line, options, cats, onBack, onSaved }) {
     return [blankRow(line.rate, line.category || line.category_suggestion?.best)];
   });
   const [open, setOpen] = useState({});            // row index -> details expanded
+  const [runSpec, setRunSpec] = useState('');      // "28-2-38", the run being typed
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -295,6 +365,12 @@ function Breakdown({ api, line, options, cats, onBack, onSaved }) {
   const billed = +line.qty || 0;
   const left = qtyOf(billed - assigned);
   const lastCat = rows[rows.length - 1]?.category || line.category || line.category_suggestion?.best;
+  const run = parseSizeRun(runSpec);
+  const runQtys = run.sizes.length ? spreadQty(billed, run.sizes.length) : [];
+  const runEven = runQtys.length > 0 && runQtys.every((q) => q === runQtys[0]);
+  const runListed = run.sizes.length > 10
+    ? `${run.sizes.slice(0, 9).join(', ')}, … ${run.sizes[run.sizes.length - 1]}`
+    : run.sizes.join(', ');
 
   const addRow = (size) => {
     if (size && rows.some((r) => r.size === size)) {
@@ -311,6 +387,46 @@ function Breakdown({ api, line, options, cats, onBack, onSaved }) {
       return;
     }
     setRows([...rows, { ...blankRow(line.rate, lastCat), ...(size ? { size } : {}) }]);
+  };
+
+  // Fill the rows from the run. Whatever the rows already share stays on them — a
+  // bundle in six sizes is one garment six times, and only the size and the count
+  // differ — so a colour and a category keyed once are not keyed again.
+  const applyRun = () => {
+    if (!run.sizes.length) {
+      setMsg({ text: run.why || 'Write the run as start-step-end — 28-2-38.', tone: 'err' });
+      return;
+    }
+    const fill = () => {
+      const shared = {};
+      SPLIT_ATTRS.forEach(([k]) => {
+        if (k === 'size') return;
+        const v = rows.map((r) => r[k]).find(Boolean);
+        if (v) shared[k] = v;
+      });
+      const cat = rows.map((r) => r.category).find(Boolean) || lastCat;
+      setRows(run.sizes.map((size, i) => ({
+        ...blankRow(line.rate, cat), ...shared, size, qty: String(runQtys[i]),
+      })));
+      setOpen({});
+      // more sizes than pieces: the empty ones stay on the list rather than being
+      // dropped, because which of them did not come is the receiver's to say
+      const empty = runQtys.some((q) => !q);
+      setMsg({
+        text: empty
+          ? `${run.sizes.length} sizes · only ${qtyOf(billed)} billed — set or remove the rows left at zero`
+          : `${run.sizes.length} sizes · ${qtyOf(billed)} spread `
+            + (runEven ? `${runQtys[0]} each` : 'as evenly as it divides'),
+        tone: empty ? 'err' : 'ok',
+      });
+    };
+    const typed = rows.filter((r) => variantLabel(r) || r.qty);
+    if (!typed.length) { fill(); return; }
+    Alert.alert('Replace the rows below?',
+      `${typed.length} row${typed.length === 1 ? '' : 's'} go, and the ${run.sizes.length} sizes `
+      + `of ${runSpec} take their place — ${run.sizes.join(', ')}.`,
+      [{ text: 'Keep them', style: 'cancel' },
+       { text: 'Replace', style: 'destructive', onPress: fill }]);
   };
 
   // Same rules the server enforces, checked here so a picker is told before the
@@ -379,6 +495,23 @@ function Breakdown({ api, line, options, cats, onBack, onSaved }) {
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 14, paddingTop: 6 }} keyboardShouldPersistTaps="handled">
+        <Text style={s.sectionLabel}>Size run</Text>
+        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+          <TextInput style={[s.input, { flex: 1, paddingVertical: 9 }]} value={runSpec}
+            placeholder="28-2-38" placeholderTextColor={C.muted}
+            autoCapitalize="none" autoCorrect={false} returnKeyType="go"
+            onChangeText={setRunSpec} onSubmitEditing={applyRun} />
+          <GhostButton title="Generate" disabled={!run.sizes.length}
+            style={{ paddingVertical: 12 }} onPress={applyRun} />
+        </View>
+        <Text style={[s.hint, { marginTop: 6 }, run.why ? { color: C.warn } : null]}>
+          {run.why || (run.sizes.length
+            ? `${runListed} — ${run.sizes.length} sizes, ${qtyOf(billed)} to place, `
+              + (runEven ? `${runQtys[0]} each` : `${Math.min(...runQtys)}–${Math.max(...runQtys)} each`)
+            : 'Start–step–end, the way the packing slip writes it. 28-2-38 makes 28, 30, 32, '
+              + '34, 36, 38 and spreads what arrived over them; every row stays editable.')}
+        </Text>
+
         <Text style={s.sectionLabel}>Quick add a size</Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
           {(options.size || []).slice(0, 8).map((sz) => (
