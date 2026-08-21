@@ -97,6 +97,12 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_password }) }).then(J),
   deleteUser: (id) => fetch(`/api/users/${id}`, { method: 'DELETE' }).then(J),
+  // The screens and actions the access grid draws itself from. Fetched on its own
+  // as well as riding on listUsers, so a server started before this existed can
+  // be TOLD APART from one that simply has nothing to say — `status` survives on
+  // the error for exactly that, the same way labelFields and productUnits do.
+  permissionCatalog: () => fetch('/api/users/catalog')
+    .then(r => { if (!r.ok) throw Object.assign(new Error(String(r.status)), { status: r.status }); return r.json() }),
   // The whole grant map at once, not a checkbox at a time: seventeen screens by
   // five actions is a dozen changes in one sitting, and a half-applied set of
   // permissions is not a thing that should be able to exist.

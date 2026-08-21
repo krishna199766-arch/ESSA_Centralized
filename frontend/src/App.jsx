@@ -9319,8 +9319,21 @@ function AccessEditor({ user, catalog, onSave, onClose, toast }) {
   const [map, setMap] = useState(() => ({ ...(user.permissions?.screens || {}) }))
   const [data, setData] = useState(() => [...(user.permissions?.data || [])])
   const [busy, setBusy] = useState(false)
-  const acts = catalog.actions || []
-  const screens = catalog.screens || []
+  // The grid is normally drawn from the catalog that rides along with the user
+  // list. When that is missing the screen must not open as an empty box: an
+  // empty grid already MEANS something here — unrestricted — so a grid with no
+  // rows because the server is old would read as a grid with nothing ticked.
+  // Fetch it directly, and if that 404s, say what is actually wrong.
+  const [own, setOwn] = useState(null)
+  const [stale, setStale] = useState(false)
+  useEffect(() => {
+    if ((catalog.screens || []).length) return
+    api.permissionCatalog().then(setOwn)
+      .catch((e) => setStale(e.status === 404 || e.status === 405))
+  }, [catalog])
+  const cat = (catalog.screens || []).length ? catalog : (own || catalog)
+  const acts = cat.actions || []
+  const screens = cat.screens || []
   const restricted = Object.keys(map).length > 0
 
   const has = (k, a) => (map[k] || []).includes(a)
@@ -9381,6 +9394,16 @@ function AccessEditor({ user, catalog, onSave, onClose, toast }) {
           <button className="modal-x" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
+          {!screens.length && (
+            <div className="accessnote on">
+              {stale
+                ? <>This server was started before per-screen access existed.
+                    <b> Restart the ESSA server and reload this page</b> — the grid
+                    is drawn from a list only the server can supply, and until it
+                    can there is nothing here to tick.</>
+                : <>Loading the screen list…</>}
+            </div>
+          )}
           <div className={'accessnote' + (restricted ? ' on' : '')}>
             {restricted
               ? <>Restricted to what is ticked below. Their <b>{user.role_label}</b> role
@@ -9504,6 +9527,18 @@ function Users({ toast, me }) {
     catch (e) { toast(e.detail || 'Could not save that change', 'err') }
   }
 
+  // The one field on an account that is neither identity nor a permission, and
+  // the one thing that was previously impossible to correct: somebody added as
+  // "sharu" with no full name, or spelt wrong on the day. The username is left
+  // alone deliberately — it is what tokens, ledger notes and "recorded by" lines
+  // already carry, and renaming it would orphan every one of them.
+  const rename = async (u) => {
+    const name = window.prompt(`Full name for ${u.username}:`, u.full_name || '')
+    if (name === null) return
+    patch(u, { full_name: name.trim() },
+      `✓ ${u.username} is ${name.trim() || 'unnamed'}`)
+  }
+
   const reset = async (u) => {
     // window.prompt rather than a field on the row: a reset is rare, and a
     // password box sitting open on every row is a shoulder-surfing invitation
@@ -9569,6 +9604,9 @@ function Users({ toast, me }) {
                   <td className="small">{u.last_login_at ? when(u.last_login_at) : <span title="This account has never been used">never</span>}</td>
                   <td className="small">{when(u.created_at)}</td>
                   <td style={{ whiteSpace: 'nowrap' }}>
+                    <button className="btn" style={{ padding: '2px 8px', marginRight: 5 }}
+                      onClick={() => rename(u)}
+                      title="Change the name shown against this account">Edit name</button>
                     {!isMe(u) && (
                       <button className="btn" style={{ padding: '2px 8px', marginRight: 5 }}
                         onClick={() => setAccess(u)}
