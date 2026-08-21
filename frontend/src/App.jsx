@@ -863,6 +863,42 @@ const ITEM_COLS = [
 //: hundred and first. `uom` and `size` have lists too and take one line each,
 //: but a size cell on this screen is as often a run as a size.
 const ITEM_LISTED = { brand: 'brand' }
+
+// --- size groups: the lines one bundle was split into ---
+// Four lines that agree on everything except the size and the count are one
+// garment seen four ways — same description, same design, same HSN, same price.
+// That is what makes them a group, and NOTHING is stamped on the rows to say so:
+// it is read off the values themselves, so it survives a save and a reload, it
+// costs the invoice no field it did not have, and a line edited until it no
+// longer matches simply leaves the group. Folding is a view of the lines. It
+// changes none of them.
+//
+// Consecutive only. Two identical runs at opposite ends of a fifty-nine-line
+// bill are two entries on the paper and stay two here; collapsing across the
+// rows between them would fold a part of the invoice that is not there.
+const ITEM_GROUP_BY = ['description', 'brand', 'design', 'hsn', 'uom',
+                       'rate', 'mrp', 'discount_pct', 'sale_price']
+const itemGroupKey = (it) =>
+  ITEM_GROUP_BY.map((k) => String(it?.[k] ?? '').trim().toLowerCase()).join('|')
+//: only a line that says something can be grouped. Two untouched blank rows agree
+//: on everything, and folding them would be folding nothing into nothing.
+const itemGroupable = (it) =>
+  !!String(it?.description ?? '').trim() && !!String(it?.size ?? '').trim()
+//: the invoice as it is READ: every line, with the runs gathered. `to` is
+//: exclusive, so `to - from > 1` is what makes an entry a group.
+const groupItems = (items) => {
+  const out = []
+  for (let i = 0; i < items.length;) {
+    let j = i + 1
+    if (itemGroupable(items[i])) {
+      const k = itemGroupKey(items[i])
+      while (j < items.length && itemGroupable(items[j]) && itemGroupKey(items[j]) === k) j++
+    }
+    out.push({ sig: itemGroupKey(items[i]), from: i, to: j })
+    i = j
+  }
+  return out
+}
 const ITEM_CALC = new Set(['rate', 'discount_pct', 'buffer_pct', 'mrp_buffer_pct',
   'mrp', 'amount', 'taxable_value', 'sale_discount_pct', 'sale_price'])
 
@@ -875,7 +911,11 @@ function LineItems({ items, setItems }) {
   // The row's index in the WHOLE list is what upd and delRow take: page 2 row 1
   // is item 25, and passing the position on the page would silently edit the
   // first row of the invoice instead. `from` is 1-based, hence the −1.
-  const page = usePaged(items, 25)
+  // Paged over the VIEW, not the lines: a folded group is one thing to page past,
+  // and "1–25 of 24" would otherwise count rows nobody can see.
+  const view = useMemo(() => groupItems(items), [items])
+  const [folded, setFolded] = useState({})       // group signature -> folded away
+  const page = usePaged(view, 25)
   const opts = useProductOptions()
   // Which line has its size run open, and what has been typed into it. One box
   // serves the whole table because only one line is ever being split.
@@ -892,7 +932,7 @@ function LineItems({ items, setItems }) {
   const addRow = () => {
     const next = [...items, { description: '', qty: null, rate: null, amount: null, uom: 'PCS' }]
     setItems(next)
-    if (page.size) page.setPage(Math.ceil(next.length / page.size))
+    if (page.size) page.setPage(Math.ceil((view.length + 1) / page.size))
   }
   // A line read off an invoice arrives with an MRP and a Rate and no buffer —
   // the bill states a discount, never a markup. The buffer is that same gap
@@ -910,6 +950,27 @@ function LineItems({ items, setItems }) {
     return it[k] ?? ''
   }
   const delRow = (i) => setItems(items.filter((_, j) => j !== i))
+  const delGroup = (g) => {
+    if (!window.confirm(`Delete all ${g.to - g.from} lines of “${items[g.from].description}”?`)) return
+    setItems(items.filter((_, j) => j < g.from || j >= g.to))
+  }
+  // One cell of a folded group. The sizes are listed, the three line totals are
+  // summed, and anything the lines disagree on is shown as a dash rather than as
+  // whichever of them happened to be first.
+  const groupCell = (g, k) => {
+    const rows = items.slice(g.from, g.to)
+    if (k === 'size') {
+      const sizes = rows.map((r) => String(r.size ?? '').trim()).filter(Boolean)
+      return sizes.length > 6
+        ? `${sizes.slice(0, 5).join(', ')}, … ${sizes[sizes.length - 1]}`
+        : sizes.join(', ')
+    }
+    if (k === 'qty' || k === 'amount' || k === 'taxable_value') {
+      return round3(rows.reduce((n2, r) => n2 + (+r[k] || 0), 0))
+    }
+    const vals = new Set(rows.map((r) => String(cell(r, k) ?? '')))
+    return vals.size === 1 ? [...vals][0] : '—'
+  }
   // One billed bundle becomes the lines it is really made of: same description,
   // same design, same HSN, same pricing, one size each and the quantity shared
   // out. Done HERE, while the invoice is being keyed, the sizes are on the
@@ -1073,6 +1134,9 @@ function LineItems({ items, setItems }) {
   )
 
 
+  //: the groups there are to fold, and whether they already are
+  const runGroups = view.filter((g) => g.to - g.from > 1)
+  const allFolded = runGroups.length > 0 && runGroups.every((g) => folded[g.sig])
   const qtySum = items.reduce((s, x) => s + (+x.qty || 0), 0)
   const amtSum = items.reduce((s, x) => s + (+(x.taxable_value ?? x.amount) || 0), 0)
   // The per-piece gap between MRP and cost, taken out to the line — the one
@@ -1106,8 +1170,42 @@ function LineItems({ items, setItems }) {
             ))}<th></th></tr>
         </thead>
         <tbody>
-          {page.slice.map((it, j) => {
-            const i = page.from - 1 + j          // its index in the whole invoice
+          {page.slice.map((g) => {
+            const grouped = g.to - g.from > 1
+            // FOLDED — the whole group as one row. It is a VIEW of the lines, not
+            // another line: every figure on it is theirs, summed or shared, so
+            // none of it is an input. Open it to change anything.
+            if (grouped && folded[g.sig]) {
+              const kids = items.slice(g.from, g.to)
+              return (
+                <tr key={g.sig + g.from} className="foldrow">
+                  <td className="rowno" title={`Lines ${g.from + 1} to ${g.to} of the invoice`}>
+                    {g.from + 1}–{g.to}</td>
+                  {ITEM_COLS.map(([k, , isNum, , tip]) => (
+                    <td key={k} className={(isNum ? 'num' : '') + (ITEM_CALC.has(k) ? ' calc' : '')}
+                      title={tip}>
+                      {k === 'size' ? (
+                        <div className="sizecell">
+                          <span className="foldsizes"
+                            title={kids.map((r) => `${r.size} → ${r.qty}`).join('\n')}>
+                            {groupCell(g, k)}</span>
+                          <button className="runbtn on wide"
+                            title={`Show all ${kids.length} size lines again`}
+                            onClick={() => setFolded({ ...folded, [g.sig]: false })}>
+                            ≡ {kids.length}</button>
+                        </div>
+                      ) : groupCell(g, k)}
+                    </td>
+                  ))}
+                  <td><button className="btn" style={{ padding: '2px 7px' }}
+                    title={`Delete all ${kids.length} lines`}
+                    onClick={() => delGroup(g)}>×</button></td>
+                </tr>
+              )
+            }
+            // OPEN — the lines themselves, each editable as before
+            return items.slice(g.from, g.to).map((it, n) => {
+            const i = g.from + n                 // its index in the whole invoice
             const run = runFor === i ? parseSizeRun(runSpec) : null
             const qtys = run?.sizes.length ? spreadQty(nf(it.qty) ?? 0, run.sizes.length) : []
             const even = qtys.length > 0 && qtys.every((q) => q === qtys[0])
@@ -1143,12 +1241,23 @@ function LineItems({ items, setItems }) {
                     {k === 'size' ? (
                       <div className="sizecell">
                         <input value={cell(it, k)} onChange={(e) => upd(i, k, e.target.value)} />
-                        <button className={'runbtn' + (runFromSize(it.size, nf(it.qty)) ? ' on' : '')}
-                          title={runFor === i ? 'Close the size run'
-                            : runFromSize(it.size, nf(it.qty))
-                              ? `Split this line into ${parseSizeRun(runFromSize(it.size, nf(it.qty))).sizes.join(', ')}`
-                              : 'Split this line into a size run — 28-2-38 becomes six lines, one per size'}
-                          onClick={() => openRun(i)}>{runFor === i ? '×' : '≡'}</button>
+                        {/* Two jobs, and which one it has is settled by whether
+                            this line is already one size OF a run. A line that is
+                            has nothing left to split, so ≡ folds its group away
+                            instead — which is the only thing anybody wants from a
+                            row that says FROCK · 4313 · 16 · 1. */}
+                        <button className={'runbtn' + (grouped ? ' fold wide'
+                          : runFromSize(it.size, nf(it.qty)) ? ' on' : '')}
+                          title={grouped
+                            ? `Fold these ${g.to - g.from} sizes into one row`
+                            : runFor === i ? 'Close the size detail'
+                              : runFromSize(it.size, nf(it.qty))
+                                ? `Split this line into ${parseSizeRun(runFromSize(it.size, nf(it.qty))).sizes.join(', ')}`
+                                : 'Split this line into a size run — 28-2-38 becomes six lines, one per size'}
+                          onClick={() => (grouped
+                            ? setFolded({ ...folded, [g.sig]: true })
+                            : openRun(i))}>
+                          {grouped ? `≡ ${g.to - g.from}` : runFor === i ? '×' : '≡'}</button>
                       </div>
                     ) : (
                       <input value={cell(it, k)} list={ITEM_LISTED[k] ? 'essa-item-' + k : undefined}
@@ -1250,6 +1359,7 @@ function LineItems({ items, setItems }) {
               )}
               </React.Fragment>
             )
+            })
           })}
         </tbody>
       </table>
@@ -1267,7 +1377,22 @@ function LineItems({ items, setItems }) {
         {discSum > 0 && <span title="Σ ((MRP − Rate) × Qty) — the whole invoice's gap between printed price and cost">
           Σ MRP − cost <b>{money(discSum)}</b></span>}
         <span>Σ value <b>{money(amtSum)}</b></span>
-        <button className="btn" style={{ padding: '3px 10px', marginLeft: 'auto' }} onClick={addRow}>+ add line</button>
+        {/* A twenty-four-line invoice that is really six garments in four sizes
+            each is six things to check, not twenty-four — but only if they can be
+            put away all at once. One line at a time is not an offer anybody
+            takes on a bill this shape. */}
+        {runGroups.length > 0 && (
+          <button className="btn" style={{ padding: '3px 10px', marginLeft: 'auto' }}
+            title={allFolded ? 'Show every size line again'
+              : `Fold each run of sizes into one row — ${runGroups.length} of them on this invoice`}
+            onClick={() => setFolded(allFolded ? {}
+              : Object.fromEntries(runGroups.map((g) => [g.sig, true])))}>
+            {allFolded ? '⊞ show every size'
+              : `⊟ fold ${runGroups.length} size group${runGroups.length === 1 ? '' : 's'}`}
+          </button>
+        )}
+        <button className="btn" style={{ padding: '3px 10px', marginLeft: runGroups.length ? 0 : 'auto' }}
+          onClick={addRow}>+ add line</button>
       </div>
     </div>
   )

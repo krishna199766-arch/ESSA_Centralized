@@ -846,6 +846,25 @@ table.items .runbtn:hover { border-color: var(--brand); color: var(--brand);
 table.items .runbtn.on { border-color: var(--info-line); background: var(--info-bg);
   color: var(--info); }
 table.items .runbtn.on:hover { border-color: var(--info); }
+/* wide enough for the count beside the glyph — "≡ 4" is the whole point of it:
+   a folded row must say how many rows it is standing in for */
+table.items .runbtn.wide { width: auto; padding: 0 5px; font-variant-numeric: tabular-nums; }
+/* the fold control on an open group. Quieter than .on, which means "there is a
+   run here to be made"; this one means "there is a run here already". */
+table.items .runbtn.fold { border-color: var(--line-strong); color: var(--text-2);
+  background: var(--panel-2); }
+table.items .runbtn.fold:hover { border-color: var(--brand); color: var(--brand);
+  background: var(--brand-50); }
+
+/* A folded group: one row standing in for several. Tinted, and with none of the
+   inputs the rows below it have — every figure on it is theirs summed or shared,
+   and a box you can type into that writes back to four lines at once is a lie
+   about what is happening. */
+table.items tr.foldrow td { background: var(--panel-2); color: var(--text-2); }
+table.items tr.foldrow td.rowno { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.items tr.foldrow .foldsizes { flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace;
+  font-size: var(--fs-sm); color: var(--text); }
 
 /* The muted second line inside a cell — a value and its qualifier sharing one
    column (a date and what it is dated from, a product and its category). Defined
