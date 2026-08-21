@@ -41,6 +41,41 @@ SPLIT_ATTRS = ("size", "color", "material", "pattern", "fit", "product_type",
 SPLIT_PRICES = ("rate", "mrp", "sale_price", "sale_discount_pct")
 
 
+def _clean(v):
+    v = v.strip() if isinstance(v, str) else v
+    return v or None
+
+
+def named_attrs(size=None, brand=None, design_no=None):
+    """The identity attributes a LINE names about itself, shaped like a split row.
+
+    An invoice keyed size by size — one line per size of a run, each carrying its
+    brand and design — describes stock items exactly as precisely as a breakdown
+    does. It has to be matched the same way, and this is what lets it be: without
+    it FROCK/16 and FROCK/18 both score 100 against an existing "FROCK" and four
+    sizes collapse back into the one stock item the split existed to separate.
+
+    A size cell holding a RUN is not a size. "30:2, 32:4" is four garments hiding
+    in one line, and the answer to it is the breakdown, not a product called FROCK
+    whose size is the string "30:2, 32:4".
+
+    Returns None when the line names nothing — a plain bundle line then matches on
+    its description exactly as it always did.
+    """
+    from . import size_split
+    size = _clean(size)
+    if size and size_split.parse(size)["rows"]:
+        size = None
+    got = {"size": size, "brand": _clean(brand), "design_no": _clean(design_no)}
+    return {a: got.get(a) for a in SPLIT_ATTRS} if any(got.values()) else None
+
+
+def line_named_attrs(line):
+    """`named_attrs` for a PurchaseLine."""
+    return named_attrs(getattr(line, "size", None), getattr(line, "brand", None),
+                       getattr(line, "design_no", None))
+
+
 def match_product(db, barcode, description, hsn, supplier_id, attrs=None):
     """Find an existing product for a purchase line. Returns Product or None.
 
@@ -139,8 +174,12 @@ def build_grn_from_document(db, doc):
     db.flush()
 
     for it in data.get("line_items", []):
+        # a line that names a size, a brand or a design is matched on that tuple,
+        # the way a breakdown row is — see named_attrs
         match = match_product(db, it.get("barcode"), it.get("description"),
-                              it.get("hsn"), doc.supplier_id)
+                              it.get("hsn"), doc.supplier_id,
+                              attrs=named_attrs(it.get("size"), it.get("brand"),
+                                                it.get("design")))
         db.add(models.PurchaseLine(
             purchase_id=purchase.id,
             product_id=match.id if match else None,
@@ -150,6 +189,9 @@ def build_grn_from_document(db, doc):
             # the size cell verbatim — a size run like "30:2, 32:4" is the
             # breakdown the supplier already counted, and size_split reads it
             size=it.get("size"),
+            # the invoice's own Brand and Design columns. The document calls it
+            # `design`; the stock master has always called it `design_no`.
+            brand=it.get("brand"), design_no=it.get("design"),
             amount=it.get("amount") if it.get("amount") is not None else it.get("taxable_value"),
             # retail: the MRP the supplier printed, and the shelf price someone
             # set on the review screen. Carried through so the product this line
@@ -311,7 +353,7 @@ def set_line_splits(db, line, rows):
     else:
         # breakup removed: fall back to matching the bundle line as a whole
         match = match_product(db, line.barcode, line.description, line.hsn,
-                              line.purchase.supplier_id)
+                              line.purchase.supplier_id, attrs=line_named_attrs(line))
         line.product_id = match.id if match else None
         line.is_new_product = match is None
     db.flush()
@@ -381,6 +423,14 @@ def _create_product(db, purchase, line, split=None, mint_codes=False, unit=None)
     if split is not None:
         for a in SPLIT_ATTRS:
             setattr(product, a, getattr(split, a, None))
+    else:
+        # No breakdown, but the LINE may still say what this is. An invoice keyed
+        # one line per size is a breakdown done earlier, and dropping what it says
+        # here is what left a product called FROCK with no size, no brand and no
+        # design after somebody had typed all three.
+        for a, v in (line_named_attrs(line) or {}).items():
+            if v:
+                setattr(product, a, v)
     # Retail pricing: the variant's own where it has any, otherwise the line's.
     # A breakdown that only names sizes should not throw away a price set for the
     # whole bundle on the review screen — the sizes are the same goods.

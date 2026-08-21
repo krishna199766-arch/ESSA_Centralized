@@ -122,7 +122,7 @@ def _line_out(l: models.PurchaseLine, db: Session = None, suggest: bool = True):
         # post — a breakdown row overrides it per variant
         "mrp": l.mrp, "sale_price": l.sale_price,
         "sale_discount_pct": l.sale_discount_pct,
-        "size": l.size,
+        "size": l.size, "brand": l.brand, "design_no": l.design_no,
         # "30:2, 32:4, 34:4, 36:2" read back as rows. The supplier already
         # counted the mix; offering it here means nobody re-keys a count that has
         # been done, and each size still becomes its own product with its own SKU

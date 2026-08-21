@@ -2168,9 +2168,16 @@ function Purchases({ selId, setSelId, toast }) {
       return r
     }
     if (l.splits.length) { setSrows(l.splits.map(from)); return }
-    // a new row inherits the line's category (or the mapping it would get), so the
-    // common case — one category, several sizes — needs no repetition
-    const blank = () => blankVariant(l.rate, l.category || l.category_suggestion?.best)
+    // A new row starts from what the LINE already says about itself: its category
+    // (or the mapping it would get), and the brand and design number that came off
+    // the invoice. The common case — one garment, one brand, one design, several
+    // sizes — should need none of that typed twice, and a brand re-keyed per size
+    // is a brand that ends up spelled two ways.
+    const blank = () => ({
+      ...blankVariant(l.rate, l.category || l.category_suggestion?.best),
+      ...(l.brand ? { brand: l.brand } : {}),
+      ...(l.design_no ? { design_no: l.design_no } : {}),
+    })
     // The supplier printed the mix in the size column — "30:2, 32:4, 34:4, 36:2"
     // is the count already done by whoever packed the carton. Re-keying it here
     // is how it gets keyed wrong, so it arrives filled in and the operator checks

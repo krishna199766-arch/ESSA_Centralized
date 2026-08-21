@@ -262,6 +262,15 @@ class PurchaseLine(Base):
     # reading of it is offered, never imposed: services/size_split.py turns it
     # into breakdown rows for a human to accept.
     size = Column(String)
+    # Brand and design number, off the invoice's own columns. They were being
+    # dropped at this boundary: typed on the review screen, gone by the GRN, and
+    # the product created here was born with neither. Brand is not decoration —
+    # an ESSA frock and a YUVA frock are different stock items — and the design
+    # number is how this trade tells two frocks apart at all. See
+    # `named_attrs`: together with the size they are what makes a line that names
+    # itself match like a breakdown row rather than on its description alone.
+    brand = Column(String)
+    design_no = Column(String)
     # Retail, per piece. `mrp` is off the invoice — suppliers print it and it was
     # being dropped here, so an undivided line created a product with no MRP even
     # though the bill stated one. The other two are not on any bill: nobody prints
