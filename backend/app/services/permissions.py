@@ -1,0 +1,169 @@
+"""Per-screen access: what one account may VIEW, CREATE, MODIFY, DELETE and PRINT.
+
+Roles answer "how much of this app is yours" in three steps, and three steps is
+not enough for a warehouse. A receiving clerk needs the GRN screen but must not
+post a return; a stock auditor needs to read every screen and change none of
+them. Both of those are inside one role today, so the only way to express them
+was to hand out the whole role.
+
+So a user may carry a GRANT MAP on top of their role: screen → the actions they
+have on it. Two rules make it safe to add to a system that has been running
+without it:
+
+  * **The role is still the ceiling.** A grant cannot reach past it. Ticking
+    Reports for a floor user does not open Reports — `security.POLICY` still
+    says Reports is admin, and it is still the thing that refuses. This keeps
+    one answer to "what is dangerous", and it means a mis-tick cannot escalate
+    anybody.
+  * **No map means no narrowing.** A user with nothing recorded behaves exactly
+    as they did before — their role decides, as it always has. Existing accounts
+    are therefore untouched until somebody deliberately restricts one, and an
+    empty map is never mistaken for "denied everything", which would lock the
+    warehouse out of its own app on the morning of an upgrade.
+
+The screens are the app's own modules, and the paths that serve them are already
+enumerated once, in `security.POLICY`. They are not enumerated a second time
+here: a table of path→screen kept beside a table of path→role is two tables that
+drift, and the drift is silent and is a security hole. POLICY carries the screen.
+"""
+
+#: What can be done to a screen. `print` is separate from `view` because reading
+#: a cost on screen and walking out with it on paper are different acts, and the
+#: reference system this warehouse came from has always distinguished them.
+ACTIONS = [
+    ("view", "View", "open the screen and read it"),
+    ("create", "Create", "add new records on it"),
+    ("modify", "Modify", "change records that are already there"),
+    ("delete", "Delete", "remove records"),
+    ("print", "Print", "print labels, or export the register to a file"),
+]
+ACTION_KEYS = [a for a, _, _ in ACTIONS]
+
+#: The screens, in the order the menu shows them. `group` is the heading they sit
+#: under; `min` repeats the role floor from security.POLICY so the editor can say
+#: WHY a box it is showing will not take effect for this user.
+SCREENS = [
+    ("dashboard",  "Warehouse Dashboard", "Warehouse", None),
+    ("lr",         "Transport / LR Entry", "Warehouse", None),
+    ("documents",  "Invoice Entry", "Warehouse", None),
+    ("purchases",  "GRN — Receive Goods", "Warehouse", None),
+    ("inventory",  "Inventory", "Warehouse", None),
+    ("locator",    "Item Locator", "Warehouse", None),
+    ("labelprint", "QR / Label Printing", "Warehouse", None),
+    ("outward",    "Stock Outward", "Warehouse", None),
+    ("inward",     "Stock Inward", "Warehouse", None),
+    ("deadstock",  "Dead Stock & Clearance", "Office", "admin"),
+    ("returns",    "Returns / Debit Notes", "Office", "admin"),
+    ("payments",   "Payments", "Office", "admin"),
+    ("reports",    "Reports", "Office", "admin"),
+    ("suppliers",  "Suppliers", "Setup", "admin"),
+    ("masters",    "Masters", "Setup", "admin"),
+    ("labels",     "Label Designer", "Setup", "admin"),
+    ("users",      "Users & Access", "Setup", "superadmin"),
+]
+SCREEN_KEYS = [k for k, _, _, _ in SCREENS]
+
+#: Figures a screen may be told to withhold. Only these four, because these four
+#: are the ones this app can actually enforce — they are stripped in
+#: `stock_view.product_card` and `inventory._product_out`, which is every path a
+#: price reaches a screen by. A checkbox that hides nothing is worse than no
+#: checkbox: it is a promise the software does not keep.
+DATA_PERMISSIONS = [
+    ("hide_cost_price", "Hide cost price",
+     "the GRN cost and weighted-average cost, everywhere they are shown"),
+    ("hide_selling_price", "Hide selling price",
+     "the shelf price and its discount"),
+    ("hide_mrp", "Hide MRP", "the printed retail price"),
+    ("hide_supplier", "Hide supplier",
+     "who the goods were bought from, on stock and locator screens"),
+]
+DATA_KEYS = [k for k, _, _ in DATA_PERMISSIONS]
+
+
+def normalise(raw):
+    """A stored permission blob, cleaned of anything this app does not know.
+
+    Keys that are not screens, actions that are not actions and data flags that
+    are not flags are dropped rather than kept: a permission nothing enforces is
+    a promise the software does not keep, and the way one gets in is a rename.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    screens = {}
+    for key, acts in (raw.get("screens") or {}).items():
+        if key not in SCREEN_KEYS:
+            continue
+        keep = sorted({a for a in (acts or []) if a in ACTION_KEYS},
+                      key=ACTION_KEYS.index)
+        if keep:
+            screens[key] = keep
+    data = sorted({d for d in (raw.get("data") or []) if d in DATA_KEYS},
+                  key=DATA_KEYS.index)
+    locations = [str(x).strip() for x in (raw.get("locations") or []) if str(x).strip()]
+    out = {}
+    if screens:
+        out["screens"] = screens
+    if data:
+        out["data"] = data
+    if locations:
+        out["locations"] = sorted(set(locations))
+    return out
+
+
+def has_map(perms):
+    """Whether this account has been restricted at all.
+
+    The distinction the whole feature turns on: **nothing recorded** means the
+    role decides, exactly as before. It does NOT mean denied.
+    """
+    return bool((perms or {}).get("screens"))
+
+
+def allows(perms, screen, action):
+    """May this account do `action` on `screen`?
+
+    True when nothing has been recorded — see has_map. `view` is implied by every
+    other action: an account that may create a GRN can obviously open the GRN
+    screen, and making somebody tick both is a way to produce accounts that can
+    write to a screen they cannot read.
+    """
+    if not has_map(perms):
+        return True
+    if screen is None:
+        return True                     # a path no screen claims; the role decides
+    granted = (perms.get("screens") or {}).get(screen) or []
+    if action in granted:
+        return True
+    return action == "view" and bool(granted)
+
+
+def hides(perms, flag):
+    """Whether a figure is withheld from this account."""
+    return flag in ((perms or {}).get("data") or [])
+
+
+def template(role):
+    """The grant map a role starts from — everything that role can reach anyway.
+
+    Offered in the editor as a starting point, because the useful restriction is
+    almost always "all of this except two things", and building that up from
+    seventeen empty rows is how the job gets abandoned half-done.
+    """
+    from .users import ROLE_RANK
+    rank = ROLE_RANK.get(role, 0)
+    screens = {}
+    for key, _, _, need in SCREENS:
+        if need and rank < ROLE_RANK.get(need, 99):
+            continue
+        screens[key] = list(ACTION_KEYS)
+    return {"screens": screens}
+
+
+def catalog():
+    """Everything the editor needs to draw itself, named the same on both sides."""
+    return {
+        "actions": [{"key": k, "label": l, "why": w} for k, l, w in ACTIONS],
+        "screens": [{"key": k, "label": l, "group": g, "min": m}
+                    for k, l, g, m in SCREENS],
+        "data_permissions": [{"key": k, "label": l, "why": w}
+                             for k, l, w in DATA_PERMISSIONS],
+    }

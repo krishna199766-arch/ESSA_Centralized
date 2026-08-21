@@ -275,7 +275,7 @@ function LoginScreen({ onLogin }) {
     e.preventDefault(); setErr(''); setBusy(true)
     try {
       const r = await api.login(username.trim(), password)
-      onLogin(r.token, r.user, r.role)
+      onLogin(r.token, r.user, r.role, r.permissions)
     } catch (e) { setErr(e.detail || 'Login failed'); setBusy(false) }
   }
 
@@ -9169,9 +9169,183 @@ const ROLE_HELP = {
   superadmin: 'Everything, plus this screen and the server settings (the vision key and model).',
 }
 
+// ==========================================================================
+//  Access editor — what one account may do, screen by screen
+//  ------------------------------------------------------------------------
+//  Three roles answer "how much of this app is yours" in three steps, and three
+//  steps is not enough for a warehouse. A receiving clerk needs the GRN screen
+//  and must not post a return; a stock auditor needs to read every screen and
+//  change none of them. Both of those live inside one role, so the only way to
+//  express either was to hand over the whole role.
+//
+//  Two things about this grid are worth knowing before ticking anything, and
+//  both are said on the screen rather than only here:
+//
+//    * The ROLE IS STILL THE CEILING. Ticking Reports for a floor user does not
+//      open Reports — the server still refuses it. A tick can only ever take
+//      access away, never add it, which is what makes a mis-tick harmless.
+//    * NO TICKS AT ALL means the role decides on its own, exactly as it did
+//      before this existed. An empty grid is not "denied everything"; it is
+//      "unrestricted", and it is what every existing account starts as.
+// ==========================================================================
+function AccessEditor({ user, catalog, onSave, onClose, toast }) {
+  const [map, setMap] = useState(() => ({ ...(user.permissions?.screens || {}) }))
+  const [data, setData] = useState(() => [...(user.permissions?.data || [])])
+  const [busy, setBusy] = useState(false)
+  const acts = catalog.actions || []
+  const screens = catalog.screens || []
+  const restricted = Object.keys(map).length > 0
+
+  const has = (k, a) => (map[k] || []).includes(a)
+  const toggle = (k, a) => setMap((m) => {
+    const cur = new Set(m[k] || [])
+    if (cur.has(a)) cur.delete(a); else { cur.add(a); cur.add('view') }
+    const kept = acts.map((x) => x.key).filter((x) => cur.has(x))
+    const next = { ...m }
+    if (kept.length) next[k] = kept; else delete next[k]
+    return next
+  })
+  // A whole column at once. Sixteen rows of five boxes is eighty clicks to say
+  // "read everything", which is a thing nobody does twice.
+  const column = (a) => {
+    const every = screens.every((sc) => has(sc.key, a))
+    setMap((m) => {
+      const next = { ...m }
+      screens.forEach((sc) => {
+        const cur = new Set(next[sc.key] || [])
+        if (every) cur.delete(a); else { cur.add(a); cur.add('view') }
+        const kept = acts.map((x) => x.key).filter((x) => cur.has(x))
+        if (kept.length) next[sc.key] = kept; else delete next[sc.key]
+      })
+      return next
+    })
+  }
+  const row = (k) => setMap((m) => {
+    const every = acts.every((a) => (m[k] || []).includes(a.key))
+    const next = { ...m }
+    if (every) delete next[k]; else next[k] = acts.map((a) => a.key)
+    return next
+  })
+
+  const submit = async () => {
+    setBusy(true)
+    try {
+      await api.setUserPermissions(user.id, { screens: map, data })
+      toast(Object.keys(map).length
+        ? `✓ ${user.username} is restricted to ${Object.keys(map).length} screen(s)`
+        : `✓ ${user.username} is back to their role — nothing restricted`, 'ok')
+      await onSave(); onClose()
+    } catch (e) { toast(e.detail || 'Could not save that', 'err') }
+    setBusy(false)
+  }
+
+  const groups = []
+  screens.forEach((sc) => {
+    const g = groups.find((x) => x.name === sc.group)
+    if (g) g.rows.push(sc); else groups.push({ name: sc.group, rows: [sc] })
+  })
+
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal accessmodal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>Access — {user.username}</b>
+          <span className={'badge role-' + user.role}>{user.role_label}</span>
+          <button className="modal-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className={'accessnote' + (restricted ? ' on' : '')}>
+            {restricted
+              ? <>Restricted to what is ticked below. Their <b>{user.role_label}</b> role
+                  is still the ceiling — a tick on a screen that role cannot reach
+                  does nothing.</>
+              : <>Nothing is ticked, so this account is <b>unrestricted</b> and its
+                  role decides on its own — exactly as before. Tick anything and it
+                  becomes restricted to what is ticked.</>}
+          </div>
+          <div className="tablewrap">
+            <table className="items accessgrid">
+              <thead><tr>
+                <th>Screen</th>
+                {acts.map((a) => (
+                  <th key={a.key} title={a.why}>
+                    <button className="link" onClick={() => column(a.key)}
+                      title={`${a.label} on every screen`}>{a.label}</button>
+                  </th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {groups.map((g) => (
+                  <React.Fragment key={g.name}>
+                    <tr className="accessgroup">
+                      <td colSpan={acts.length + 1}>{g.name}</td>
+                    </tr>
+                    {g.rows.map((sc) => {
+                      // A screen this role cannot reach at all is shown, not
+                      // hidden — otherwise the grid silently changes shape per
+                      // role and nobody can tell a screen that is missing from a
+                      // screen that is off — but it says so, and its boxes are
+                      // dead, because ticking one would promise access the server
+                      // is going to refuse.
+                      const over = sc.min && !atLeast(user.role, sc.min)
+                      return (
+                        <tr key={sc.key} className={over ? 'overrole' : undefined}>
+                          <td>
+                            <button className="link" disabled={over}
+                              onClick={() => row(sc.key)}
+                              title={over ? '' : 'Everything on this screen'}>{sc.label}</button>
+                            {over && <span className="small"> · needs {ROLE_LABEL[sc.min]}</span>}
+                          </td>
+                          {acts.map((a) => (
+                            <td key={a.key} className="num">
+                              <input type="checkbox" disabled={over}
+                                checked={has(sc.key, a.key)}
+                                onChange={() => toggle(sc.key, a.key)} />
+                            </td>
+                          ))}
+                        </tr>
+                      )
+                    })}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 style={{ marginTop: 18 }}>Figures to withhold</h4>
+          <div className="small" style={{ marginBottom: 8 }}>
+            Ticked here, the figure is stripped by the server before it reaches
+            this account — on every screen, not hidden by the one showing it.
+          </div>
+          <div className="datagrid">
+            {(catalog.data_permissions || []).map((d) => (
+              <label className="mcheck" key={d.key} title={d.why}>
+                <input type="checkbox" checked={data.includes(d.key)}
+                  onChange={() => setData((v) => (v.includes(d.key)
+                    ? v.filter((x) => x !== d.key) : [...v, d.key]))} />
+                {d.label}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={() => { setMap({}); setData([]) }}
+            title="Back to role-only — this account stops being restricted">Clear all</button>
+          <span style={{ flex: 1 }} />
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn primary" disabled={busy} onClick={submit}>
+            {busy ? 'Saving…' : 'Save access'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Users({ toast, me }) {
   const [rows, setRows] = useState([])
   const [roles, setRoles] = useState([])
+  const [catalog, setCatalog] = useState({ actions: [], screens: [], data_permissions: [] })
+  const [access, setAccess] = useState(null)     // the account whose grid is open
   const [busy, setBusy] = useState(true)
   const [err, setErr] = useState('')
   const blank = { username: '', password: '', role: 'user', full_name: '' }
@@ -9180,7 +9354,10 @@ function Users({ toast, me }) {
   const load = useCallback(() => {
     setBusy(true)
     return api.listUsers()
-      .then((r) => { setRows(r.users || []); setRoles(r.roles || []); setErr('') })
+      .then((r) => {
+        setRows(r.users || []); setRoles(r.roles || []); setErr('')
+        if (r.catalog) setCatalog(r.catalog)
+      })
       .catch((e) => setErr(e.detail || 'Could not load the user list'))
       .finally(() => setBusy(false))
   }, [])
@@ -9265,6 +9442,13 @@ function Users({ toast, me }) {
                   <td className="small">{u.last_login_at ? when(u.last_login_at) : <span title="This account has never been used">never</span>}</td>
                   <td className="small">{when(u.created_at)}</td>
                   <td style={{ whiteSpace: 'nowrap' }}>
+                    {!isMe(u) && (
+                      <button className="btn" style={{ padding: '2px 8px', marginRight: 5 }}
+                        onClick={() => setAccess(u)}
+                        title="Choose screen by screen what this account may view, create, modify, delete and print">
+                        Access{u.permissions?.screens
+                          ? ` · ${Object.keys(u.permissions.screens).length}` : ''}</button>
+                    )}
                     <button className="btn" style={{ padding: '2px 8px', marginRight: 5 }}
                       onClick={() => reset(u)} title="Set a new password and sign them out everywhere">Reset password</button>
                     {!isMe(u) && <>
@@ -9301,6 +9485,11 @@ function Users({ toast, me }) {
         </form>
         <div className="small" style={{ color: 'var(--text-2)', marginTop: 8 }}>{ROLE_HELP[form.role]}</div>
       </div>
+
+      {access && (
+        <AccessEditor user={access} catalog={catalog} toast={toast}
+          onSave={load} onClose={() => setAccess(null)} />
+      )}
     </div>
   )
 }
@@ -10369,6 +10558,9 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false)
   const [user, setUser] = useState('')
   const [role, setRole] = useState('')
+  //: what this ACCOUNT may open, screen by screen. Empty means unrestricted and
+  //: the role decides on its own — see services/permissions.has_map.
+  const [perms, setPerms] = useState({})
   const [showPassword, setShowPassword] = useState(false)
 
   const refreshStatus = useCallback(() => api.status().then(setStatus), [])
@@ -10382,8 +10574,10 @@ export default function App() {
     const t = session.get()
     if (!t) { setAuthChecked(true); return }
     api.verifyToken(t).then((r) => {
-      if (r.ok) { setAuthed(true); setUser(r.user); setRole(r.role || '') }
-      else session.clear()
+      if (r.ok) {
+        setAuthed(true); setUser(r.user); setRole(r.role || '')
+        setPerms(r.permissions || {})
+      } else session.clear()
     }).catch(() => {}).finally(() => setAuthChecked(true))
   }, [])
 
@@ -10399,7 +10593,9 @@ export default function App() {
 
   useEffect(() => { if (authed) { refreshStatus(); refresh() } }, [authed, refresh, refreshStatus])
   const toast = (m, kind) => { setToastMsg({ m, kind }); setTimeout(() => setToastMsg(null), 3000) }
-  const handleLogin = (token, u, r) => { session.set(token); setUser(u); setRole(r || ''); setAuthed(true) }
+  const handleLogin = (token, u, r, perms) => {
+    session.set(token); setUser(u); setRole(r || ''); setPerms(perms || {}); setAuthed(true)
+  }
   const logout = () => {
     // Clears the cookie as well as the stored token. Without the call the
     // cookie outlives the logout, and the invoice images on a shared terminal
@@ -10461,7 +10657,15 @@ export default function App() {
   const providers = status?.providers || {}
   // A module above this person's rank is absent from the menu and from the
   // dashboard grid, rather than present and refusing when clicked.
-  const modules = MODULES.filter((m) => !m.min || atLeast(role, m.min))
+  //
+  // …and so is one their ACCOUNT has been restricted out of. An empty grant map
+  // means unrestricted — see services/permissions.has_map — so this narrows only
+  // for accounts somebody has deliberately narrowed. Courtesy, not enforcement:
+  // the server refuses either way (backend/app/security.py). The point of hiding
+  // it is that nobody is shown twelve buttons that answer "not for you".
+  const granted = perms?.screens || null
+  const modules = MODULES.filter((m) => (!m.min || atLeast(role, m.min))
+    && (!granted || (granted[m.key] || []).length))
   const isSuper = atLeast(role, 'superadmin')
   // A `pos:` tab is a screen of the shop rather than one of ours, and is served
   // in a frame — so it is answered before the warehouse chain below.

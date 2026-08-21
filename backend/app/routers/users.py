@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import User
-from ..services import users as users_svc
+from ..services import permissions as perms_svc, users as users_svc
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -37,6 +37,19 @@ class UserPatch(BaseModel):
 
 class ResetIn(BaseModel):
     new_password: str
+
+
+class PermissionsIn(BaseModel):
+    """A whole grant map at once, not one checkbox at a time.
+
+    The editor shows seventeen screens by five actions and it is normal to change
+    a dozen boxes in one sitting. Sending each as its own request would make a
+    half-applied set of permissions a thing that can exist — which, on the screen
+    that decides who may do what, is worth avoiding.
+    """
+    screens: dict[str, list[str]] | None = None
+    data: list[str] | None = None
+    locations: list[str] | None = None
 
 
 def _me(request: Request) -> dict:
@@ -72,7 +85,38 @@ def _guard_self(request: Request, user: User) -> None:
 def list_users(db: Session = Depends(get_db)):
     rows = db.query(User).order_by(User.active.desc(), User.username).all()
     return {"users": [users_svc.out(u) for u in rows],
-            "roles": [{"value": r, "label": users_svc.ROLE_LABEL[r]} for r in users_svc.ROLES]}
+            "roles": [{"value": r, "label": users_svc.ROLE_LABEL[r]} for r in users_svc.ROLES],
+            # the screens and actions the editor draws itself from, so the two
+            # sides cannot disagree about what a screen is called
+            "catalog": perms_svc.catalog()}
+
+
+@router.put("/{uid}/permissions")
+def set_permissions(uid: int, body: PermissionsIn, request: Request,
+                    db: Session = Depends(get_db)):
+    """Replace what one account may do, screen by screen.
+
+    Refused on yourself, for the same reason a super admin may not demote
+    themselves: the account you are signed in as is the one holding the door
+    open, and a mis-tick here would shut it with everybody outside.
+    """
+    user = _get(db, uid)
+    _guard_self(request, user)
+    clean = perms_svc.normalise(body.model_dump())
+    user.permissions = clean or None
+    db.commit()
+    # No token to rotate and nobody to sign out: the middleware resolves the user
+    # row on every call and reads the map off it, so a permission removed here is
+    # refused on that account's very next request. Their menu catches up on the
+    # next reload.
+    db.refresh(user)
+    return users_svc.out(user)
+
+
+@router.get("/catalog")
+def catalog():
+    """Every screen, action and data flag this app can actually enforce."""
+    return perms_svc.catalog()
 
 
 @router.post("")

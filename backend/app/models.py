@@ -1296,6 +1296,12 @@ class User(Base):
     last_login_at = Column(DateTime)
     created_at = Column(DateTime, default=now)
     created_by = Column(String)
+    # Per-screen access, on top of the role: {"screens": {"purchases": ["view",
+    # "create"]}, "data": ["hide_cost_price"], "locations": [...]}. NULL or empty
+    # means the role decides on its own, exactly as it did before this column
+    # existed — which is what keeps every account that predates it working. The
+    # role stays the ceiling; this can only narrow. See services/permissions.
+    permissions = Column(JSON)
 
 
 class AppSetting(Base):

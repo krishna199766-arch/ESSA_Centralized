@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..config import AUTH_SECRET, SEED_ACCOUNTS
 from ..models import User
+from . import permissions
 
 ROLES = ("user", "admin", "superadmin")
 ROLE_RANK = {"user": 1, "admin": 2, "superadmin": 3}
@@ -139,6 +140,10 @@ def out(user: User) -> dict:
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "created_by": user.created_by or "",
+        # What this account may do screen by screen. Empty means the role decides
+        # on its own — see services/permissions.has_map, which is the distinction
+        # the whole feature turns on.
+        "permissions": permissions.normalise(user.permissions),
     }
 
 

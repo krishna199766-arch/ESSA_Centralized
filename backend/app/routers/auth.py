@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import User
-from ..services import users as users_svc
+from ..services import permissions, users as users_svc
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -39,7 +39,12 @@ def _session(user: User, token: str) -> dict:
             "role": user.role, "role_label": users_svc.ROLE_LABEL.get(user.role, user.role),
             "full_name": user.full_name or "",
             "can": {"manage_users": user.role == "superadmin",
-                    "admin": users_svc.ROLE_RANK.get(user.role, 0) >= 2}}
+                    "admin": users_svc.ROLE_RANK.get(user.role, 0) >= 2},
+            # What this account may do screen by screen, so the menu can show the
+            # screens it has rather than the screens its role has. The server
+            # refuses either way — this is what stops the floor being offered
+            # twelve buttons that answer "not for you".
+            "permissions": permissions.normalise(user.permissions)}
 
 
 @router.post("/login")

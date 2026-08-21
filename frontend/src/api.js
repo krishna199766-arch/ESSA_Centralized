@@ -97,6 +97,12 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_password }) }).then(J),
   deleteUser: (id) => fetch(`/api/users/${id}`, { method: 'DELETE' }).then(J),
+  // The whole grant map at once, not a checkbox at a time: seventeen screens by
+  // five actions is a dozen changes in one sitting, and a half-applied set of
+  // permissions is not a thing that should be able to exist.
+  setUserPermissions: (id, body) => fetch(`/api/users/${id}/permissions`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body) }).then(J),
 
   status: () => fetch('/api/status').then(J),
   // Aggregated series behind the graphical dashboard, in one call. `status` is

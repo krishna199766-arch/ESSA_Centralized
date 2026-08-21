@@ -1088,6 +1088,54 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
   padding: var(--sp-3) 0 var(--sp-5); }
 .piece-zoom img { width: 260px; height: 260px; background: #fff; border-radius: var(--radius-sm); padding: 8px; }
 
+/* ---------- the access editor ---------- */
+/* Seventeen screens by five actions, over the list it was opened from. A dialog
+   rather than a panel on the page: choosing what one account may do is a job you
+   finish and leave, not one you leave open beside another. Built on the same
+   overlay the piece-code sheet uses. */
+.modal-back { position: fixed; inset: 0; z-index: 92; display: flex; align-items: center;
+  justify-content: center; background: rgba(42,35,32,.42); backdrop-filter: blur(3px);
+  animation: fadein .15s ease; padding: var(--sp-5); }
+.modal { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  width: min(880px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+  box-shadow: var(--shadow-3); }
+.modal-head { display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--line); }
+.modal-head b { font-size: var(--fs-md); }
+.modal-x { margin-left: auto; background: none; border: none; color: var(--muted);
+  font-size: var(--fs-lg, 18px); line-height: 1; cursor: pointer; padding: 2px 6px; }
+.modal-x:hover { color: var(--danger); }
+.modal-body { overflow: auto; padding: var(--sp-4) var(--sp-5); }
+.modal-foot { display: flex; gap: var(--sp-2); align-items: center;
+  padding: var(--sp-3) var(--sp-5); border-top: 1px solid var(--line); }
+
+/* The sentence that says which of the two states this account is in. It is the
+   one thing about this screen that is genuinely surprising — an empty grid means
+   UNRESTRICTED, not denied — so it is stated, in colour, above the grid. */
+.accessnote { font-size: var(--fs-sm); line-height: var(--lh); color: var(--text-2);
+  background: var(--ok-bg); border: 1px solid var(--ok-line); border-radius: var(--radius-sm);
+  padding: 7px 11px; margin-bottom: var(--sp-3); }
+.accessnote.on { background: var(--warn-bg); border-color: var(--warn-line); }
+
+table.items.accessgrid { min-width: 520px; }
+table.items.accessgrid th { text-align: center; }
+table.items.accessgrid th:first-child { text-align: left; }
+table.items.accessgrid td.num { text-align: center; }
+table.items.accessgrid input[type=checkbox] { width: auto; accent-color: var(--brand);
+  cursor: pointer; }
+table.items.accessgrid .link { font-size: inherit; font-weight: inherit; }
+table.items.accessgrid .link:disabled { color: var(--muted); text-decoration: none;
+  cursor: default; }
+/* a group heading inside the grid — Warehouse, Office, Setup */
+tr.accessgroup td { background: var(--panel-2); font-size: var(--fs-xs); font-weight: 700;
+  text-transform: uppercase; letter-spacing: .6px; color: var(--muted); padding: 5px 8px; }
+/* a screen this account's ROLE cannot reach. Shown rather than hidden — a grid
+   that changes shape per role makes a missing screen and a switched-off screen
+   look the same — but dead, because ticking it would promise access the server
+   is going to refuse anyway. */
+tr.overrole td { opacity: .5; }
+.datagrid { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+
 /* ---------- scanning overlay ---------- */
 .scan-overlay { position: fixed; inset: 0; z-index: 95; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: var(--sp-4);
