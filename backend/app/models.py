@@ -1001,7 +1001,12 @@ class LREntry(Base):
     amount = Column(Float)               # Goods Value
     auto_transfer_location = Column(String)   # onward branch, or NONE to keep here
     purchase_manager = Column(String)
-    stock_holding_days = Column(Float)
+    # The house policy: ninety days to move, unless a delivery says otherwise.
+    # Defaulted HERE as well as on the form so a row that never passes through
+    # the form — one read off a register page, one posted by the phone — is not
+    # the only kind with nothing recorded. A blank left the Item Locator's stock
+    # age with nothing to call late. See DEFAULT_HOLDING_DAYS in the frontend.
+    stock_holding_days = Column(Float, default=90)
     additional_margin = Column(Float)
     # Freight settles as mode + amount; the flag mirrors the form's checkbox and
     # says the charge APPLIES at all, which a zero amount cannot express (nothing

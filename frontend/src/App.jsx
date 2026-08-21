@@ -5034,7 +5034,8 @@ const LR_FORM_LEFT = [
   ['transport', 'Transport', 'combo', { src: 'transports', wide: 1 }],
   ['auto_transfer_location', 'Auto transfer Location', 'select', { list: 'auto_transfer_location' }],
   ['purchase_manager', 'Purchase Manager', 'combo', { list: 'purchase_manager' }],
-  ['stock_holding_days', 'Stock Holding Period (days)', 'num', {}],
+  ['stock_holding_days', 'Stock Holding Period (days)', 'num',
+   { hint: `${DEFAULT_HOLDING_DAYS} days unless this delivery says otherwise` }],
   ['additional_margin', 'Additional Margin', 'num', {}],
   ['bundle', 'No Of Bundles', 'num', { req: 1 }],
   ['boxes', 'No Of Boxes', 'num', { req: 1 }],
@@ -5117,14 +5118,24 @@ function LRField({ spec, form, set, opts, lists }) {
                 : <input value={v} type="text"
                     inputMode={type === 'num' ? 'decimal' : undefined}
                     onChange={(e) => set(key, e.target.value)} />}
+      {o.hint && <div className="small" style={{ marginTop: 3 }}>{o.hint}</div>}
     </div>
   )
 }
 
 const today = () => new Date().toISOString().slice(0, 10)
+//: How long goods are bought to stand before they are expected to have moved.
+//: It is a house policy rather than a fact about any one consignment, so it
+//: arrives filled in and is changed on the deliveries that differ, not typed on
+//: the ninety-nine that do not. Left blank it was simply never recorded, and the
+//: Item Locator's stock age then had nothing to call late. The server carries
+//: the same default for rows that never pass through this form — see
+//: models.LREntry.stock_holding_days.
+const DEFAULT_HOLDING_DAYS = 90
 // A fresh form: the two dates default to today, exactly as their screen does.
 const blankLR = () => ({ lr_entry_date: today(), lr_date: today(), recv_date: today(),
-  auto_transfer_location: 'NONE', freight_applicable: false })
+  auto_transfer_location: 'NONE', freight_applicable: false,
+  stock_holding_days: DEFAULT_HOLDING_DAYS })
 
 function LREntryForm({ editing, opts, lists, onDone, onCancel, toast, reloadOpts }) {
   const [form, setForm] = useState(() => editing ? { ...editing } : blankLR())
