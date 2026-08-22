@@ -2055,6 +2055,7 @@ function Purchases({ selId, setSelId, toast }) {
   const [splitFor, setSplitFor] = useState(null)   // line id whose breakdown is open
   const [srows, setSrows] = useState([])           // editable variant rows
   const [runSpec, setRunSpec] = useState('')       // "28-2-38" for the open breakdown
+  const [sfill, setSfill] = useState({})           // in-progress "apply to every row" values
   const [shortFor, setShortFor] = useState(null)   // line id whose shortage is open
   const [shrows, setShrows] = useState([])         // editable shortage rows
   const [shortOpts, setShortOpts] = useState({ reasons: [] })
@@ -2162,6 +2163,7 @@ function Purchases({ selId, setSelId, toast }) {
   const openSplit = (l) => {
     setSplitFor(l.id)
     setRunSpec('')
+    setSfill({})
     const from = (s) => {
       const r = blankVariant(l.rate)
       Object.keys(r).forEach((k) => { if (s[k] != null) r[k] = s[k] })
@@ -2239,6 +2241,39 @@ function Purchases({ selId, setSelId, toast }) {
   // are left exactly as entered.
   const updSrow = (i, k, v) => setSrows(srows.map((r, j) =>
     (j === i ? recalcSale({ ...r, [k]: v }, k) : r)))
+  // Fill a whole attribute column with one value.
+  //
+  // A bundle broken into six sizes is one garment six times: same brand, same
+  // colour, same material, same everything except the size and the count. Typing
+  // "Moss" into six rows is the kind of work that gets abandoned halfway, and
+  // half-filled is worse than empty here — a variant carrying a colour and its
+  // neighbour not carrying one are two different stock items to the server, which
+  // compares the WHOLE attribute tuple.
+  //
+  // On a button rather than as you type, for the reason the invoice grid's buffer
+  // columns are: a column that rewrote itself on every keystroke would overwrite
+  // rows somebody had already set by hand, and "Mos" is a value on the way to
+  // "Moss". Applied, each row still edits normally afterwards.
+  //
+  // Blank does nothing rather than clearing the column. Clearing nine rows is not
+  // something to offer behind the same button as filling them.
+  const applySfill = (k) => {
+    const v = (sfill[k] || '').trim()
+    if (!v) return
+    setSrows(srows.map((r) => ({ ...r, [k]: v })))
+  }
+  const fillAttr = (k, label) => (
+    <div className="fillbox text">
+      <input list={k === 'category' ? 'essa-cats' : 'essa-opt-' + k}
+        value={sfill[k] || ''} placeholder="all"
+        title={`Set ${label} on every row of this breakdown`}
+        onChange={(e) => setSfill({ ...sfill, [k]: e.target.value })}
+        onKeyDown={(e) => { if (e.key === 'Enter') applySfill(k) }} />
+      <button className="btn" disabled={!(sfill[k] || '').trim()}
+        onClick={() => applySfill(k)}
+        title={`Apply ${sfill[k] || '…'} to all ${srows.length} row(s)`}>Apply all</button>
+    </div>
+  )
   const splitSum = srows.reduce((s, r) => s + (+r.qty || 0), 0)
   // Fill the grid from the run. Whatever the rows already share stays on them — a
   // bundle in six sizes is one garment six times, and only the size and the count
@@ -2772,12 +2807,31 @@ function Purchases({ selId, setSelId, toast }) {
                             })()}
                             <div className="tablewrap">
                               <table className="items entry" style={{ margin: 0, minWidth: 1250 }}>
-                                <thead><tr>
+                                <thead>
+                                  <tr>
                                   {SPLIT_ATTRS.map(([k, label, w]) => <th key={k} style={{ minWidth: w }}>{label}</th>)}
                                   <th style={{ minWidth: 150 }}>Category</th>
                                   {SPLIT_QTY.map(([k, label, w]) =>
                                     <th key={k} style={{ minWidth: w, textAlign: 'right' }}>{label}</th>)}
-                                  <th></th></tr></thead>
+                                  <th></th></tr>
+                                  {/* Under the headings, not in a toolbar above the
+                                      table: the control belongs to the column it
+                                      fills, and aligned under it there is nothing
+                                      to explain about which is which. Same device,
+                                      and the same reasoning, as the invoice grid's
+                                      buffer columns.
+
+                                      Qty has none. It is the one figure that is
+                                      genuinely per row — it is the whole point of
+                                      the breakdown — and the size run above already
+                                      spreads it. */}
+                                  <tr className="fillrow">
+                                    {SPLIT_ATTRS.map(([k, label]) => <th key={k}>{fillAttr(k, label)}</th>)}
+                                    <th>{fillAttr('category', 'Category')}</th>
+                                    {SPLIT_QTY.map(([k]) => <th key={k}></th>)}
+                                    <th></th>
+                                  </tr>
+                                </thead>
                                 <tbody>{srows.map((r, i) => (
                                   <tr key={i}>
                                     {SPLIT_ATTRS.map(([k]) => (

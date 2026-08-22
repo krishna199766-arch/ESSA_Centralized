@@ -1558,3 +1558,8 @@ table.items tbody tr.sel { background: var(--brand-100); }
 /* Disabled until there is a number to apply — the button is the whole safety
    of this control, so it must never look ready when it would do nothing. */
 .fillbox .btn:disabled { opacity: .45; cursor: default; }
+/* The same control over a column of WORDS rather than percentages: it takes the
+   width it is given and reads from the left, because "Moss" and "Regular Fit"
+   are not four-character right-aligned figures. */
+.fillbox.text { flex-wrap: nowrap; }
+.fillbox.text input { width: auto; flex: 1 1 auto; min-width: 34px; text-align: left; }
