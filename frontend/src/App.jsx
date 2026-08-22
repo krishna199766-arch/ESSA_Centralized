@@ -2253,13 +2253,19 @@ function Purchases({ selId, setSelId, toast }) {
   // The three move each other exactly as they do on the invoice review screen —
   // MRP − Discount % = Sale price, in whichever direction was typed — so the
   // whole trio is worked out here and sent together.
-  const setLinePrice = async (l, k, v) => {
+  //: one figure typed on one line, turned into the whole trio that line should
+  //: now carry. Pulled out because Apply all needs exactly the same answer for
+  //: sixty lines at once, and two copies of this arithmetic would drift.
+  const priceBody = (l, k, v) => {
     const row = recalcSale({ mrp: l.mrp ?? '', sale_price: l.sale_price ?? '',
                              sale_discount_pct: l.sale_discount_pct ?? '', [k]: v }, k)
-    const num = (x) => (x === '' || x == null ? null : (Number.isNaN(+x) ? null : +x))
+    const n = (x) => (x === '' || x == null ? null : (Number.isNaN(+x) ? null : +x))
+    return { mrp: n(row.mrp), sale_price: n(row.sale_price),
+             sale_discount_pct: n(row.sale_discount_pct) }
+  }
+  const setLinePrice = async (l, k, v) => {
     try {
-      await api.editLine(l.id, { mrp: num(row.mrp), sale_price: num(row.sale_price),
-                                 sale_discount_pct: num(row.sale_discount_pct) })
+      await api.editLine(l.id, priceBody(l, k, v))
       await reload()
     } catch (e) { toast(e.detail || 'Could not set the price', 'err') }
   }
@@ -2377,6 +2383,75 @@ function Purchases({ selId, setSelId, toast }) {
       toast('✓ Linked to that product', 'ok')
     } catch (e) { toast(e.detail || 'Code not recognised', 'err') }
   }
+  // Set one column on EVERY line of this receipt.
+  //
+  // The same control the invoice grid carries, and wanted here for the same
+  // reason: a bill of fifty-nine lines is very often one category, one unit and
+  // one markup, and typing that fifty-nine times is the job that gets abandoned
+  // in the middle. Half-set is worse than unset on this screen — an unmapped
+  // category is a product that lands in Inventory for somebody to find later.
+  //
+  // Unlike the invoice grid, every edit here is a SERVER call: these lines are
+  // saved rows, not a draft in the browser. So the whole column goes up as one
+  // batch and the screen reloads once at the end, rather than fifty-nine times.
+  // The button is dead while that is in flight, because a second press would
+  // send the same batch again over rows the first is still changing.
+  //
+  // A price is not copied but RE-DERIVED per line: filling Discount % = 20 gives
+  // each line its own sale price from its own MRP. Copying one line's sale price
+  // onto a bill of different MRPs is the one thing this must not do.
+  const [gfill, setGfill] = useState({})
+  const [filling, setFilling] = useState('')
+  const GFILL_PRICE = new Set(['mrp', 'sale_price', 'sale_discount_pct'])
+  const gfillReady = (k) => (GFILL_PRICE.has(k)
+    ? nf(gfill[k]) != null
+    : !!String(gfill[k] ?? '').trim())
+  const applyGfill = async (k) => {
+    const lines = grn?.lines || []
+    if (!gfillReady(k) || !lines.length || filling) return
+    const v = GFILL_PRICE.has(k) ? nf(gfill[k]) : String(gfill[k]).trim()
+    setFilling(k)
+    try {
+      await Promise.all(lines.map((l) => api.editLine(
+        l.id, GFILL_PRICE.has(k) ? priceBody(l, k, v) : { [k]: v })))
+      await reload()
+      setGfill({ ...gfill, [k]: '' })
+      toast(`✓ ${v} on all ${lines.length} line(s)`, 'ok')
+    } catch (e) {
+      await reload()          // some of them may have taken; show what is true
+      toast(e.detail || 'Could not set that on every line', 'err')
+    }
+    setFilling('')
+  }
+  const gfillCell = (k, label) => {
+    const busyHere = filling === k
+    return (
+      <div className="fillbox text">
+        {k === 'unit_type' ? (
+          <select value={gfill[k] ?? ''} title={`Set ${label} on every line`}
+            onChange={(e) => setGfill({ ...gfill, [k]: e.target.value })}>
+            <option value="">unit…</option>
+            {(units.types || []).map((t) => (
+              <option key={t.code} value={t.code}>
+                {t.code}{t.pieces > 1 ? ` · ${t.pieces} pcs` : ''}</option>
+            ))}
+          </select>
+        ) : (
+          <input value={gfill[k] ?? ''} list={k === 'category' ? 'essa-cats' : undefined}
+            inputMode={GFILL_PRICE.has(k) ? 'decimal' : undefined}
+            placeholder={GFILL_PRICE.has(k) ? (k === 'sale_discount_pct' ? '%' : 'all') : 'all'}
+            title={`Set ${label} on every line of this receipt`}
+            onChange={(e) => setGfill({ ...gfill, [k]: e.target.value })}
+            onKeyDown={(e) => { if (e.key === 'Enter') applyGfill(k) }} />
+        )}
+        <button className="btn" disabled={!gfillReady(k) || !!filling}
+          onClick={() => applyGfill(k)}
+          title={`Apply ${gfill[k] || '…'} to all ${(grn?.lines || []).length} line(s)`}>
+          {busyHere ? '…' : 'Apply all'}</button>
+      </div>
+    )
+  }
+
   const unbalanced = (grn?.unbalanced_splits || []).length
   const shortage = grn?.shortages || { claimable_qty: 0, claimable_value: 0, open_qty: 0, open_value: 0 }
   const editable = !!grn && grn.status !== 'posted'
@@ -2498,7 +2573,29 @@ function Purchases({ selId, setSelId, toast }) {
                   <th style={{ textAlign: 'right', minWidth: 88 }} className="calc"
                     title="MRP less the discount — e.g. 995 − 20% = 796. Type it and the discount % follows.">Sale price ƒ</th>
                   <th>Match</th>
-                  {editable && <th></th>}</tr></thead>
+                  {editable && <th></th>}</tr>
+                  {/* One value down a whole column. Hand-written to line up with
+                      the hand-written headings above it — the two must be kept in
+                      step, and there are fourteen of them.
+
+                      Only the five columns that are EDITABLE carry a box. The
+                      rest are the supplier's own figures: the description, the
+                      HSN, what was billed and at what rate are what the invoice
+                      said, and this screen does not get to say otherwise. */}
+                  {editable && (
+                    <tr className="fillrow">
+                      <th /><th /><th />
+                      <th>{gfillCell('category', 'Category')}</th>
+                      <th /><th /><th />
+                      <th>{gfillCell('unit_type', 'Unit')}</th>
+                      <th /><th />
+                      <th>{gfillCell('mrp', 'MRP')}</th>
+                      <th>{gfillCell('sale_discount_pct', 'Discount %')}</th>
+                      <th>{gfillCell('sale_price', 'Sale price')}</th>
+                      <th /><th />
+                    </tr>
+                  )}
+                </thead>
                 <tbody>
                   {grn.lines.map((l) => (
                     <React.Fragment key={l.id}>

@@ -1570,3 +1570,8 @@ table.items tbody tr.sel { background: var(--brand-100); }
 .items thead tr.fillrow th .fillbox { min-width: 0; }
 .items thead tr.fillrow th .fillbox input { min-width: 28px; }
 .items thead tr.fillrow th .fillbox .btn { flex: 0 0 auto; }
+/* the unit column fills from a list rather than a box, since a unit is one of
+   the master's own and not something to be typed */
+.items thead tr.fillrow th .fillbox select { flex: 1 1 auto; min-width: 0;
+  padding: 2px 4px; font-size: var(--fs-xs); border: 1px solid var(--line);
+  border-radius: 4px; background: var(--panel); color: var(--text); }

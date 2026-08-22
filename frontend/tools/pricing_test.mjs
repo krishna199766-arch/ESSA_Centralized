@@ -161,5 +161,32 @@ console.log('…and Apply all itself, which takes one of two paths per column:')
   check(applyAll(bill, 'hsn', '  ')[1].hsn === '', 'so a blank leaves the column alone');
 }
 
+console.log('');
+console.log('the GRN fill row lines up with the headings it fills:');
+{
+  // The invoice grid's fill row is generated from ITEM_COLS and cannot drift.
+  // The GRN's is hand-written, because its headings are — and a fill row one
+  // cell short silently slides every box one column to the left, which puts an
+  // MRP box over Discount % and is not obvious from looking at it.
+  const grn = SRC.slice(SRC.indexOf('<th>Product</th>'));
+  const headEnd = grn.indexOf('</tr>');
+  const head = grn.slice(0, headEnd);
+  const fillStart = grn.indexOf('<tr className="fillrow">');
+  const fill = grn.slice(fillStart, grn.indexOf('</tr>', fillStart));
+  const cells = (s) => (s.match(/<th[\s/>]/g) || []).length;
+  check(fillStart > 0, 'the GRN table has a fill row at all');
+  check(cells(head) === cells(fill),
+    'and it has one cell per heading',
+    `${cells(head)} headings, ${cells(fill)} fill cells`);
+  // the five that are editable, and nothing else
+  for (const k of ['category', 'unit_type', 'mrp', 'sale_discount_pct', 'sale_price']) {
+    check(fill.includes(`gfillCell('${k}'`), `  ${k} can be filled`);
+  }
+  for (const k of ['description', 'hsn', 'qty', 'rate', 'amount']) {
+    check(!fill.includes(`gfillCell('${k}'`),
+      `  ${k} cannot — it is what the supplier billed`);
+  }
+}
+
 console.log(fails ? `\n${fails} failing` : '\nall passing');
 process.exit(fails ? 1 : 0);
