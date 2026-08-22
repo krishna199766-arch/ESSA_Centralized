@@ -552,6 +552,34 @@ profile version — history is preserved.
 
 ---
 
+## Checks
+
+Two commands, one per side. Run both before pushing.
+
+```bash
+cd frontend && npm run check      # builds, BOOTS the bundle, then the logic tests
+python backend/tools/run_tests.py # every backend/tools/*_test.py, throwaway DBs
+```
+
+There is no test framework here and no test package. Each check is a script that
+builds whatever it needs and asserts in plain prose — the same shape
+`android/tools` already used, and a second convention would only be a second
+thing to remember. A check added as `*_test.py` beside the runner is picked up by
+being written, not by being registered anywhere.
+
+`npm run check` **boots** the built bundle in a VM as well as building it, and
+that is the point of it. `vite build` parses and writes; it evaluates nothing, so
+a module-level constant used above its own declaration builds perfectly and then
+throws the instant a browser loads it — which shows up as a blank page in the
+right background colour, with nothing in the UI to say what is wrong. That
+shipped once. `tools/boot_test.mjs` is what catches it now.
+
+The backend checks import the app, so they need the environment that has its
+dependencies — `backend/.venv` on the warehouse PC, not whichever `python` is
+first on PATH.
+
+---
+
 ## Project layout
 
 ```

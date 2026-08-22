@@ -1,0 +1,189 @@
+"""Per-screen access: the mapping, the rules, and the middleware actually refusing.
+
+    python backend/tools/permissions_test.py
+
+This is the one part of the app where a bug is not a wrong number on a screen —
+it is somebody seeing, or changing, what they were not meant to. So it is checked
+from both ends: the table that says which screen a path belongs to, and the live
+middleware refusing a real request.
+
+Two properties matter more than the rest, and both are easy to break without
+noticing:
+
+  * an account with NOTHING recorded is unrestricted, not denied. Get that
+    backwards on an upgrade and the warehouse cannot open its own app on Monday.
+  * a grant can only ever NARROW. Ticking Reports for a floor user must not open
+    Reports — the role is still the ceiling.
+
+Runs against a throwaway SQLite file; nothing here touches the real database.
+"""
+import datetime as dt
+import os
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
+os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(
+    tempfile.mkdtemp(prefix="essa-perm-"), "test.db").replace(os.sep, "/")
+
+from backend.app import models                                   # noqa: E402
+from backend.app.database import engine                          # noqa: E402
+from backend.app.security import required_access                 # noqa: E402
+from backend.app.services import permissions as P                # noqa: E402
+from backend.app.main import app                                 # noqa: E402
+from fastapi.testclient import TestClient                        # noqa: E402
+
+models.Base.metadata.create_all(bind=engine)
+
+bad = []
+
+
+def eq(what, got, want):
+    if got != want:
+        bad.append(what)
+        print("  FAIL  %s\n        got  %r\n        want %r" % (what, got, want))
+    else:
+        print("  ok    %s" % what)
+
+
+def head(t):
+    print("\n%s" % t)
+
+
+# ===========================================================================
+head("which screen a request belongs to, and what it is doing to it")
+eq("reading the GRN list", required_access("GET", "/api/purchases"),
+   ("user", "purchases", "view"))
+eq("building one", required_access("POST", "/api/purchases/build/3"),
+   ("user", "purchases", "create"))
+eq("editing a line", required_access("PATCH", "/api/purchases/lines/7"),
+   ("user", "purchases", "modify"))
+eq("deleting it", required_access("DELETE", "/api/purchases/9"),
+   ("user", "purchases", "delete"))
+
+# printing is its own act: a cost read on screen and a cost carried out of the
+# building on paper are not the same thing
+eq("a label is a print", required_access("GET", "/api/inventory/products/3/label"),
+   ("user", "inventory", "print"))
+eq("a QR is a print", required_access("GET", "/api/inventory/products/3/qr.svg"),
+   ("user", "inventory", "print"))
+eq("a CSV export is a print", required_access("GET", "/api/reports/stock.csv"),
+   ("admin", "reports", "print"))
+
+# three screens live inside another screen's prefix and must be matched off first
+eq("the locator is not Inventory", required_access("GET", "/api/inventory/locate"),
+   ("user", "locator", "view"))
+eq("label printing is not the designer", required_access("GET", "/api/labels/print"),
+   ("user", "labelprint", "print"))
+eq("receiving a transfer is Stock Inward",
+   required_access("POST", "/api/outward/4/receive"), ("user", "inward", "create"))
+eq("dispatching one is Stock Outward",
+   required_access("POST", "/api/outward"), ("user", "outward", "create"))
+
+eq("a path no screen claims", required_access("GET", "/api/notifications"),
+   ("user", None, "view"))
+eq("and an unrouted /api path is locked to superadmin rather than left open",
+   required_access("GET", "/api/something-added-tomorrow")[0], "superadmin")
+
+head("the two rules the whole feature turns on")
+eq("nothing recorded means the ROLE decides", P.allows({}, "purchases", "delete"), True)
+eq("…which is not the same as denied", P.has_map({}), False)
+grant = P.normalise({"screens": {"purchases": ["view", "create"], "lr": ["view"]},
+                     "data": ["hide_cost_price"], "locations": ["WAREHOUSE"]})
+eq("granted", P.allows(grant, "purchases", "create"), True)
+eq("not granted", P.allows(grant, "purchases", "delete"), False)
+eq("view is implied by any other action", P.allows(grant, "lr", "view"), True)
+eq("a screen absent from the map is closed", P.allows(grant, "reports", "view"), False)
+eq("a path with no screen is never refused here", P.allows(grant, None, "delete"), True)
+eq("junk is dropped rather than stored",
+   P.normalise({"screens": {"nope": ["view"], "lr": ["fly", "view"]},
+                "data": ["hide_everything"]}),
+   {"screens": {"lr": ["view"]}})
+eq("a data flag survives", P.hides(grant, "hide_cost_price"), True)
+eq("one that was never set does not", P.hides(grant, "hide_supplier"), False)
+eq("a user template covers the floor and stops there",
+   sorted(P.template("user")["screens"]),
+   sorted(k for k, _, _, m in P.SCREENS if not m))
+eq("an admin template reaches the office", "reports" in P.template("admin")["screens"], True)
+eq("and stops at the super admin's own screen",
+   "users" in P.template("admin")["screens"], False)
+
+head("and the middleware refusing a real request")
+client = TestClient(app)
+
+
+def login(u, pw):
+    return client.post("/api/auth/login", json={"username": u, "password": pw}).json()
+
+
+su = login("superadmin", "super@123")
+eq("the super admin signs in", su.get("role"), "superadmin")
+eq("carrying an empty map — nothing restricted yet", su.get("permissions"), {})
+head_su = {"Authorization": "Bearer " + su["token"]}
+
+cat = client.get("/api/users/catalog", headers=head_su).json()
+eq("the catalog stands on its own", len(cat["screens"]), len(P.SCREENS))
+eq("and names every action", [a["key"] for a in cat["actions"]], P.ACTION_KEYS)
+
+users = client.get("/api/users", headers=head_su).json()
+eq("the user list carries one too", len(users["catalog"]["screens"]), len(P.SCREENS))
+floor = [u for u in users["users"] if u["username"] == "user"][0]
+eq("and the floor account starts unrestricted", floor["permissions"], {})
+
+u_tok = login("user", "user@123")
+head_u = {"Authorization": "Bearer " + u_tok["token"]}
+eq("so the floor reads the GRN screen as it always did",
+   client.get("/api/purchases", headers=head_u).status_code, 200)
+eq("and Reports is still refused by the role",
+   client.get("/api/reports/stock", headers=head_u).status_code, 403)
+
+r = client.put("/api/users/%d/permissions" % floor["id"], headers=head_su,
+               json={"screens": {"purchases": ["view"], "lr": ["view", "create"]},
+                     "data": ["hide_cost_price"]})
+eq("the grant saves", r.status_code, 200)
+eq("and reads back clean", r.json()["permissions"]["screens"],
+   {"lr": ["view", "create"], "purchases": ["view"]})
+
+eq("reading the GRN is still allowed",
+   client.get("/api/purchases", headers=head_u).status_code, 200)
+eq("but building one is not",
+   client.post("/api/purchases/build/1", headers=head_u).status_code, 403)
+eq("and the refusal names the screen and the act",
+   "Create access to GRN" in client.post("/api/purchases/build/1",
+                                         headers=head_u).json()["detail"], True)
+eq("a screen left out of the map is closed",
+   client.get("/api/inventory/products", headers=head_u).status_code, 403)
+eq("one that is in it opens",
+   client.get("/api/lr", headers=head_u).status_code, 200)
+eq("paths no screen claims are unaffected",
+   client.get("/api/notifications", headers=head_u).status_code, 200)
+
+client.put("/api/users/%d/permissions" % floor["id"], headers=head_su,
+           json={"screens": {"reports": ["view", "print"]}})
+eq("granting Reports to a floor account saves…",
+   client.get("/api/users", headers=head_su).status_code, 200)
+eq("…and changes nothing, because the role is the ceiling",
+   client.get("/api/reports/stock", headers=head_u).status_code, 403)
+
+me = [u for u in users["users"] if u["username"] == "superadmin"][0]
+eq("you may not restrict yourself out of the room",
+   client.put("/api/users/%d/permissions" % me["id"], headers=head_su,
+              json={"screens": {"lr": ["view"]}}).status_code, 400)
+
+eq("clearing it puts the account back to role-only",
+   client.put("/api/users/%d/permissions" % floor["id"], headers=head_su,
+              json={}).json()["permissions"], {})
+eq("and the floor has its role back",
+   client.get("/api/inventory/products", headers=head_u).status_code, 200)
+
+head("the account row's own two edits")
+eq("a full name can be corrected",
+   client.patch("/api/users/%d" % floor["id"], headers=head_su,
+                json={"full_name": "Sharu Kumar"}).json()["full_name"], "Sharu Kumar")
+eq("and cleared again",
+   client.patch("/api/users/%d" % floor["id"], headers=head_su,
+                json={"full_name": ""}).json()["full_name"], "")
+
+print("\n%d FAILED" % len(bad) if bad else "\nall passing")
+sys.exit(1 if bad else 0)
