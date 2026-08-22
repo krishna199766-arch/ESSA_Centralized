@@ -1563,3 +1563,10 @@ table.items tbody tr.sel { background: var(--brand-100); }
    are not four-character right-aligned figures. */
 .fillbox.text { flex-wrap: nowrap; }
 .fillbox.text input { width: auto; flex: 1 1 auto; min-width: 34px; text-align: left; }
+/* Every column of the invoice grid that takes one carries the same control, so
+   the row has to survive being repeated a dozen times across a table that
+   already scrolls sideways: the button shrinks to its text and never wraps, and
+   the box gives up its width first. */
+.items thead tr.fillrow th .fillbox { min-width: 0; }
+.items thead tr.fillrow th .fillbox input { min-width: 28px; }
+.items thead tr.fillrow th .fillbox .btn { flex: 0 0 auto; }

@@ -864,6 +864,28 @@ const ITEM_COLS = [
 //: but a size cell on this screen is as often a run as a size.
 const ITEM_LISTED = { brand: 'brand' }
 
+//: Columns where ONE value for the whole invoice is a sensible thing to say, and
+//: what kind of box says it. A supplier's bill is very often all one brand, all
+//: one HSN, all one unit and all one markup — and typing 620520 into twenty-six
+//: lines is the kind of work that gets abandoned halfway, which leaves an invoice
+//: where some lines carry an HSN and some do not.
+//:
+//: Three columns are deliberately absent:
+//:
+//:   qty              the one figure that is genuinely per line. It is what the
+//:                    invoice is counting; setting every line to the same number
+//:                    is not a thing anybody means. (Same reason the GRN
+//:                    breakdown grid leaves it out.)
+//:   taxable_value    both are line TOTALS, derived from qty × rate. Filling them
+//:   amount           with one number back-solves a different rate onto every
+//:                    line, which is arithmetic nobody asked for.
+const ITEM_FILL = {
+  brand: 'text', design: 'text', size: 'text', hsn: 'text', uom: 'text',
+  mrp: 'num', discount_pct: 'pct', rate: 'num',
+  buffer_pct: 'pct', mrp_buffer_pct: 'pct',
+  sale_discount_pct: 'pct', sale_price: 'num',
+}
+
 // --- size groups: the lines one bundle was split into ---
 // Four lines that agree on everything except the size and the count are one
 // garment seen four ways — same description, same design, same HSN, same price.
@@ -1113,25 +1135,47 @@ function LineItems({ items, setItems }) {
   // On a button rather than as you type: a column that rewrote itself on every
   // keystroke would overwrite the rows somebody had already set by hand, and
   // "4" is a value on the way to "40". Applied, each row still edits normally.
-  const [fill, setFill] = useState({ buffer_pct: '', mrp_buffer_pct: '' })
+  const [fill, setFill] = useState({})
+  //: whether there is anything to apply. A number column needs a NUMBER, which
+  //: is why this asks nf and not num: num hands back "abc" unchanged — it only
+  //: converts what converts — so a guard written on it lets unreadable text
+  //: through and writes it to every line on the invoice. nf answers null for
+  //: anything that is not a figure, and 0 for "0", which is a number somebody
+  //: may well mean.
+  //:
+  //: Blank does NOTHING rather than clearing the column. Emptying twenty-six
+  //: lines is not something to put behind the same button as filling them.
+  const fillReady = (key) => (ITEM_FILL[key] === 'text'
+    ? !!(fill[key] || '').trim()
+    : nf(fill[key]) != null)
   const applyFill = (key) => {
-    const v = num(fill[key])
-    if (v == null || v === '') return
-    // Through recalcLine, not a bare assignment: setting the number without
-    // re-pricing would show a 40% buffer over prices that never moved.
-    setItems(items.map((it) => recalcLine({ ...it, [key]: v }, key, it)))
+    if (!fillReady(key)) return
+    const text = ITEM_FILL[key] === 'text'
+    const v = text ? fill[key].trim() : nf(fill[key])
+    // A price goes through recalcLine, because setting the number without
+    // re-pricing would show a 40% buffer over prices that never moved. A brand
+    // or an HSN is not part of that arithmetic and is set as typed.
+    setItems(items.map((it) => (text
+      ? { ...it, [key]: v }
+      : recalcLine({ ...it, [key]: v }, key, it))))
   }
-  const fillCell = (key, label) => (
-    <div className="fillbox">
-      <input value={fill[key]} inputMode="decimal" placeholder="%"
-        title={`Set ${label} on every line of this invoice`}
-        onChange={(e) => setFill({ ...fill, [key]: e.target.value })}
-        onKeyDown={(e) => { if (e.key === 'Enter') applyFill(key) }} />
-      <button className="btn" disabled={num(fill[key]) == null}
-        onClick={() => applyFill(key)}
-        title={`Apply ${fill[key] || '…'}% to all ${items.length} line(s)`}>Apply all</button>
-    </div>
-  )
+  const fillCell = (key, label) => {
+    const kind = ITEM_FILL[key]
+    return (
+      <div className={'fillbox' + (kind === 'text' ? ' text' : '')}>
+        <input value={fill[key] || ''} list={ITEM_LISTED[key] ? 'essa-item-' + key : undefined}
+          inputMode={kind === 'text' ? undefined : 'decimal'}
+          placeholder={kind === 'pct' ? '%' : 'all'}
+          title={`Set ${label} on every line of this invoice`}
+          onChange={(e) => setFill({ ...fill, [key]: e.target.value })}
+          onKeyDown={(e) => { if (e.key === 'Enter') applyFill(key) }} />
+        <button className="btn" disabled={!fillReady(key)}
+          onClick={() => applyFill(key)}
+          title={`Apply ${fill[key] || '…'}${kind === 'pct' ? '%' : ''} to all ${items.length} line(s)`}>
+          Apply all</button>
+      </div>
+    )
+  }
 
 
   //: the groups there are to fold, and whether they already are
@@ -1163,10 +1207,7 @@ function LineItems({ items, setItems }) {
               nothing to explain about which is which. */}
           <tr className="fillrow"><th></th>
             {ITEM_COLS.map(([k, l]) => (
-              <th key={k}>
-                {k === 'buffer_pct' ? fillCell(k, 'Buffer %')
-                  : k === 'mrp_buffer_pct' ? fillCell(k, 'MRP Buffer %') : null}
-              </th>
+              <th key={k}>{ITEM_FILL[k] ? fillCell(k, l) : null}</th>
             ))}<th></th></tr>
         </thead>
         <tbody>

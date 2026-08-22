@@ -37,6 +37,27 @@ const { recalcLine } = new Function(
   + '\nreturn { recalcLine }'
 )();
 
+// "Apply all" itself, lifted the same way. It has two branches — a price goes
+// through recalcLine, a brand or an HSN is set as typed — and which branch a
+// column takes is exactly the sort of thing that is right until somebody adds a
+// column, and wrong from then on.
+const { applyAll, ready } = new Function(
+  // `num` sits at the top of App.jsx, outside the arithmetic block below, and
+  // fillReady leans on it to tell "0" from "abc"
+  "const num = (v) => (v === '' || v == null ? null : isNaN(+v) ? v : +v)\n"
+  + slice('const nf = (v) => {', 'function taxBase(')
+  + '\n' + slice('const ITEM_FILL = {', 'const ITEM_CALC =')
+  + '\nlet items = [], fill = {}'
+  + '\nconst setItems = (v) => { items = v }'
+  + '\n' + slice('  const [fill, setFill] = useState({})', '  const fillCell =')
+             .replace('const [fill, setFill] = useState({})', '')
+  + '\nreturn {'
+  + '  applyAll: (list, key, value) => {'
+  + '    items = list; fill = { [key]: value }; applyFill(key); return items },'
+  + '  ready: (key, value) => { fill = { [key]: value }; return fillReady(key) },'
+  + '}'
+)();
+
 let fails = 0;
 const check = (ok, label, detail = '') => {
   if (ok) { console.log(`  ok    ${label}`); return; }
@@ -107,6 +128,38 @@ check(near(withMrp[0].sale_price, 448) && near(withMrp[0].mrp, 560),
 check(withMrp.every((r) => near(r.amount, r.qty * r.rate)),
   'line amounts are untouched by a pricing fill',
   withMrp.map((r) => r.amount).join(' '));
+
+console.log('');
+console.log('…and Apply all itself, which takes one of two paths per column:');
+{
+  const bill = [{ qty: 1, rate: 320, hsn: '620520' },
+                { qty: 5, rate: 290, hsn: '' },
+                { qty: 15, rate: 205, hsn: '620462' }];
+
+  // a text column is set as typed, and touches none of the money
+  const hsned = applyAll(bill, 'hsn', ' 620520 ');
+  check(hsned.every((r) => r.hsn === '620520'),
+    'one HSN reaches every line, trimmed', hsned.map((r) => r.hsn).join(' '));
+  check(hsned.every((r, i) => r.rate === bill[i].rate && r.sale_price === undefined),
+    'and a text fill re-prices nothing');
+  check(applyAll(bill, 'uom', 'Pc').every((r) => r.uom === 'Pc'), 'so does one unit');
+  check(applyAll(bill, 'brand', 'COSM').every((r) => r.brand === 'COSM'), 'and one brand');
+
+  // a price column goes through the whole chain, against each line's own cost
+  const buffered = applyAll(bill, 'buffer_pct', '40');
+  check(buffered.every((r) => near(r.sale_price, Math.round(r.rate * 1.4))),
+    'a buffer fill re-prices each line off its OWN cost',
+    buffered.map((r) => r.rate + '->' + r.sale_price).join(' '));
+  check(applyAll(bill, 'rate', '500').every((r) => near(r.amount, r.qty * 500)),
+    'and a rate fill carries the amount with it');
+
+  // blank does nothing rather than clearing the column
+  check(!ready('hsn', '') && !ready('hsn', '   '), 'a blank text fill is not ready');
+  check(!ready('buffer_pct', '') && !ready('buffer_pct', 'abc'),
+    'nor a blank or unreadable number');
+  check(ready('buffer_pct', '0'), 'but zero IS a number somebody may mean');
+  check(applyAll(bill, 'hsn', '  ')[1].hsn === '', 'so a blank leaves the column alone');
+}
 
 console.log(fails ? `\n${fails} failing` : '\nall passing');
 process.exit(fails ? 1 : 0);
