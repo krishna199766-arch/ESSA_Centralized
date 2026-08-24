@@ -180,5 +180,16 @@ eq("  …and the app's own page still comes from the bundle",
    to_function("/index.html"), False)
 eq("  …as does the bundle itself", to_function("/assets/index-abc.js"), False)
 
+# Vercel validates this file against its schema and FAILS THE BUILD on a
+# top-level key it does not know. A comment left in it as a key therefore does
+# not document the routing — it stops the routing from ever shipping, silently,
+# because the last good deployment carries on serving. That happened: three
+# commits went to main and none of them reached the site.
+KNOWN = {"$schema", "buildCommand", "outputDirectory", "framework", "build",
+         "functions", "rewrites", "redirects", "headers", "cleanUrls",
+         "trailingSlash", "regions", "installCommand", "devCommand",
+         "ignoreCommand", "github", "images", "crons", "public"}
+eq("vercel.json carries no key Vercel would reject",
+   sorted(set(vercel) - KNOWN), [])
 print("\n%d FAILED" % len(bad) if bad else "\nall passing")
 sys.exit(1 if bad else 0)

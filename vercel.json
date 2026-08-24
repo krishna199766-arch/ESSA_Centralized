@@ -14,16 +14,6 @@
       "includeFiles": "{backend/**,Textile Retail Shop/**}"
     }
   },
-  "_rewrites_note": [
-    "(.*) and not :path* — deliberately. `/pos/:path*` does not match a path that",
-    "ENDS IN A SLASH: the trailing slash leaves an empty final segment and the",
-    "rule falls through to the catch-all, which serves the SPA. Every screen the",
-    "shop has is a Flask blueprint mounted with a trailing slash — /pos/,",
-    "/pos/inventory/, /pos/customers/ — so all of them were being answered with",
-    "the warehouse app instead. Inside the POS frame that renders the whole",
-    "warehouse again, header and all, which renders another frame, which is why",
-    "the page came out as three stacked copies of itself."
-  ],
   "rewrites": [
     { "source": "/api", "destination": "/api/index" },
     { "source": "/api/(.*)", "destination": "/api/index" },
