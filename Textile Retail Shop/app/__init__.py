@@ -1,9 +1,34 @@
+import os
+
 from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
+from sqlalchemy import MetaData
 from config import Config
 
-db = SQLAlchemy()
+# Which Postgres schema the shop's tables live in.
+#
+# Standalone — the shop on its own SQLite file — this is unset and nothing
+# changes: SQLite has no schemas and never needed one, because a file each kept
+# the two applications apart.
+#
+# Mounted inside the warehouse on ONE Postgres, it is set to "shop", and it has
+# to be, because four table names are the same in both codebases: categories,
+# products, stock_movements and users. Whichever application creates a name first
+# wins it, and the other then queries a table with its own name and the wrong
+# columns — "column categories.description does not exist", on a table that
+# plainly does exist.
+#
+# Naming the schema on the METADATA is what makes that hold. It puts the schema
+# in the SQL — `SELECT ... FROM shop.categories` — rather than in the session,
+# and session state is exactly what a transaction-mode connection pooler does not
+# keep. The earlier fix set search_path through the connection URL's `options`
+# parameter, which works on a direct connection and is silently dropped by
+# PgBouncer, which is what the deployment runs on. The schema in the statement
+# needs nothing from the connection.
+SHOP_DB_SCHEMA = os.environ.get("SHOP_DB_SCHEMA") or None
+
+db = SQLAlchemy(metadata=MetaData(schema=SHOP_DB_SCHEMA))
 login_manager = LoginManager()
 login_manager.login_view = "auth.login"
 login_manager.login_message_category = "warning"

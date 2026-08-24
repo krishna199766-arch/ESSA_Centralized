@@ -6,8 +6,21 @@ BASE_DIR = Path(__file__).resolve().parent
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-production-please")
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        "DATABASE_URL", f"sqlite:///{BASE_DIR / 'textile_shop.db'}"
+    # The same variables the warehouse looks at, in the same order (see
+    # backend/app/config.DB_URL_CANDIDATES). Reading only DATABASE_URL meant a
+    # deployment that spells it POSTGRES_URL — which is what Vercel and Supabase
+    # hand out — sent the warehouse to Postgres and the shop quietly to a SQLite
+    # file that nothing else in the deployment could see, and no error said so.
+    #
+    # `postgres://` is rewritten because SQLAlchemy has refused that spelling
+    # since 1.4 while most dashboards still print it.
+    SQLALCHEMY_DATABASE_URI = next(
+        (v.replace("postgres://", "postgresql://", 1)
+         for v in (os.environ.get(k, "").strip() for k in (
+             "ESSA_DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL",
+             "DATABASE_URL", "POSTGRES_URL_NON_POOLING"))
+         if v.startswith(("postgres://", "postgresql://"))),
+        f"sqlite:///{BASE_DIR / 'textile_shop.db'}",
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # Re-read templates from disk on every request so edits appear on a refresh

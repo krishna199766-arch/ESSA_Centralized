@@ -64,29 +64,41 @@ def _isolate_shop_schema() -> None:
     accounts are different tables with the same name, and merging them would be
     a security problem rather than an error message.
 
-    A Postgres schema per app is the standard separation and needs no change to
-    either set of models — the shop is simply pointed at `shop` and creates its
-    tables there. On SQLite nothing happens, because two files were never the
-    problem.
+    A Postgres schema per app is the standard separation. What matters is HOW the
+    shop is told about it, and the first attempt got that wrong: it appended
+    `options=-csearch_path=shop` to the connection URL, which puts the schema in
+    the SESSION. That works on a direct connection and is silently dropped by a
+    transaction-mode pooler — which is what the deployment connects through
+    (Supabase's pooler, port 6543). The option went nowhere, every unqualified
+    name resolved in `public`, and the shop read the warehouse's `categories`.
+
+    So the schema is named on the shop's METADATA instead, through
+    SHOP_DB_SCHEMA — it lands in the statement (`FROM shop.categories`) and needs
+    nothing from the connection, which is what makes it survive any pooler. See
+    the shop's app/__init__.
+
+    On SQLite this does nothing at all, because two files were never the problem.
     """
-    url = os.environ.get("DATABASE_URL", "")
-    if not url.startswith(("postgres://", "postgresql://")) or "search_path" in url:
+    from .config import DATABASE_URL     # the same variable the warehouse chose
+    url = (DATABASE_URL or "").strip()
+    if not url.startswith(("postgres://", "postgresql://")):
         return
 
+    url = url.replace("postgres://", "postgresql://", 1)
     from sqlalchemy import create_engine, text
-    engine = create_engine(url.replace("postgres://", "postgresql://", 1))
+    engine = create_engine(url)
     try:
         with engine.begin() as conn:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{POS_SCHEMA}"'))
     finally:
         engine.dispose()
 
-    # `options=-csearch_path=shop` makes every unqualified name in the shop's
-    # SQL resolve there. Appended to the URL rather than set on the connection,
-    # because the shop builds its own engine from this string and never sees
-    # anything we pass here by another route.
-    sep = "&" if "?" in url else "?"
-    os.environ["DATABASE_URL"] = f"{url}{sep}options=-csearch_path%3D{POS_SCHEMA}"
+    # The shop reads the same candidates the warehouse does, so it will find this
+    # on its own — but it is set here as well so that the URL the shop connects
+    # with is provably the one the warehouse just created the schema in, rather
+    # than a second variable that happens to be lying around.
+    os.environ["DATABASE_URL"] = url
+    os.environ["SHOP_DB_SCHEMA"] = POS_SCHEMA
 
 
 def load_pos_app():
