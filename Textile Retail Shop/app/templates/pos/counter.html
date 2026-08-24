@@ -42,6 +42,50 @@
   <div id="staffMsg" class="small text-danger mt-1"></div>
 </div>
 
+{# Which entity is billing, from where, at which till.
+
+   Shown rather than hidden behind a settings page: it decides whose GSTIN goes
+   on the next bill, and a till that has been left set to the wrong branch is
+   only discoverable if the answer is on screen while somebody is using it. The
+   same reason the staff gate above sits here. #}
+<div id="placeBar" class="card p-2 mb-3" style="border:1px solid #cfd8e3; background:#f7fafd;">
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div class="d-flex align-items-center gap-3 flex-wrap small">
+      <span><span class="text-muted">COMPANY</span>
+        <b id="pbCompany">{{ (chosen_company or default_company).name }}</b>
+        <span id="pbGstin" class="text-muted">{{ (chosen_company or default_company).gstin or '' }}</span></span>
+      <span><span class="text-muted">LOCATION</span>
+        <b id="pbLocation">{{ chosen_location.name if chosen_location else 'Select Location' }}</b></span>
+      <span><span class="text-muted">COUNTER</span>
+        <b id="pbCounter">{{ chosen_counter.name if chosen_counter else 'Select Counter' }}</b></span>
+    </div>
+    <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal"
+            data-bs-target="#placeModal"><i class="bi bi-shop"></i> Change</button>
+  </div>
+</div>
+
+<div class="modal fade" id="placeModal" tabindex="-1">
+  <div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">Company / Location / Counter</h5>
+      <button class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <div class="mb-2"><label class="form-label small mb-1">Company</label>
+        <select id="pmCompany" class="form-select"></select>
+        <div class="form-text">Whose GSTIN prints on the bill.</div></div>
+      <div class="mb-2"><label class="form-label small mb-1">Location</label>
+        <select id="pmLocation" class="form-select"></select>
+        <div class="form-text">Kept in step with the warehouse's own list of branches.</div></div>
+      <div class="mb-2"><label class="form-label small mb-1">Counter</label>
+        <select id="pmCounter" class="form-select"></select></div>
+      <div class="small text-muted">Current: <span id="pmCurrent">-None-</span></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      <button id="pmSelect" class="btn btn-brand">Select</button>
+    </div>
+  </div></div>
+</div>
+
 <div class="row g-3">
   <div class="col-lg-7">
     <div class="card p-3">
@@ -534,5 +578,77 @@ document.getElementById('checkoutBtn').onclick = async () => {
   if (j.error){ alert('Error: ' + j.error); return; }
   window.location = `${SHOP_ROOT}/pos/invoice/${j.invoice_id}/print`;
 };
+
+// ---- Company / Location / Counter -----------------------------------------
+// The lists are nested: a location belongs to a company and a counter to a
+// location, so choosing upward empties what is below it rather than leaving a
+// pairing that cannot be true. The server checks the same thing again when it is
+// saved — this is only so the screen never OFFERS an impossible one.
+(function () {
+  const PLACES = {{ places | tojson }};
+  let picked = {
+    company_id: {{ chosen_company.id if chosen_company else 'null' }},
+    location_id: {{ chosen_location.id if chosen_location else 'null' }},
+    counter_id: {{ chosen_counter.id if chosen_counter else 'null' }},
+  };
+  const $ = (id) => document.getElementById(id);
+  const fill = (sel, rows, chosen, blank) => {
+    sel.innerHTML = '';
+    const none = new Option(blank, '');
+    sel.add(none);
+    rows.forEach((r) => {
+      const o = new Option(r.name, r.id);
+      if (String(chosen) === String(r.id)) o.selected = true;
+      sel.add(o);
+    });
+  };
+  const draw = () => {
+    fill($('pmCompany'), PLACES.companies, picked.company_id, 'Company…');
+    const locs = PLACES.locations.filter((l) =>
+      !picked.company_id || !l.company_id || String(l.company_id) === String(picked.company_id));
+    fill($('pmLocation'), locs, picked.location_id, 'Location…');
+    const tills = PLACES.counters.filter((c) =>
+      String(c.location_id) === String(picked.location_id));
+    fill($('pmCounter'), tills, picked.counter_id, tills.length ? 'Counter…' : 'no counter here');
+    const name = (rows, id) => (rows.find((r) => String(r.id) === String(id)) || {}).name;
+    $('pmCurrent').textContent = [name(PLACES.companies, picked.company_id),
+                                 name(PLACES.locations, picked.location_id),
+                                 name(PLACES.counters, picked.counter_id)]
+      .filter(Boolean).join(' / ') || '-None-';
+  };
+  $('pmCompany').addEventListener('change', (e) => {
+    picked = { company_id: e.target.value || null, location_id: null, counter_id: null };
+    draw();
+  });
+  $('pmLocation').addEventListener('change', (e) => {
+    picked.location_id = e.target.value || null;
+    picked.counter_id = null;
+    draw();
+  });
+  $('pmCounter').addEventListener('change', (e) => {
+    picked.counter_id = e.target.value || null;
+    draw();
+  });
+  $('pmSelect').addEventListener('click', async () => {
+    const r = await fetch('{{ url_for("pos.place") }}', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(picked),
+    });
+    const d = await r.json();
+    // redrawn from what the SERVER settled on, not from what was sent: it drops
+    // a counter that belongs to another branch, and the strip has to say what
+    // the next bill will actually carry
+    picked = { company_id: d.company && d.company.id, location_id: d.location && d.location.id,
+               counter_id: d.counter && d.counter.id };
+    $('pbCompany').textContent = d.company ? d.company.name : 'Select Company';
+    $('pbGstin').textContent = d.company ? (d.company.gstin || '') : '';
+    $('pbLocation').textContent = d.location ? d.location.name : 'Select Location';
+    $('pbCounter').textContent = d.counter ? d.counter.name : 'Select Counter';
+    draw();
+    bootstrap.Modal.getInstance($('placeModal')).hide();
+  });
+  draw();
+})();
+
 </script>
 {% endblock %}

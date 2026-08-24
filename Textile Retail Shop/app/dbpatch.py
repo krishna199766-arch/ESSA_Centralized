@@ -1,24 +1,45 @@
 """Adding a column to a database that predates it.
 
 The shop carries no migration tool, and adopting one for the handful of columns
-that postdate the original schema would be heavier than the problem. SQLite takes
-a single-column ALTER cheaply and without rewriting the table, so each module that
-introduces a column asks for it here at startup and moves on.
+that postdate the original schema would be heavier than the problem. A
+single-column ALTER is cheap and standard, so each module that introduces a
+column asks for it here at startup and moves on.
 
-Other engines are left alone: there, the schema is someone else's job and a stray
-ALTER from a till would be the wrong thing entirely.
+Postgres is included, and it did not use to be. The reasoning then was that on
+another engine "the schema is someone else's job" — true when the shop's only
+Postgres would have been somebody else's server. It is not true now: mounted
+inside the warehouse the shop creates and owns its own schema (see
+backend/app/pos_mount), and `create_all` builds only missing TABLES. A column
+added to a model after that schema exists is simply absent, and the first query
+that mentions it fails — which is exactly the class of fault this file exists to
+prevent. The warehouse solves the same problem the same way, in
+main._add_missing_columns.
 """
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from app import db
 
 
 def table_columns(table):
-    """The column names of `table`, or an empty set if it doesn't exist yet."""
-    if db.engine.dialect.name != "sqlite":
+    """The column names of `table`, or an empty set if it doesn't exist yet.
+
+    Asked through the inspector rather than with a PRAGMA, so the answer comes
+    from whichever engine is connected — and, on Postgres, from the schema the
+    shop's metadata is bound to rather than from whatever `public` happens to
+    hold under the same name. The warehouse has a `products` table too; reading
+    its columns here and concluding nothing needs adding is the precise failure
+    this whole schema separation exists to avoid.
+    """
+    try:
+        cols = inspect(db.engine).get_columns(table, schema=db.metadata.schema)
+    except Exception:                      # noqa: BLE001 — no such table yet
         return set()
-    rows = db.session.execute(text(f"PRAGMA table_info({table})"))
-    return {row[1] for row in rows}
+    return {c["name"] for c in cols}
+
+
+def _qualified(table):
+    """`shop.invoices` where there is a schema, `invoices` where there is not."""
+    return f"{db.metadata.schema}.{table}" if db.metadata.schema else table
 
 
 def ensure_column(table, column, ddl_type):
@@ -30,7 +51,8 @@ def ensure_column(table, column, ddl_type):
     cols = table_columns(table)
     if not cols or column in cols:
         return False
-    db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+    db.session.execute(
+        text(f"ALTER TABLE {_qualified(table)} ADD COLUMN {column} {ddl_type}"))
     db.session.commit()
     return True
 
@@ -46,6 +68,12 @@ COLUMNS = [
     ("products", "fit", "VARCHAR(64)"),
     ("products", "design_no", "VARCHAR(64)"),
     ("invoices", "staff_id", "INTEGER"),           # who served the sale
+    # Which entity billed it, from where, and at which till — see app/places.py.
+    # Nullable: every invoice raised before there were counters has no answer,
+    # and inventing one would be worse than leaving it blank.
+    ("invoices", "company_id", "INTEGER"),
+    ("invoices", "location_id", "INTEGER"),
+    ("invoices", "counter_id", "INTEGER"),
 ]
 
 

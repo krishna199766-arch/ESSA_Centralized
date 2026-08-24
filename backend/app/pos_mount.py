@@ -128,8 +128,13 @@ def load_pos_app():
             # both before the seed so a fresh shop seeds against them.
             from app.master_categories import sync_master_categories
             from app.warehouse_items import sync_warehouse_items
+            from app.places import sync_locations
             sync_master_categories()
             sync_warehouse_items()
+            # The branches this warehouse dispatches to are the branches the till
+            # sells from, so the shop reads that list rather than keeping a second
+            # one. See the shop's app/places.
+            sync_locations()
             _seed_if_empty(pkg)
         return flask_app
     finally:

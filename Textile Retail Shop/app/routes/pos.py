@@ -1,13 +1,28 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, current_app
+from flask import (Blueprint, render_template, request, redirect, url_for, flash,
+                   jsonify, current_app, session)
 from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
-from app import warehouse_items
+from app import places, warehouse_items
 from app.models import (Product, Customer, Invoice, InvoiceItem, StockMovement,
                         LoyaltyTxn, User)
 from app.utils import generate_number
 
 pos_bp = Blueprint("pos", __name__)
+
+#: Where the till's Company / Location / Counter choice is kept.
+#:
+#: In the SESSION, deliberately. It is a property of the machine somebody is
+#: standing at, not of the person signed into it and not of the shop: two tills
+#: at one branch are two counters, and the same cashier moving between them must
+#: not carry the first one's drawer to the second. It also has to outlast a
+#: reload — a picker that forgets on every refresh gets set wrong, or ignored.
+POST_KEYS = ("company_id", "location_id", "counter_id")
+
+
+def _chosen():
+    """(company, location, counter) for this till — each None until picked."""
+    return places.resolve(*(session.get(k) for k in POST_KEYS))
 
 
 @pos_bp.route("/")
@@ -16,8 +31,45 @@ def counter():
     products = Product.query.filter(Product.active == True, Product.stock_qty > 0).order_by(Product.name).all()
     customers = Customer.query.order_by(Customer.name).all()
     staff = User.query.filter(User.active.is_(True)).order_by(User.full_name).all()
+    company, location, till = _chosen()
     return render_template("pos/counter.html", products=products,
-                           customers=customers, staff=staff)
+                           customers=customers, staff=staff,
+                           places=places.picker_options(),
+                           chosen_company=company, chosen_location=location,
+                           chosen_counter=till,
+                           default_company=places.default_company())
+
+
+@pos_bp.route("/place", methods=["GET", "POST"])
+@login_required
+def place():
+    """Read or set which company, location and counter this till is billing as.
+
+    POST takes the three ids and answers with what it actually settled on, which
+    is not always what was sent: a counter belonging to another branch is dropped
+    rather than stored. The till redraws from the answer, so what it shows is
+    what the next bill will carry — never what was merely asked for.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or request.form
+        for key in POST_KEYS:
+            raw = data.get(key)
+            session[key] = int(raw) if str(raw or "").strip().isdigit() else None
+        company, location, till = places.resolve(*(session.get(k) for k in POST_KEYS))
+        # store back what survived, so the session never holds a pairing the
+        # screen has already been told is impossible
+        session["company_id"] = company.id if company else None
+        session["location_id"] = location.id if location else None
+        session["counter_id"] = till.id if till else None
+    else:
+        company, location, till = _chosen()
+    return jsonify({
+        "company": {"id": company.id, "name": company.name,
+                    "gstin": company.gstin or ""} if company else None,
+        "location": {"id": location.id, "name": location.name} if location else None,
+        "counter": {"id": till.id, "name": till.name} if till else None,
+        "options": places.picker_options(),
+    })
 
 
 def resolve_staff(value):
@@ -112,6 +164,14 @@ def checkout():
             return jsonify({"error": "Identify the staff member before billing "
                                      "— scan the ID card or enter the staff code."}), 400
 
+        # Where this sale happened, and under whose registration. The company
+        # falls back to the default rather than being left blank: a tax invoice
+        # with no entity on it is not a tax invoice, and a till nobody has
+        # configured is the normal state of a shop that only has one company.
+        company, location, till = _chosen()
+        if company is None:
+            company = places.default_company()
+
         inv = Invoice(
             invoice_number=generate_number("INV", Invoice, "invoice_number"),
             customer_id=customer_id,
@@ -120,6 +180,9 @@ def checkout():
             payment_method=payment_method,
             discount=discount,
             is_interstate=is_interstate,
+            company_id=company.id if company else None,
+            location_id=location.id if location else None,
+            counter_id=till.id if till else None,
         )
         db.session.add(inv)
         db.session.flush()

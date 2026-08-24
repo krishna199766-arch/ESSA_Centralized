@@ -8,10 +8,20 @@
 <div class="invoice-print card">
   <div class="invoice-header d-flex justify-content-between">
     <div>
-      <h3 class="fw-bold mb-0" style="color: var(--brand-dark);">{{ SHOP_NAME }}</h3>
-      <div>{{ SHOP_ADDRESS }}</div>
-      <div>Phone: {{ SHOP_PHONE }}</div>
-      <div>GSTIN: <strong>{{ SHOP_GSTIN }}</strong></div>
+      {# The entity that RAISED this bill, not the shop's config. Two companies
+         trading from one room file two returns, and a reprint of last month's
+         invoice has to carry the registration it was billed under — not
+         whichever one the till happens to be set to today. Falls back to the
+         config for every invoice raised before companies existed. #}
+      <h3 class="fw-bold mb-0" style="color: var(--brand-dark);">{{ inv.company.name if inv.company else SHOP_NAME }}</h3>
+      <div>{{ (inv.company.address if inv.company else None) or SHOP_ADDRESS }}</div>
+      <div>Phone: {{ (inv.company.phone if inv.company else None) or SHOP_PHONE }}</div>
+      <div>GSTIN: <strong>{{ (inv.company.gstin if inv.company else None) or SHOP_GSTIN }}</strong></div>
+      {% if inv.location or inv.counter %}
+      <div class="small text-muted">
+        {{ inv.location.name if inv.location else '' }}{% if inv.counter %} · {{ inv.counter.name }}{% endif %}
+      </div>
+      {% endif %}
     </div>
     <div class="text-end">
       <h5>TAX INVOICE</h5>

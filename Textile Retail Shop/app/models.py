@@ -164,6 +164,61 @@ class LoyaltyTxn(db.Model):
 
 
 # ---------- Invoices / Sales ----------
+class Company(db.Model):
+    """A legal entity that raises bills.
+
+    Not decoration and not a label: a tax invoice carries the GSTIN of whoever
+    issued it, and two companies trading from one shop file two returns. So the
+    header the bill prints comes from the row picked at the till, and an invoice
+    remembers which one raised it — otherwise a month's sales cannot be split
+    between them afterwards, and that is the one thing this has to survive.
+    """
+    __tablename__ = "companies"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), unique=True, nullable=False)
+    gstin = db.Column(db.String(20))
+    address = db.Column(db.String(256))
+    state_code = db.Column(db.String(4))
+    phone = db.Column(db.String(32))
+    #: what a till starts on before anybody chooses. The shop's own config
+    #: becomes this on first run, so a single-company shop never sees the picker
+    #: as a decision it has to make.
+    is_default = db.Column(db.Boolean, default=False, index=True)
+    active = db.Column(db.Boolean, default=True, index=True)
+    locations = db.relationship("Location", backref="company", lazy=True)
+
+
+class Location(db.Model):
+    """A place that sells — a branch, a floor, a counter's address.
+
+    The names come from the WAREHOUSE's own list (app/places.sync_locations), not
+    from a second master kept here. The warehouse already dispatches stock to
+    these places by name; a shop with its own spelling of the same branch cannot
+    be asked "what did we send there, and what did they sell".
+    """
+    __tablename__ = "locations"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), unique=True, nullable=False)
+    company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), index=True)
+    #: True for a name this shop added itself, so a sync that no longer lists it
+    #: does not delete it. See places.sync_locations.
+    local = db.Column(db.Boolean, default=False)
+    active = db.Column(db.Boolean, default=True, index=True)
+    counters = db.relationship("Counter", backref="location", lazy=True)
+
+
+class Counter(db.Model):
+    """One till at one location. Two tills at a branch are two drawers."""
+    __tablename__ = "counters"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(64), nullable=False)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"),
+                            nullable=False, index=True)
+    active = db.Column(db.Boolean, default=True, index=True)
+    __table_args__ = (db.UniqueConstraint("location_id", "name",
+                                          name="uq_counter_location_name"),)
+
+
 class Invoice(db.Model):
     __tablename__ = "invoices"
     id = db.Column(db.Integer, primary_key=True)
@@ -190,6 +245,16 @@ class Invoice(db.Model):
     loyalty_redeemed = db.Column(db.Float, default=0.0)
 
     payment_method = db.Column(db.String(16), default="cash")  # cash/card/upi
+    # Who billed it, from where, at which till. Nullable because every invoice
+    # raised before there were counters has no answer, and inventing one would be
+    # worse than leaving it blank. The company is the one that MATTERS: it is
+    # whose GSTIN went on the bill.
+    company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), index=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    counter_id = db.Column(db.Integer, db.ForeignKey("counters.id"), index=True)
+    company = db.relationship("Company")
+    location = db.relationship("Location")
+    counter = db.relationship("Counter")
     payment_status = db.Column(db.String(16), default="paid")  # paid/pending
     is_interstate = db.Column(db.Boolean, default=False)
     notes = db.Column(db.String(256))
