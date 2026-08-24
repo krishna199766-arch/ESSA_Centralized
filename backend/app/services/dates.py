@@ -120,3 +120,46 @@ def parse(value):
 
 def today():
     return dt.date.today().isoformat()
+
+
+# ---------------------------------------------------------------------------
+#  Reading one back
+# ---------------------------------------------------------------------------
+#: What a person reads. ISO is the STORAGE format and stays that way — see the
+#: three things at the top of this file that only work because it is — but a date
+#: is never SHOWN that way. Every register page, supplier invoice, cheque and
+#: delivery note in this business is written day-first, so that is the one form
+#: every screen, export and printed label uses. The frontend's `readableDate`
+#: produces exactly this; the two must agree, or a CSV disagrees with the table
+#: it was downloaded from.
+DISPLAY = "%d-%m-%Y"
+
+
+def to_display(value, blank=""):
+    """`DD-MM-YYYY`, or the value untouched when it is not a date.
+
+    Untouched, not blank: a register cell may hold text no parser could read, and
+    that text is still evidence of what was on the page. The same rule `normalise`
+    keeps on the way in, kept on the way out."""
+    if value in (None, ""):
+        return blank
+    iso = to_iso(value)
+    if not iso:
+        # a stored timestamp — `2026-07-31T09:14:22` — is a date with a time on it
+        iso = to_iso(str(value)[:10])
+    return dt.date.fromisoformat(iso).strftime(DISPLAY) if iso else value
+
+
+def display_cell(value):
+    """A date hiding in a value that could be anything — a report cell, a CSV
+    field. Only a full ISO date is rewritten: a quantity, a rate and an invoice
+    code all have to come back as themselves."""
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if not _ISO_CELL_RE.match(s):
+        return value
+    return to_display(s[:10], blank=value)
+
+
+_ISO_CELL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")

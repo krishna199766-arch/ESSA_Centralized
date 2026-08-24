@@ -108,7 +108,7 @@
       </thead>
       <tbody>
         {% for day, name, bills, total in daily_places %}
-        <tr><td>{{ day }}</td><td>{{ name }}</td>
+        <tr><td>{{ day|dmy }}</td><td>{{ name }}</td>
             <td class="text-end">{{ bills }}</td><td class="text-end">{{ total|inr }}</td></tr>
         {% endfor %}
       </tbody>

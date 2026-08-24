@@ -560,6 +560,20 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .field input:disabled { background: var(--panel-2); color: var(--muted); cursor: not-allowed; }
 .field input[type=date]::-webkit-calendar-picker-indicator { cursor: pointer; opacity: .6; }
 .field input[type=date]:hover::-webkit-calendar-picker-indicator { opacity: 1; }
+
+/* ---------- date box ----------
+   DD-MM-YYYY in a box the app controls, with the browser's own calendar behind
+   the button at its end — see DateField. The native input stays RENDERED (a
+   display:none input cannot open its picker) but sits under the button with no
+   pointer events of its own, so the only two ways in are typing and the button. */
+.datebox { position: relative; display: block; }
+.datebox .datetext { width: 100%; padding-right: 30px; }
+.datebox .datepick { position: absolute; right: 0; top: 0; width: 28px; height: 100%;
+  opacity: 0; pointer-events: none; padding: 0; border: 0; background: none; }
+.datebox .datebtn { position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 22px; padding: 0; border: 0; background: none; cursor: pointer;
+  font-size: 12px; line-height: 1; opacity: .55; border-radius: var(--radius-sm); }
+.datebox .datebtn:hover { opacity: 1; background: var(--panel-2); }
 .field input[type=checkbox] { width: auto; padding: 0; accent-color: var(--brand); }
 .field.flag input { border-color: var(--warn); background: var(--warn-bg); }
 .field .flagnote { font-size: var(--fs-xs); color: var(--warn); margin-top: var(--sp-1); font-weight: 600; }

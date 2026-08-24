@@ -459,10 +459,23 @@ the code; rows carry fixed minimum heights so a product with no category and one
 with a category produce the same card and a sheet stays a cuttable grid. The
 payload is unchanged, so codes already printed still scan.
 
-## 7d. Dates: one stored form (`services/dates.py`)
+## 7d. Dates: one stored form, one shown form (`services/dates.py`)
 
-Every date field is a calendar picker, and every date is stored as ISO
-`YYYY-MM-DD`. The picker is the visible half. The half that mattered is that
+Two formats, deliberately, and the split is the point:
+
+* **Stored ISO `YYYY-MM-DD`** — because a date column is compared as text in SQL
+  and only ISO sorts the way a calendar does. Everything below is about this.
+* **Shown `DD-MM-YYYY`** — because that is what every register page, supplier
+  invoice, cheque and delivery note in this business is written in. Nothing
+  renders a raw `2026-07-31` at a person.
+
+The show side is one function on each side of the wire and every display site
+goes through it: `fmtDate`/`fmtLoose` in `App.jsx`, `dates.to_display`/
+`dates.display_cell` on the server. They have to agree, or a CSV disagrees with
+the table it was downloaded from. `frontend/tools/date_format_test.mjs` states
+both directions in the terms the trade uses.
+
+The picker is the visible half of the store side. The half that mattered is that
 dates were previously stored exactly as they arrived — 31/07/2026 off a printed
 invoice, 31-7-26 off a register page, 2026-07-31 off an e-invoice — and three
 things were quietly wrong as a result:

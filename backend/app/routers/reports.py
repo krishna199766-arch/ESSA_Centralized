@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..services import reports as svc
 from ..services import nlq as nlq_svc
+from ..services import dates as date_svc
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -84,8 +85,11 @@ def report_csv(key: str, date_from: str = None, date_to: str = None,
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(rep["columns"])
+    # Dates leave in the house format, DD-MM-YYYY, exactly as the screen showed
+    # them. A download that disagrees with the table it came from is the one
+    # nobody trusts — and the browser's own export does the same.
     for r in rep["rows"]:
-        w.writerow([r.get(c, "") for c in rep["columns"]])
+        w.writerow([date_svc.display_cell(r.get(c, "")) for c in rep["columns"]])
     if rep.get("totals"):
         w.writerow([])
         w.writerow(["TOTALS"] + [f"{k}={v}" for k, v in rep["totals"].items()])

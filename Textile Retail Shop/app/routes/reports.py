@@ -91,7 +91,10 @@ def index():
         key = inv.invoice_date.date().isoformat()
         if key in trend_map:
             trend_map[key] += inv.total
-    trend_labels = list(trend_map.keys())
+    # The map is keyed ISO because that is what sorts as a calendar does; the
+    # axis is read by a person, so it is labelled the way the shop writes a date.
+    trend_labels = [d.strftime("%d-%m-%Y") for d in
+                    (date.fromisoformat(k) for k in trend_map)]
     trend_values = [round(v, 2) for v in trend_map.values()]
 
     # Top products

@@ -26,6 +26,13 @@ const MONEY = [['rate', 'Rate'], ['mrp', 'MRP'], ['sale_price', 'Sale price'], [
 // quantities are floats — compare with the tolerance the server posts with
 const SAME = (a, b) => Math.abs((+a || 0) - (+b || 0)) < 0.001;
 const num = (v) => (v == null || v === '' ? '—' : Number(v).toFixed(2));
+// Dates come off the API stored ISO and are read here DD-MM-YYYY — the same form
+// the warehouse screens use, so a GRN quoted over the phone matches the one on
+// the desk. Anything that is not an ISO date is shown exactly as it came.
+const day = (v) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v ?? ''));
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : (v ?? '');
+};
 const qtyOf = (v) => Math.round((+v || 0) * 1000) / 1000;
 const variantLabel = (r) => SPLIT_ATTRS.map(([k]) => r[k]).filter(Boolean).join(' · ');
 const blankRow = (rate, category) => ({
@@ -144,7 +151,7 @@ function GrnList({ api, onPick, onLogout }) {
                 <Badge text={item.status} tone={item.status === 'posted' ? 'ok' : 'warn'} />
               </View>
               <Text style={s.prodMeta}>
-                Inv {item.invoice_number || '—'}{item.invoice_date ? ' · ' + item.invoice_date : ''} · ₹ {num(item.grand_total)}
+                Inv {item.invoice_number || '—'}{item.invoice_date ? ' · ' + day(item.invoice_date) : ''} · ₹ {num(item.grand_total)}
               </Text>
               <Text style={s.prodMeta}>
                 {item.line_count} line{item.line_count === 1 ? '' : 's'}
@@ -224,7 +231,7 @@ function GrnDetail({ api, grnId, cats, flash, onBack, onBreakdown, onPosted }) {
 
       <ScrollView contentContainerStyle={{ padding: 12 }}>
         <View style={[s.grnRow, { marginBottom: 14 }]}>
-          <Text style={s.prodMeta}>Invoice {grn.invoice_number || '—'}{grn.invoice_date ? ' · ' + grn.invoice_date : ''}</Text>
+          <Text style={s.prodMeta}>Invoice {grn.invoice_number || '—'}{grn.invoice_date ? ' · ' + day(grn.invoice_date) : ''}</Text>
           <Text style={s.prodMeta}>
             GRN No {grn.grn_no || '—'} · {grn.line_count} line{grn.line_count === 1 ? '' : 's'}
           </Text>

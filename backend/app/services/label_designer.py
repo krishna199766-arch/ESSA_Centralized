@@ -32,6 +32,7 @@ import datetime as dt
 from .. import models
 from ..config import COMPANY_NAME
 from . import barcode_svc
+from . import dates as date_svc
 from . import stock_view
 
 
@@ -218,8 +219,12 @@ def receipt_index(db, product_ids):
         out[pid] = {
             "grn_no": pur.grn_no or "",
             "batch": pur.invoice_number or pur.grn_no or "",
-            "received_date": pur.invoice_date or (
-                pur.posted_at.strftime("%d-%m-%Y") if pur.posted_at else ""),
+            # Printed on the tag, so it reads the way the shop floor reads a
+            # date. The invoice date is STORED ISO; the posting fallback is
+            # already DD-MM-YYYY, and a tag that used one form for some receipts
+            # and the other for the rest is worse than either.
+            "received_date": date_svc.to_display(pur.invoice_date) or (
+                pur.posted_at.strftime(date_svc.DISPLAY) if pur.posted_at else ""),
             "supplier": pur.supplier.name if pur.supplier else "",
         }
     for line, pur in rows:                       # ordered by purchase id, so the

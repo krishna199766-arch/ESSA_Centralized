@@ -643,7 +643,9 @@ def _narrow(rep, supplier=None, date_from=None, date_to=None):
                     return False
                 return (not date_from or d >= date_from) and (not date_to or d <= date_to)
             rows = [r for r in rows if within(r)]
-            span = " to ".join(x for x in (date_from, date_to) if x)
+            # said back in the house format — the filter compares ISO, the
+            # sentence explaining it is read by a person
+            span = " to ".join(date_svc.to_display(x) for x in (date_from, date_to) if x)
             applied.append(f"narrowed to {span} on the {col} column")
 
     if not applied:
@@ -744,9 +746,10 @@ def ask(db, question):
             continue
         if k in ("date_from", "date_to") and any("narrowed to" in n for n in narrowed):
             continue
+        shown = date_svc.to_display(v) if k in ("as_on", "date_from", "date_to") else v
         label = {"supplier_id": f"supplier “{supplier_name}”", "product_id": f"product “{product_name}”",
-                 "kind": f"movement kind “{v}”", "as_on": f"as-on date {v}",
-                 "date_from": f"from {v}", "date_to": f"to {v}"}.get(k, f"{k}={v}")
+                 "kind": f"movement kind “{v}”", "as_on": f"as-on date {shown}",
+                 "date_from": f"from {shown}", "date_to": f"to {shown}"}.get(k, f"{k}={v}")
         ignored.append(f"{label} — {name} has no filter for it and no column to narrow on")
 
     return {

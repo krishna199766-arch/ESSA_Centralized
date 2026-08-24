@@ -1,5 +1,6 @@
 import os
 
+import datetime as dt
 from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
@@ -130,6 +131,24 @@ def create_app(config_class=Config):
             return f"₹{float(value):,.2f}"
         except (TypeError, ValueError):
             return "₹0.00"
+
+    # One date format on screen: DD-MM-YYYY, the way this shop writes it on every
+    # bill and register page. SQLite hands `date(invoice_date)` back as ISO text
+    # and a `date` object prints ISO too, so anything that reaches a template
+    # without a strftime of its own goes through here: {{ day | dmy }}
+    @app.template_filter("dmy")
+    def dmy(value):
+        if value in (None, ""):
+            return ""
+        if isinstance(value, dt.datetime):
+            value = value.date()
+        if isinstance(value, dt.date):
+            return value.strftime("%d-%m-%Y")
+        try:
+            return dt.date.fromisoformat(str(value)[:10]).strftime("%d-%m-%Y")
+        except ValueError:
+            # not a date this can read — better shown as it came than blanked
+            return value
 
     # Barcode renderer available in templates as: {{ product.barcode | barcode }}
     from markupsafe import Markup

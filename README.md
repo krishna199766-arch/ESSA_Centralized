@@ -181,13 +181,20 @@ teaches you all the others:
 
 Every icon carries a tooltip, and the open tab is remembered too.
 
-**Dates** are picked from a calendar everywhere — invoice review, LR Entry and its
-register import, payments, returns, stock outward/inward, and the search filters —
-and stored as ISO `YYYY-MM-DD`. A date read off a page in the page's own form
+**Dates** are **shown `DD-MM-YYYY` everywhere** — the form this business writes on
+every register page, invoice, cheque and delivery note — and **stored ISO
+`YYYY-MM-DD`**, which is what makes the LR date-range search and the
+supplier-ageing figures correct. One format on screen, one in the column, and
+nothing renders a raw `2026-07-31` at a person: screens, tooltips, printed labels,
+report tables and both CSV exports all read the same way.
+
+Every date field is a box reading `dd-mm-yyyy` with the calendar one click away.
+It is not a bare `<input type="date">`: what that PRINTS is chosen by the
+browser's locale, so the same record shows `31/07/2026` on one machine and
+`07/31/2026` on the next. A date read off a page in the page's own form
 (`31/07/2026`, `31-7-26`, `31 Jul 2026`) is converted as it is saved; one the
 parser can't read is **kept exactly as it arrived** and flagged on screen rather
-than silently blanked. That consistency is what makes the LR date-range search and
-the supplier-ageing figures correct — see [ARCHITECTURE.md](ARCHITECTURE.md) §7d.
+than silently blanked. See [ARCHITECTURE.md](ARCHITECTURE.md) §7d.
 
 The module behaviours were matched to the reference recordings — see
 `docs/APP_ANALYSIS.md` for the per-screen field/flow notes that drove the build.

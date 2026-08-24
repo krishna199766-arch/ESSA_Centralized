@@ -33,6 +33,7 @@ LR ↔ Invoice linking:
    that sets `matched` fills through the same helper.
 """
 from .. import models
+from . import dates as date_svc
 
 # Every column we compare when deciding "exactly the same" vs "doubtful" — the
 # columns that come off the register PAGE, and only those.
@@ -594,6 +595,8 @@ def describe_invoice_fill(report):
         return []
     labels = {"lr_no": "LR No", "lr_date": "LR Date", "transporter": "Transporter",
               "qty": "quantity"}
+    #: a date quoted back to someone reads DD-MM-YYYY, like every date on screen
+    shown = lambda field, v: date_svc.to_display(v) if field.endswith("date") else v
     out = []
     # the automatic gate blocking a fill is the one case with nothing else to say
     if report.get("qty") == "mismatch" and report.get("matched_by") != "manual":
@@ -615,10 +618,11 @@ def describe_invoice_fill(report):
         out.append(f"Filled {names} from the LR register ({how})")
     for d in report.get("differs", []):
         out.append(f"{labels.get(d['field'], d['field'])}: invoice says "
-                   f"{d['invoice']!r}, LR register says {d['register']!r} — kept the invoice value")
+                   f"{shown(d['field'], d['invoice'])!r}, LR register says "
+                   f"{shown(d['field'], d['register'])!r} — kept the invoice value")
     for c in report.get("conflicts", []):
         if c["field"] == "qty":
             continue
         out.append(f"{labels.get(c['field'], c['field'])}: matched LR rows disagree "
-                   f"({', '.join(str(v) for v in c['register'])}) — left blank")
+                   f"({', '.join(str(shown(c['field'], v)) for v in c['register'])}) — left blank")
     return out

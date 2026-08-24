@@ -366,22 +366,95 @@ function toISODate(value) {
   return ''
 }
 
-// dd/mm/yyyy for reading back — the form this business writes, shown next to the
-// picker so there is never any doubt which of 03/04 is the month
-const readableDate = (iso) => {
-  const s = toISODate(iso)
+// ---------- how a date is READ ----------
+// Stored ISO, shown DD-MM-YYYY, and those are two separate decisions rather than
+// one inconsistency. ISO is what a date COLUMN must hold: `date_from`/`date_to`
+// compare as plain text in SQL, and only ISO sorts the way a calendar does.
+// DD-MM-YYYY is what this business WRITES — on every register page, supplier
+// invoice, cheque and delivery note in the building — so it is what every screen
+// shows. Nothing renders a raw `2026-07-31` any more: one house format means
+// nobody has to work out which of two numbers is the month.
+const DISPLAY_SEP = '-'
+
+const readableDate = (value) => {
+  const s = toISODate(value)
   if (!s) return ''
   const [y, m, d] = s.split('-')
-  return `${d}/${m}/${y}`
+  return [d, m, y].join(DISPLAY_SEP)
 }
 
+//: `2026-07-31T09:14:22` — a stored timestamp is a date with a time bolted on
+const ISO_STAMP_RE = /^(\d{4}-\d{2}-\d{2})[T ]/
+
+// The form used at every display site. Hands back DD-MM-YYYY for anything that
+// is a date, `blank` for nothing at all, and the value UNTOUCHED for anything
+// else — a register cell may hold text vision could not read, and blanking it
+// on screen would look exactly like the date had been lost.
+const fmtDate = (value, blank = '—') => {
+  if (value == null || value === '') return blank
+  const s = String(value)
+  return readableDate(s) || readableDate((s.match(ISO_STAMP_RE) || [])[1]) || s
+}
+
+// A date hiding inside a value that could be anything — a report cell, a CSV
+// field, a filter chip. Deliberately narrower than fmtDate, which is only ever
+// pointed at a column already known to hold dates: here nothing is known about
+// the value, so ONLY a full ISO date is rewritten. `10-12-24` off a size run or
+// a bin code parses perfectly as a date and is not one, and silently reprinting
+// it as `10-12-2024` in a report is a wrong figure nobody would think to check.
+// The server's dates.display_cell draws the same line, so a CSV downloaded from
+// the browser and one downloaded from the API agree.
+const ISO_CELL_RE = /^\d{4}-\d{2}-\d{2}(?:[T ].*)?$/
+const fmtLoose = (v) => (typeof v === 'string' && ISO_CELL_RE.test(v.trim())
+  ? (readableDate(v.trim().slice(0, 10)) || v) : v)
+
+// ---------- picking one ----------
+// The box reads DD-MM-YYYY and the calendar behind it is one click away. A bare
+// <input type="date"> is deliberately not used for the reading half: what it
+// PRINTS is chosen by the browser's locale, so the same record shows 31/07/2026
+// on one machine, 07/31/2026 on the next and 2026-07-31 on a third — none of
+// them this app's format, and none of them under its control. So the value is
+// shown in a text box the app does own, anything typed into it goes through the
+// same day-first parser the rest of the system uses, and the native picker is
+// kept for anyone who would rather point at a calendar than type.
 function DateField({ label, value, onChange, style, width, required, title, inline }) {
   const iso = toISODate(value)
   const unreadable = value && !iso
+  const picker = useRef(null)
+  const [text, setText] = useState(() => readableDate(iso))
+  // Follow the value when something OUTSIDE the box changes it — a form reset, a
+  // row filling itself in from a matched invoice. Keyed on the ISO value, so it
+  // cannot fire mid-typing and snatch back half a date.
+  useEffect(() => { setText(readableDate(iso)) }, [iso])
+  const commit = () => {
+    const s = text.trim()
+    if (!s) { setText(''); if (iso) onChange(''); return }
+    const next = toISODate(s)
+    // Unreadable: put back what the field actually holds. Leaving half-typed
+    // text sitting there would look saved, and isn't.
+    if (!next) { setText(readableDate(iso)); return }
+    setText(readableDate(next))
+    if (next !== iso) onChange(next)
+  }
   const input = (
     <>
-      <input type="date" value={iso} title={title || (iso ? readableDate(iso) : '')}
-        onChange={(e) => onChange(e.target.value)} />
+      <span className="datebox">
+        <input className="datetext" value={text} placeholder="dd-mm-yyyy" inputMode="numeric"
+          title={title || 'Type dd-mm-yyyy, or pick from the calendar'}
+          onChange={(e) => setText(e.target.value)} onBlur={commit}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} />
+        {/* Kept rendered rather than display:none — a hidden input cannot open
+            its own picker — but covered by the button and out of the tab order,
+            so it is never the thing anyone types into. */}
+        <input ref={picker} type="date" className="datepick" tabIndex={-1} aria-hidden="true"
+          value={iso} onChange={(e) => onChange(e.target.value)} />
+        <button type="button" className="datebtn" tabIndex={-1} title="Pick from a calendar"
+          onClick={() => {
+            const el = picker.current
+            if (!el) return
+            try { el.showPicker() } catch { el.focus() }
+          }}>📅</button>
+      </span>
       {unreadable && (
         <div className="flagnote" title="Kept exactly as it was read — pick a date to replace it">
           ⚠ can’t read “{String(value)}” — kept as-is
@@ -1472,9 +1545,9 @@ function LrCandidates({ info, busy, onLink, onClose }) {
                 return (
                   <tr key={c.id}>
                     <td><b>{c.lr_no || '—'}</b></td>
-                    <td>{c.lr_date || '—'}</td>
+                    <td>{fmtDate(c.lr_date)}</td>
                     <td>{c.transport || '—'}</td>
-                    <td>{c.inv_no || '—'}{c.inv_date ? ` · ${c.inv_date}` : ''}</td>
+                    <td>{c.inv_no || '—'}{c.inv_date ? ` · ${fmtDate(c.inv_date)}` : ''}</td>
                     <td title={tip} className={'qty-' + c.qty_agrees}>{c.qty ?? '—'} {mark}</td>
                     <td>{c.item || '—'}</td>
                     <td className="small">{c.would_fill?.length ? c.would_fill.join(', ') : 'nothing blank'}</td>
@@ -2546,7 +2619,7 @@ function Purchases({ selId, setSelId, toast }) {
             </div>
             <div className="kv" style={{ margin: '12px 0 20px', gridTemplateColumns: '130px 1fr 130px 1fr' }}>
               <div className="k">GRN No</div><div>{grn.grn_no || '—'}</div>
-              <div className="k">Invoice</div><div>{grn.invoice_number} · {grn.invoice_date}</div>
+              <div className="k">Invoice</div><div>{grn.invoice_number} · {fmtDate(grn.invoice_date)}</div>
               <div className="k">Taxable</div><div>₹ {money(grn.taxable_total)}</div>
               <div className="k">Grand total</div><div>₹ {money(grn.grand_total)}</div>
             </div>
@@ -3568,7 +3641,7 @@ function Inventory({ toast }) {
                 <div className="k">Design No</div><div>{detail.design_no || '—'}</div>
                 <div className="k">Sale price</div><div>{detail.sale_price != null ? '₹ ' + money(detail.sale_price) : '—'}</div>
                 <div className="k">Discount %</div><div>{detail.sale_discount_pct != null ? detail.sale_discount_pct + '%' : '—'}</div>
-                <div className="k">By</div><div>{detail.detailed_by || '—'}{detail.detailed_at ? ' · ' + detail.detailed_at.slice(0, 10) : ''}</div>
+                <div className="k">By</div><div>{detail.detailed_by || '—'}{detail.detailed_at ? ' · ' + fmtDate(detail.detailed_at) : ''}</div>
               </div>
             ) : <p className="small">Not yet detailed.</p>}
 
@@ -3641,7 +3714,7 @@ function BatchTag({ product }) {
   return (
     <span className="batchtag" title={[
       b.grn_no ? `GRN ${b.grn_no}` : null,
-      b.invoice_number ? `Invoice ${b.invoice_number}${b.invoice_date ? ' · ' + b.invoice_date : ''}` : null,
+      b.invoice_number ? `Invoice ${b.invoice_number}${b.invoice_date ? ' · ' + fmtDate(b.invoice_date) : ''}` : null,
       b.bundle_code ? `Bundle ${b.bundle_code}` : null,
       b.supplier ? `From ${b.supplier}` : null,
       more.length ? `+ ${more.length} earlier receipt(s): ${more.map((x) => x.label).join(', ')}` : null,
@@ -4079,11 +4152,11 @@ function StockOutward({ toast }) {
               <h2 style={{ margin: 0 }}>{detail.to_destination}</h2>
               <span className={'badge ' + (detail.status === 'posted' ? 'confirmed' : 'uploaded')}>{detail.status}</span></div>
             <div className="kv" style={{ margin: '12px 0 20px', gridTemplateColumns: '130px 1fr 130px 1fr' }}>
-              <div className="k">Code</div><div>{detail.code}</div><div className="k">Date</div><div>{detail.date || '—'}</div>
+              <div className="k">Code</div><div>{detail.code}</div><div className="k">Date</div><div>{fmtDate(detail.date)}</div>
               <div className="k">From</div><div>{detail.from_location}</div><div className="k">Packed by</div><div>{detail.packed_by || '—'}</div>
               {detail.status === 'received' && <>
                 <div className="k">Received by</div><div>{detail.received_by || '—'}</div>
-                <div className="k">Received on</div><div>{detail.received_date || (detail.received_at || '').slice(0, 10) || '—'}</div>
+                <div className="k">Received on</div><div>{fmtDate(detail.received_date || detail.received_at)}</div>
               </>}
             </div>
             {detail.status !== 'draft' && (
@@ -4237,12 +4310,12 @@ function StockInward({ toast }) {
             </div>
             <div className="kv" style={{ margin: '12px 0 18px', gridTemplateColumns: '130px 1fr 130px 1fr' }}>
               <div className="k">Package</div><div className="mono">{detail.code}</div>
-              <div className="k">Dispatched</div><div>{detail.date || (detail.posted_at || '').slice(0, 10) || '—'}</div>
+              <div className="k">Dispatched</div><div>{fmtDate(detail.date || detail.posted_at)}</div>
               <div className="k">From</div><div>{detail.from_company} · {detail.from_location}</div>
               <div className="k">Packed by</div><div>{detail.packed_by || '—'}</div>
               {detail.status === 'received' && <>
                 <div className="k">Received by</div><div>{detail.received_by || '—'}</div>
-                <div className="k">Received on</div><div>{detail.received_date || (detail.received_at || '').slice(0, 10) || '—'}</div>
+                <div className="k">Received on</div><div>{fmtDate(detail.received_date || detail.received_at)}</div>
               </>}
             </div>
             {editable && (
@@ -4397,7 +4470,7 @@ function Payments({ toast }) {
                     return (
                       <tr key={b.purchase_id} style={{ background: r.sel ? 'var(--panel-2)' : '' }}>
                         <td><input type="checkbox" checked={!!r.sel} onChange={(e) => upd(b.purchase_id, 'sel', e.target.checked)} /></td>
-                        <td className="mono">{b.invoice_number}</td><td>{b.invoice_date}</td>
+                        <td className="mono">{b.invoice_number}</td><td>{fmtDate(b.invoice_date)}</td>
                         <td style={{ textAlign: 'right' }}>{b.days ?? '—'}</td>
                         <td style={{ textAlign: 'right' }}>{money(b.outstanding)}</td>
                         <td className="num"><input value={r.cash ?? ''} disabled={!r.sel} onChange={(e) => upd(b.purchase_id, 'cash', e.target.value)} /></td>
@@ -4421,7 +4494,7 @@ function Payments({ toast }) {
                 <th style={{ textAlign: 'right' }}>Debit</th><th style={{ textAlign: 'right' }}>Credit</th>
                 <th style={{ textAlign: 'right' }}>Balance</th></tr></thead>
                 <tbody>{ledger.rows.map((r, i) => (
-                  <tr key={i}><td>{r.date || '—'}</td><td>{r.type}</td>
+                  <tr key={i}><td>{fmtDate(r.date)}</td><td>{r.type}</td>
                     <td className="mono">{r.ref}{r.detail ? <span className="small"> · {r.detail}</span> : ''}</td>
                     <td style={{ textAlign: 'right' }}>{r.debit ? money(r.debit) : ''}</td>
                     <td style={{ textAlign: 'right', color: 'var(--ok)' }}>{r.credit ? money(r.credit) : ''}</td>
@@ -4529,7 +4602,7 @@ function Returns({ toast }) {
             <th style={{ textAlign: 'right' }}>Short</th><th></th></tr></thead>
             <tbody>{purchases.map(p => (
               <tr key={p.id}><td>{p.supplier_name}</td><td className="mono">{p.invoice_number}</td>
-                <td>{p.invoice_date}</td><td style={{ textAlign: 'right' }}>₹ {money(p.grand_total)}</td>
+                <td>{fmtDate(p.invoice_date)}</td><td style={{ textAlign: 'right' }}>₹ {money(p.grand_total)}</td>
                 <td style={{ textAlign: 'right', color: p.short_qty ? 'var(--warn)' : 'var(--muted)' }}
                   title={p.short_qty ? `${p.short_qty} unit(s) counted short or damaged at receiving` : ''}>
                   {p.short_qty ? `${p.short_qty} · ₹ ${money(p.short_value)}` : '—'}</td>
@@ -4664,7 +4737,9 @@ const PARAM_LABEL = { date_from: 'From', date_to: 'To', as_on: 'As on' }
 // not have to wonder which is authoritative.
 const toCsv = (columns, rows, totals) => {
   const cell = (v) => {
-    const s = v == null ? '' : String(v)
+    // Dates leave in the format the screen showed them in. A download that
+    // disagrees with the table it came from is the one nobody trusts.
+    const s = v == null ? '' : String(fmtLoose(v))
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
   const lines = [columns.map(cell).join(',')]
@@ -4866,8 +4941,8 @@ function AskReading({ read, onDismiss }) {
       {chips.length > 0 && (
         <div className="askchips">
           {chips.map(([k, v]) => (
-            <span key={k} className="askchip" title={`The report ran with ${k} = ${v}`}>
-              {(PARAM_LABEL[k] || k.replace(/_/g, ' '))}: <b>{String(v)}</b>
+            <span key={k} className="askchip" title={`The report ran with ${k} = ${fmtLoose(v)}`}>
+              {(PARAM_LABEL[k] || k.replace(/_/g, ' '))}: <b>{String(fmtLoose(v))}</b>
             </span>
           ))}
         </div>
@@ -4969,7 +5044,10 @@ function Reports() {
   const grouped = cat.reduce((a, r) => { (a[r.group] = a[r.group] || []).push(r); return a }, {})
   const order = groups.length ? groups : Object.entries(REPORT_GROUPS).map(([k2, n]) => ({ key: k2, name: n }))
   const dateParams = (entry?.params || []).filter((p) => PARAM_LABEL[p])
-  const fmt = (v) => typeof v === 'number' ? v.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : (v ?? '')
+  // A report's columns are whatever the report returns, so a cell is formatted
+  // by what it IS rather than by which column it sits in: figures grouped, dates
+  // read back as DD-MM-YYYY like everywhere else, everything else left alone.
+  const fmt = (v) => typeof v === 'number' ? v.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : (fmtLoose(v) ?? '')
   // A question that routed nowhere: no table, and no report claiming to be it
   const miss = !!(asked && !asked.report_key)
   // Dismissing a miss puts the previously selected report back, rather than
@@ -5861,6 +5939,7 @@ function LREntryView({ toast }) {
                       // "2 / 1" — bundles and boxes are one fact about the packaging
                       const val = c.pair
                         ? `${r[k] ?? '—'} / ${r[c.pair] ?? '—'}`
+                        : LR_DATE_COLS.has(k) ? fmtDate(r[k], '')
                         : (r[k] ?? '')
                       // what the page said, when it wasn't English — kept against
                       // the row so a reading can always be checked against it
@@ -5871,7 +5950,10 @@ function LREntryView({ toast }) {
                           title={m ? `Register: ${m.register}\nInvoice: ${m.invoice}`
                             : orig ? `On the page (${r.source_language || 'original'}): ${orig}` : undefined}>
                           <div className="cellmain">{val}{m ? ' ⚠' : ''}{orig ? ' 🌐' : ''}</div>
-                          {c.sub && r[c.sub] ? <div className="cellsub">{r[c.sub]}</div> : null}
+                          {c.sub && r[c.sub]
+                            ? <div className="cellsub">
+                                {LR_DATE_COLS.has(c.sub) ? fmtDate(r[c.sub], '') : r[c.sub]}</div>
+                            : null}
                         </td>
                       )
                     })}
@@ -8546,7 +8628,7 @@ function DsRegister({ toast, status, setStatus, onChanged }) {
                           style={{ color: 'var(--warn)' }}>none</span>
                       : rupees(r.mrp)}</td>
                     <td className="small" title={DS_BASIS[r.basis]}>
-                      {r.moved_on || '—'}
+                      {fmtDate(r.moved_on)}
                       <div className="cellsub">{r.basis === 'sale' ? 'till sale'
                         : r.basis === 'dispatch' ? 'dispatched' : 'never sold'}</div></td>
                     <td className="num"><b>{r.days_idle}</b></td>
@@ -8804,7 +8886,7 @@ function DsWorksheets({ toast }) {
               <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => openOne(c.id)}>
                 <td><b>{c.name}</b>{c.note && <div className="cellsub">{c.note}</div>}</td>
                 <td><span className={'badge ' + (c.status === 'closed' ? 'posted' : c.status === 'active' ? 'confirmed' : 'draft')}>{c.status}</span></td>
-                <td className="small">{c.starts_on} → {c.ends_on}</td>
+                <td className="small">{fmtDate(c.starts_on)} → {fmtDate(c.ends_on)}</td>
                 <td className="num">{c.line_count}</td>
                 <td className="num">{c.totals.qty}</td>
                 <td className="num">{rupees(c.totals.stock_cost)}</td>
@@ -9195,7 +9277,7 @@ function AgeChip({ age }) {
   const late = age.overdue_by > 0
   return (
     <span className={'agechip' + (late ? ' late' : '')}
-      title={`Received ${age.received_on}`
+      title={`Received ${fmtDate(age.received_on)}`
         + (age.holding_days ? ` · bought against a ${age.holding_days}-day holding period` : '')}>
       {age.days} day{age.days === 1 ? '' : 's'}{late ? ` · ${age.overdue_by} over` : ''}
     </span>
@@ -9260,7 +9342,9 @@ function ItemLocator({ toast }) {
   //: the newest receipt — what the consignment, the age and the money hang off
   const first = res?.receipts?.[0]
   const money2 = (v) => (v == null ? '—' : '₹ ' + money(v))
-  const day = (v) => (v ? String(v).slice(0, 10) : '—')
+  //: every date on this screen, in the house format — an ISO timestamp off a
+  //  movement row and a plain date off an invoice both read the same way
+  const day = (v) => fmtDate(v)
 
   return (
     <div className="body" style={{ overflow: 'auto', display: 'block' }}>
@@ -9327,7 +9411,7 @@ function ItemLocator({ toast }) {
                   (con?.lr_entry_no || res.age) ? (
                     <>{con?.lr_entry_no || '—'} <AgeChip age={res.age} /></>
                   ) : null],
-                ['LR no / date', con ? `${con.lr_no || '—'} / ${con.lr_date || '—'}` : null],
+                ['LR no / date', con ? `${con.lr_no || '—'} / ${fmtDate(con.lr_date)}` : null],
                 ['Mode / transport', con
                   ? [con.mode, con.transport].filter(Boolean).join(' · ') || null : null],
                 ['Supplier', con?.supplier_name || first?.supplier || p?.supplier || ''],
@@ -9336,8 +9420,8 @@ function ItemLocator({ toast }) {
                 ['GRN', first?.grn_no || null],
                 ['Invoice no', first?.invoice_number || con?.inv_no || ''],
                 ['Invoice date', day(first?.invoice_date || con?.inv_date)],
-                ['Entry date', con?.lr_entry_date || null],
-                ['Received on', res.age?.received_on || null],
+                ['Entry date', con?.lr_entry_date ? fmtDate(con.lr_entry_date) : null],
+                ['Received on', res.age?.received_on ? fmtDate(res.age.received_on) : null],
                 ['Consignment', con
                   ? [con.qty ? `${con.qty} pcs` : null, con.amount ? money2(con.amount) : null,
                      con.boxes ? `${con.boxes} box(es)` : null].filter(Boolean).join(' · ') || null
@@ -9765,7 +9849,7 @@ function Users({ toast, me }) {
   }
 
   const isMe = (u) => u.username === me
-  const when = (iso) => (iso ? new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' }) : '—')
+  const when = (iso) => fmtDate(iso)
 
   return (
     <div className="body" style={{ display: 'block', overflow: 'auto', padding: 18 }}>
