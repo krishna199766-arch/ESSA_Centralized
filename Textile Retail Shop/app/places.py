@@ -67,13 +67,21 @@ def default_company():
 
 
 def _warehouse_locations():
-    """Place names the warehouse knows, or [] if it cannot be reached.
+    """Branch names the warehouse knows, or [] if it cannot be reached.
 
-    Two sources, because the warehouse records a place in two ways and neither is
-    complete on its own: the master list somebody maintains (LR Entry's
-    auto-transfer branch), and the destinations stock has actually been dispatched
-    to. A branch that has been shipped to but never added to the master is still a
-    branch, and it is the one a till is most likely to be standing in.
+    The MASTER list only — the one somebody maintains, behind LR Entry's
+    auto-transfer branch. Not the destinations stock has actually been dispatched
+    to, and that is a deliberate refusal: `to_destination` is free text and the
+    warehouse dispatches to customers as well as to branches. A delivery to a
+    person would become a "branch" here, and then transfers.sync_transfers would
+    take those pieces into shop stock — inventing goods on a shelf out of goods
+    that went out of the door.
+
+    The cost of being strict is a branch that has been shipped to but never added
+    to the master: its transfers are left alone until somebody adds it. That is
+    the right way round. Stock that has not arrived anywhere is a question
+    somebody asks; stock that arrived somewhere it never went is a figure nobody
+    questions.
     """
     from app import warehouse_items as wh
     con = wh._connect()
@@ -81,14 +89,13 @@ def _warehouse_locations():
         return []
     names = []
     try:
-        for sql in (
-            "SELECT value FROM master_options WHERE kind = 'auto_transfer_location'",
-            "SELECT DISTINCT to_destination FROM stock_outwards",
-        ):
-            try:
-                names += [r[0] for r in con.execute(sql).fetchall() if r and r[0]]
-            except SQLAlchemyError:
-                continue          # an older warehouse without that table
+        # rows come back as dicts keyed by column name — see warehouse_items._Result
+        sql = ("SELECT value FROM master_options "
+               "WHERE kind = 'auto_transfer_location'")
+        try:
+            names += [r["value"] for r in con.execute(sql).fetchall() if r.get("value")]
+        except SQLAlchemyError:
+            pass                  # an older warehouse without that table
     finally:
         con.close()
     seen, out = set(), []
@@ -170,9 +177,9 @@ def resolve(company_id=None, location_id=None, counter_id=None):
     another branch is worse than one that reads nothing, because it looks
     answered.
     """
-    company = Company.query.get(company_id) if company_id else None
-    location = Location.query.get(location_id) if location_id else None
-    counter = Counter.query.get(counter_id) if counter_id else None
+    company = db.session.get(Company, company_id) if company_id else None
+    location = db.session.get(Location, location_id) if location_id else None
+    counter = db.session.get(Counter, counter_id) if counter_id else None
     if location is not None and company is not None and location.company_id \
             and location.company_id != company.id:
         location, counter = None, None

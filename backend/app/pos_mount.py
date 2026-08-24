@@ -129,12 +129,16 @@ def load_pos_app():
             from app.master_categories import sync_master_categories
             from app.warehouse_items import sync_warehouse_items
             from app.places import sync_locations
+            from app.transfers import sync_transfers
             sync_master_categories()
             sync_warehouse_items()
             # The branches this warehouse dispatches to are the branches the till
             # sells from, so the shop reads that list rather than keeping a second
             # one. See the shop's app/places.
             sync_locations()
+            # Stock the warehouse dispatched to a branch becomes that branch's
+            # stock. Last, because it needs the places and the items to exist.
+            sync_transfers()
             _seed_if_empty(pkg)
         return flask_app
     finally:

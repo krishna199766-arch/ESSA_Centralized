@@ -3,7 +3,7 @@ from flask import (Blueprint, render_template, request, redirect, url_for, flash
 from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
-from app import places, warehouse_items
+from app import places, transfers, warehouse_items
 from app.models import (Product, Customer, Invoice, InvoiceItem, StockMovement,
                         LoyaltyTxn, User)
 from app.utils import generate_number
@@ -208,9 +208,22 @@ def checkout():
                 line_total=line_total, tax_amount=tax,
             ))
             product.stock_qty -= qty
+            # …and out of the branch it was rung at. The shop's total above is
+            # what the till sells against and what every screen reads; this is
+            # the split of it, so a sale at Tirupur comes off Tirupur's shelf and
+            # not off the pieces sitting at another branch.
+            #
+            # Not a second check on whether the sale may happen. A shop whose
+            # branches were stocked before any of this existed has a total and no
+            # split, and refusing to sell what is plainly on the counter because
+            # a table added last week says zero would be the software arguing
+            # with the room.
+            if location is not None:
+                transfers.move(location.id, pid, -qty)
             db.session.add(StockMovement(
                 product_id=pid, change=-qty, reason="sale",
                 reference=inv.invoice_number
+                          + (f" @ {location.name}" if location is not None else "")
             ))
             subtotal += line_total
             total_tax += tax

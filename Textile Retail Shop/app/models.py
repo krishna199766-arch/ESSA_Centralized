@@ -219,6 +219,59 @@ class Counter(db.Model):
                                           name="uq_counter_location_name"),)
 
 
+class LocationStock(db.Model):
+    """How much of one product is at one place.
+
+    `Product.stock_qty` is what this SHOP holds altogether, and it stays the
+    figure the till sells against. This is the split of it: what arrived at each
+    branch and what has sold there. The two are kept in step, not derived from
+    each other — a shop whose branches were stocked before any of this existed
+    has a total and no split, and inventing one by dividing would be making up
+    numbers about real goods.
+    """
+    __tablename__ = "location_stock"
+    id = db.Column(db.Integer, primary_key=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"),
+                            nullable=False, index=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"),
+                           nullable=False, index=True)
+    qty = db.Column(db.Float, default=0.0)
+    location = db.relationship("Location")
+    product = db.relationship("Product")
+    __table_args__ = (db.UniqueConstraint("location_id", "product_id",
+                                          name="uq_location_stock"),)
+
+
+class TransferReceipt(db.Model):
+    """One dispatched line from the warehouse, taken into a branch's stock.
+
+    The point of this table is that it happens ONCE. The sync reads the
+    warehouse's outward lines on every start, and without a record of what has
+    already been applied, a shop's stock would grow by the whole delivery every
+    time the till was restarted. So the warehouse's own line id is unique here,
+    and it is the thing that makes the import safe to repeat.
+
+    It is also the audit trail: which transfer, on what day, brought these pieces
+    to this branch. `qty` is what was ACCEPTED at the far end, not what was sent —
+    the warehouse already records the difference as a discrepancy, and a shop that
+    took in the sent figure would be holding pieces that never arrived.
+    """
+    __tablename__ = "transfer_receipts"
+    id = db.Column(db.Integer, primary_key=True)
+    #: StockOutwardLine.id in the warehouse — the natural key, and unique so the
+    #: same dispatch cannot be taken in twice
+    wh_line_id = db.Column(db.Integer, unique=True, nullable=False, index=True)
+    wh_outward_id = db.Column(db.Integer, index=True)
+    code = db.Column(db.String(32))                # the transfer note's code
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), index=True)
+    qty = db.Column(db.Float, default=0.0)
+    received_on = db.Column(db.String(16))
+    applied_at = db.Column(db.DateTime, default=datetime.utcnow)
+    location = db.relationship("Location")
+    product = db.relationship("Product")
+
+
 class Invoice(db.Model):
     __tablename__ = "invoices"
     id = db.Column(db.Integer, primary_key=True)
