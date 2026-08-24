@@ -30,7 +30,7 @@
     { "source": "/m", "destination": "/api/index" },
     { "source": "/m/(.*)", "destination": "/api/index" },
     { "source": "/pos", "destination": "/api/index" },
-    { "source": "/pos/:path*", "destination": "/api/index" },
+    { "source": "/pos/(.*)", "destination": "/api/index" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "headers": [
