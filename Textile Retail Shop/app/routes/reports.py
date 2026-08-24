@@ -3,11 +3,47 @@ from flask_login import login_required
 from datetime import datetime, date, timedelta
 from sqlalchemy import func
 from app import db
-from app.models import Invoice, InvoiceItem, Product, Customer
+from app.models import (Company, Counter, Customer, Invoice, InvoiceItem,
+                        Location, Product)
 from app.utils import role_required
 from app import nlq, reports_lib
 
 reports_bp = Blueprint("reports", __name__)
+
+
+def parse_places():
+    """The company / branch / till this report is being asked about.
+
+    Every figure on the page is filtered by the same three, so a page that says
+    "Tirupur" says it about the total, the trend, the top products and the GST
+    alike. A report where the heading and the numbers disagree about what is
+    being counted is worse than no filter at all.
+
+    Returns (filters, chosen) — the SQL conditions, and the rows for the form.
+    """
+    ids = {}
+    for key in ("company", "location", "counter"):
+        raw = request.args.get(key, "")
+        ids[key] = int(raw) if str(raw).strip().isdigit() else None
+    conds = []
+    if ids["company"]:
+        conds.append(Invoice.company_id == ids["company"])
+    if ids["location"]:
+        conds.append(Invoice.location_id == ids["location"])
+    if ids["counter"]:
+        conds.append(Invoice.counter_id == ids["counter"])
+    return conds, ids
+
+
+def place_lists():
+    """What the report's three dropdowns offer."""
+    return {
+        "companies": Company.query.order_by(Company.name).all(),
+        "locations": Location.query.order_by(Location.name).all(),
+        "counters": (db.session.query(Counter, Location.name)
+                     .join(Location, Location.id == Counter.location_id)
+                     .order_by(Location.name, Counter.name).all()),
+    }
 
 
 def parse_range():
@@ -31,9 +67,11 @@ def parse_range():
 @role_required("admin", "manager")
 def index():
     start, end = parse_range()
+    where, chosen = parse_places()
     q = db.session.query(Invoice).filter(
         func.date(Invoice.invoice_date) >= start,
         func.date(Invoice.invoice_date) <= end,
+        *where,
     )
     invoices = q.all()
 
@@ -66,6 +104,7 @@ def index():
     ).filter(
         func.date(Invoice.invoice_date) >= start,
         func.date(Invoice.invoice_date) <= end,
+        *where,
     ).group_by(Product.id).order_by(func.sum(InvoiceItem.line_total + InvoiceItem.tax_amount).desc()).limit(10).all()
 
     # Payment breakdown
@@ -76,6 +115,7 @@ def index():
     ).filter(
         func.date(Invoice.invoice_date) >= start,
         func.date(Invoice.invoice_date) <= end,
+        *where,
     ).group_by(Invoice.payment_method).all()
 
     # GST summary
@@ -92,11 +132,50 @@ def index():
     ).filter(
         func.date(Invoice.invoice_date) >= start,
         func.date(Invoice.invoice_date) <= end,
+        *where,
     ).group_by(Customer.id).order_by(func.sum(Invoice.total).desc()).limit(10).all()
+
+    # Where the day's money came from. Grouped in the database rather than in
+    # Python because a year of bills is a lot of rows to carry up here to add up,
+    # and this is the query somebody runs every evening.
+    def by(label_col, join_model, join_on):
+        return (db.session.query(label_col,
+                                 func.count(Invoice.id),
+                                 func.coalesce(func.sum(Invoice.total), 0))
+                .join(join_model, join_on)
+                .filter(func.date(Invoice.invoice_date) >= start,
+                        func.date(Invoice.invoice_date) <= end, *where)
+                .group_by(label_col)
+                .order_by(func.coalesce(func.sum(Invoice.total), 0).desc()).all())
+
+    by_location = by(Location.name, Location, Location.id == Invoice.location_id)
+    by_counter = by(Counter.name, Counter, Counter.id == Invoice.counter_id)
+    by_company = by(Company.name, Company, Company.id == Invoice.company_id)
+
+    # …and the same thing a day at a time, which is what "daily sales, location
+    # wise" means when somebody says it: one row per branch per day.
+    daily_places = (db.session.query(func.date(Invoice.invoice_date),
+                                     Location.name,
+                                     func.count(Invoice.id),
+                                     func.coalesce(func.sum(Invoice.total), 0))
+                    .join(Location, Location.id == Invoice.location_id)
+                    .filter(func.date(Invoice.invoice_date) >= start,
+                            func.date(Invoice.invoice_date) <= end, *where)
+                    .group_by(func.date(Invoice.invoice_date), Location.name)
+                    .order_by(func.date(Invoice.invoice_date).desc(),
+                              func.coalesce(func.sum(Invoice.total), 0).desc()).all())
+
+    # Bills raised before any of this existed carry no branch, so they appear in
+    # none of the three splits above. Said out loud rather than left as a gap
+    # between two totals that do not match.
+    unplaced = sum(1 for i in invoices if not i.location_id)
 
     return render_template(
         "reports/index.html",
         start=start, end=end,
+        chosen=chosen, places=place_lists(),
+        by_location=by_location, by_counter=by_counter, by_company=by_company,
+        daily_places=daily_places, unplaced=unplaced,
         total_sales=total_sales, total_tax=total_tax, total_discount=total_discount,
         invoice_count=invoice_count, avg_bill=avg_bill,
         trend_labels=trend_labels, trend_values=trend_values,

@@ -24,12 +24,43 @@
   <div id="askOut" class="mt-3"></div>
 </div>
 
+{# Every figure below is filtered by these three, not just the tables that name
+   them: a page headed "Tirupur" whose totals count every branch is worse than a
+   page with no filter on it. #}
 <form class="row g-2 mb-3">
-  <div class="col-md-3"><input class="form-control" type="date" name="from" value="{{ start }}"></div>
-  <div class="col-md-3"><input class="form-control" type="date" name="to" value="{{ end }}"></div>
-  <div class="col-md-2"><button class="btn btn-brand w-100">Apply</button></div>
-  <div class="col-md-4 text-end"><a href="{{ url_for('reports.low_stock') }}" class="btn btn-outline-warning">Low stock report</a></div>
+  <div class="col-md-2"><input class="form-control" type="date" name="from" value="{{ start }}"></div>
+  <div class="col-md-2"><input class="form-control" type="date" name="to" value="{{ end }}"></div>
+  <div class="col-md-2">
+    <select class="form-select" name="company">
+      <option value="">Every company</option>
+      {% for c in places.companies %}
+      <option value="{{ c.id }}" {% if chosen.company == c.id %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select></div>
+  <div class="col-md-2">
+    <select class="form-select" name="location">
+      <option value="">Every branch</option>
+      {% for l in places.locations %}
+      <option value="{{ l.id }}" {% if chosen.location == l.id %}selected{% endif %}>{{ l.name }}</option>
+      {% endfor %}
+    </select></div>
+  <div class="col-md-2">
+    <select class="form-select" name="counter">
+      <option value="">Every till</option>
+      {% for c, where in places.counters %}
+      <option value="{{ c.id }}" {% if chosen.counter == c.id %}selected{% endif %}>{{ where }} · {{ c.name }}</option>
+      {% endfor %}
+    </select></div>
+  <div class="col-md-1"><button class="btn btn-brand w-100">Apply</button></div>
+  <div class="col-md-1 text-end"><a href="{{ url_for('reports.low_stock') }}" class="btn btn-outline-warning" title="Low stock report">Low</a></div>
 </form>
+
+{% if unplaced %}
+<div class="small text-muted mb-2">
+  {{ unplaced }} bill(s) in this range carry no branch — raised before counters
+  existed, so they are in the totals above but in none of the splits below.
+</div>
+{% endif %}
 
 <div class="row g-3 mb-3">
   <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Total sales</div><div class="value">{{ total_sales|inr }}</div></div></div>
@@ -37,6 +68,54 @@
   <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Avg bill</div><div class="value">{{ avg_bill|inr }}</div></div></div>
   <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Tax collected</div><div class="value">{{ total_tax|inr }}</div></div></div>
 </div>
+
+{# The question this page is usually opened to answer: what did each branch and
+   each till take. Three of them because they are three different questions, and
+   one table with three columns would make you read past two to reach the one you
+   came for. #}
+<div class="row g-3 mb-3">
+  {% for title, rows, icon in [('By branch', by_location, 'shop'),
+                               ('By till', by_counter, 'calculator'),
+                               ('By company', by_company, 'building')] %}
+  <div class="col-lg-4">
+    <div class="card p-3 h-100">
+      <h6 class="mb-2"><i class="bi bi-{{ icon }}"></i> {{ title }}</h6>
+      {% if rows %}
+      <table class="table table-sm mb-0">
+        <thead><tr><th></th><th class="text-end">Bills</th><th class="text-end">Sales</th></tr></thead>
+        <tbody>
+          {% for name, bills, total in rows %}
+          <tr><td>{{ name }}</td><td class="text-end">{{ bills }}</td>
+              <td class="text-end">{{ total|inr }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="small text-muted">Nothing recorded against a {{ title[3:]|lower }} in this range.</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if daily_places %}
+<div class="card p-3 mb-3">
+  <h6 class="mb-2"><i class="bi bi-calendar3"></i> Daily sales, branch by branch</h6>
+  <div class="table-responsive" style="max-height:340px;overflow:auto">
+    <table class="table table-sm mb-0">
+      <thead class="table-light" style="position:sticky;top:0">
+        <tr><th>Date</th><th>Branch</th><th class="text-end">Bills</th><th class="text-end">Sales</th></tr>
+      </thead>
+      <tbody>
+        {% for day, name, bills, total in daily_places %}
+        <tr><td>{{ day }}</td><td>{{ name }}</td>
+            <td class="text-end">{{ bills }}</td><td class="text-end">{{ total|inr }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
 
 <div class="row g-3">
   <div class="col-lg-8">

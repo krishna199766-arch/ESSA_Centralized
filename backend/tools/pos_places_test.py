@@ -180,6 +180,62 @@ page = client.get("/pos/invoice/%d" % old.id).get_data(as_text=True)
 eq("it falls back to the shop's own config",
    flask_app.config["SHOP_GSTIN"] in page, True)
 
+head("and the reports can be asked branch by branch, till by till")
+# The whole point of stamping a bill: being able to ask it afterwards. Every
+# figure on the report page takes the same filter, so a page headed "Tirupur"
+# counts Tirupur in its total as well as in its tables.
+import datetime as _dt                                           # noqa: E402
+import re as _re                                                 # noqa: E402
+from urllib.parse import urlencode                               # noqa: E402
+
+# The till operator is promoted rather than a second account being logged in.
+# This file holds ONE app context for its whole run, and Flask-Login caches the
+# signed-in user on `g` — which lives in that context, not in the test client. A
+# second client's login therefore finds itself already "authenticated" as the
+# first one and short-circuits, and every request after it is made as the wrong
+# person. One client, one login.
+staff.role = "admin"
+t_a = Counter(name="G-BILL1", location_id=tirupur.id)
+t_b = Counter(name="T-BILL", location_id=elsewhere.id)
+db.session.add_all([t_a, t_b])
+db.session.commit()
+
+today = _dt.date.today()
+for n, (loc, till, amt, ago) in enumerate([
+        (tirupur, t_a, 1000, 0), (tirupur, t_a, 500, 0),
+        (elsewhere, t_b, 700, 0), (tirupur, t_a, 250, 1)]):
+    db.session.add(Invoice(
+        invoice_number="INV-R%03d" % n, cashier_id=staff.id, total=amt,
+        invoice_date=_dt.datetime.combine(today - _dt.timedelta(days=ago),
+                                          _dt.time(12, 0)),
+        company_id=other.id, location_id=loc.id, counter_id=till.id))
+# a bill from before any of this existed — in the totals, in none of the splits
+db.session.add(Invoice(invoice_number="INV-R-OLD", cashier_id=staff.id, total=99,
+                       invoice_date=_dt.datetime.combine(today, _dt.time(9, 0))))
+db.session.commit()
+
+
+def sales(**q):
+    resp = client.get("/reports/?" + urlencode(q))
+    page = resp.get_data(as_text=True)
+    m = _re.search(r'Total sales</div><div class="value">([^<]+)', page)
+    return (m.group(1).strip() if m else "?"), page
+
+
+everything, page = sales()
+eq("every branch together", everything, "₹2,699.00")
+eq("Tirupur alone", sales(location=tirupur.id)[0], "₹1,850.00")
+eq("the other branch alone", sales(location=elsewhere.id)[0], "₹700.00")
+eq("one till alone", sales(counter=t_a.id)[0], "₹1,750.00")
+# 99 + 50: this file raised two bills with no branch on them — the one
+# from before counters existed, and the reprint case above
+eq("…and the two branches plus the unplaced bills make the whole",
+   1850 + 700 + 149, 2699)
+for shown in ("By branch", "By till", "By company",
+              "Daily sales, branch by branch", "TAQUA SILKS, TIRUPUR", "G-BILL1"):
+    eq("  the page shows %s" % shown, shown in page, True)
+eq("  and says how many bills predate branches", "carry no branch" in page, True)
+
 head("locations come from the warehouse, and only from it")
 eq("with no warehouse to read, nothing is invented", places.sync_locations(), (0, 0))
 eq("and the names typed in here are untouched",
