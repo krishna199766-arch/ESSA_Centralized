@@ -1840,7 +1840,23 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
             <button className="sidehide" onClick={toggleImg}
               title="Hide the invoice image — the screen keeps this setting">«</button>
             <div className="viewerscroll">
-              <img src={api.imageUrl(docId, doc?.content_hash)} alt="invoice" />
+              {/* A hand-keyed invoice has no photograph, and pointing an <img>
+                  at the image route would draw a broken-image icon where the
+                  bill should be — which reads as "the scan failed to load",
+                  something far more alarming than "this one was typed".
+                  `has_image` is false only on a manual entry; a document that
+                  predates the flag has no such key, so an undefined is treated
+                  as "yes, there is one" and nothing already uploaded changes. */}
+              {doc && doc.has_image === false ? (
+                <div className="noimage">
+                  <div className="noimage-ico" aria-hidden="true">📄</div>
+                  <b>Keyed in by hand</b>
+                  <span>There is no scan behind this one — the fields on the
+                    right are the record. Confirm it the same way.</span>
+                </div>
+              ) : (
+                <img src={api.imageUrl(docId, doc?.content_hash)} alt="invoice" />
+              )}
             </div>
           </>
         ) : (
@@ -1870,7 +1886,14 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
           )}
           <div className={'warnbox ' + (warnings.filter((w)=>!w.includes('OCR')&&!w.includes('vision')&&!w.includes('sample')).length ? '' : 'clean')} style={{ marginBottom: 20 }}>
             <h4>{warnings.length ? `${warnings.length} check(s)` : 'All internal checks passed'}
-              {doc && <span className="small" style={{ float: 'right' }}>via {doc && data.template_key ? '' : ''}extraction · confidence <b className={'conf ' + confClass(doc?.confidence)}>{doc ? Math.round(doc.confidence * 100) + '%' : '—'}</b></span>}
+              {/* Confidence answers "how sure is the READING", so on an invoice
+                  nobody read it is not a low score — it is not a question. The
+                  manual entry is stored at 0, and printing "confidence 0%" in
+                  red would accuse a bill of being badly extracted when it was
+                  never extracted at all. */}
+              {doc && (doc.has_image === false
+                ? <span className="small" style={{ float: 'right' }}>keyed in by hand · not extracted</span>
+                : <span className="small" style={{ float: 'right' }}>via {doc && data.template_key ? '' : ''}extraction · confidence <b className={'conf ' + confClass(doc?.confidence)}>{doc ? Math.round(doc.confidence * 100) + '%' : '—'}</b></span>)}
             </h4>
             {warnings.length ? <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul> : null}
           </div>
@@ -11102,6 +11125,26 @@ export default function App() {
   }
   const gotoPurchase = (id) => { setSelPurchase(id); setTab('purchases') }
 
+  // The way in for a bill that never was a photograph. It creates the document
+  // and selects it, which drops straight into the same review form an upload
+  // lands on — with every field blank rather than extracted.
+  const onNewEntry = async () => {
+    setTab('documents')
+    try {
+      const res = await api.createManualDocument()
+      await refresh()
+      setSel(res.document.id)
+      toast('✓ Blank invoice — key it in and Confirm', 'ok')
+    } catch (err) {
+      // A backend started before this endpoint existed 404s here while serving
+      // the new screen off disk. That is a restart, not a fault, and saying so
+      // is the difference between a two-minute fix and a bug report.
+      toast(err.status === 404
+        ? 'Manual entry needs the server restarted — it was started before this existed'
+        : 'Could not start a manual entry: ' + (err.detail || err.message), 'err')
+    }
+  }
+
   const onUpload = async (e) => {
     // Several pages of ONE invoice, in the order they were picked. A bill of
     // sixty lines prints as two pages and only the last carries the totals, so
@@ -11201,6 +11244,14 @@ export default function App() {
         )}
         <span className={'pill ' + (providers.tesseract ? 'on' : 'off')}>OCR {providers.tesseract ? 'on' : 'off'}</span>
         <NotificationBell onOpen={() => setNotifsOpen(true)} tick={notifTick} />
+        {/* Beside the upload, not instead of it, and quieter than it: reading a
+            photograph is still the way this screen is meant to be used, and
+            typing a bill out is the fallback for the one that has no usable
+            picture. Same label and glyph as LR Entry's, because it is the same
+            gesture — start a record by hand. */}
+        <button className="btn" onClick={onNewEntry}
+          title="Key an invoice in by hand — for one with no scan, or dictated over the phone">
+          📄 New entry</button>
         <label className="btn primary uploadbtn"
           title="One invoice. Pick both pages together if it is printed on more than one.">
           Upload invoice<input type="file" accept="image/*,.pdf" multiple onChange={onUpload} /></label>
@@ -11261,7 +11312,9 @@ export default function App() {
               ]} /></div>
             </>}
             <div className="list">
-              {docs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>No documents. Click “Upload invoice” to add one.</div>}
+              {docs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
+                No documents. Click “Upload invoice” to read one from a scan,
+                or “New entry” to key one in by hand.</div>}
               {docs.length > 0 && shownDocs.length === 0 && <div className="empty" style={{ marginTop: 30, fontSize: 13 }}>
                 Nothing matches. Try “All” or clear the search.</div>}
               {docPage.slice.map((d) => (
@@ -11273,7 +11326,11 @@ export default function App() {
                   <div className="m">
                     <span className={'badge ' + d.status}>{d.status.replace('_', ' ')}</span>
                     <span>#{d.invoice_number || '—'}</span>
-                    <span style={{ marginLeft: 'auto' }} className={'conf ' + confClass(d.confidence)}>{d.confidence != null ? Math.round(d.confidence * 100) + '%' : ''}</span>
+                    {/* a hand-keyed row says so instead of wearing a red 0% —
+                        see the same swap on the review panel's header */}
+                    {d.has_image === false
+                      ? <span style={{ marginLeft: 'auto' }} title="Keyed in by hand — there is no scan behind this one">✍ typed</span>
+                      : <span style={{ marginLeft: 'auto' }} className={'conf ' + confClass(d.confidence)}>{d.confidence != null ? Math.round(d.confidence * 100) + '%' : ''}</span>}
                   </div>
                   <div className="m"><span>₹ {money(d.grand_total)}</span></div>
                 </div>

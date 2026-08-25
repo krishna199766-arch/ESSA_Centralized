@@ -141,6 +141,13 @@ export const api = {
     for (const f of (files.length === undefined ? [files] : files)) fd.append('file', f)
     return fetch('/api/documents/upload', { method: 'POST', body: fd }).then(J)
   },
+  // An invoice with no photograph — one dictated over the phone, or whose scan
+  // is unusable. Comes back in the same shape as `upload`, holding a blank
+  // canonical invoice, so the review form opens on it exactly as it would on an
+  // extracted one. Everything after this point (confirm, GRN) is unchanged.
+  createManualDocument: (filename) => fetch('/api/documents/manual', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: filename || null }) }).then(J),
   confirm: (id, data, train) =>
     fetch(`/api/documents/${id}/confirm`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

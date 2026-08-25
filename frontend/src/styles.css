@@ -592,6 +592,17 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .viewerscroll { flex: 1; min-width: 0; overflow: auto; display: flex;
   align-items: flex-start; justify-content: center; padding: var(--sp-4); }
 .viewer img { max-width: 100%; border-radius: var(--radius-sm); box-shadow: var(--shadow-2); }
+/* What stands where the photograph would be on an invoice keyed in by hand.
+   Deliberately not a warning: nothing has gone wrong, this is simply a bill
+   that never had a picture, and an amber panel here would send someone looking
+   for a missing file. Quiet, centred, and it says what to do next. */
+.noimage { margin: auto; max-width: 300px; text-align: center; display: flex;
+  flex-direction: column; align-items: center; gap: var(--sp-2);
+  color: var(--muted); font-size: var(--fs-sm); line-height: var(--lh);
+  background: var(--panel); border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg); padding: var(--sp-5) var(--sp-4); }
+.noimage b { color: var(--text-2); font-size: var(--fs-base); }
+.noimage-ico { font-size: 30px; line-height: 1; opacity: .55; }
 @media (prefers-reduced-motion: reduce) { .viewer { transition: none; } }
 .editor { flex: 1; overflow-y: auto; padding: var(--gutter); background: var(--bg); }
 

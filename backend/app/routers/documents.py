@@ -12,6 +12,7 @@ from ..database import get_db
 from .. import models
 from ..config import UPLOAD_DIR, COMPANY_GSTIN
 from ..extraction import engine
+from ..extraction.base import empty_invoice
 from ..services import storage
 from ..schemas import ConfirmRequest
 
@@ -51,6 +52,12 @@ def _doc_out(doc: models.Document):
         # that used to live at that id. The hash changes when the bytes do, which
         # is the only thing that makes the URL mean one specific image.
         "content_hash": doc.content_hash,
+        # Whether there is a photograph behind this row at all. A manually keyed
+        # invoice has none, and the reviewer must not point an <img> at a route
+        # that is going to 404 — a broken-image icon where the bill should be
+        # reads as "the scan failed to load", which is a different and much more
+        # alarming thing than "this one was typed in".
+        "has_image": bool(doc.stored_path),
     }
 
 
@@ -225,6 +232,66 @@ async def upload_and_extract(file: List[UploadFile] = File(...),
     db.refresh(doc)
 
     return _extract_into(doc, db)
+
+
+class ManualIn(BaseModel):
+    filename: Optional[str] = None
+
+
+@router.post("/manual")
+def create_manual(body: Optional[ManualIn] = None, db: Session = Depends(get_db)):
+    """Start an invoice that has no photograph — one keyed in by hand.
+
+    Everything else on this screen arrives as an image and is read into the
+    canonical dict by a provider. A bill dictated over the phone, one that came
+    as a plain-text email, or one whose scan is unusable had nowhere to go: the
+    only way to reach the review form was to upload a file, so the workaround
+    was to photograph a printout of something already typed.
+
+    The row is a document like any other — same list, same review form, same
+    Confirm and Create GRN — with three differences: no stored file, an
+    extraction whose provider is `human`, and a confidence of 0.
+
+    That last one is deliberate. Confidence means "how sure is the READING",
+    and nothing was read here. Writing 1.0 would badge an unchecked bill 100%
+    and, worse, this app routes on that number: `_extract_into` confirms a
+    document outright at >= 0.95, and the review queue is everything below it.
+    A hand-keyed invoice must land in the queue and be confirmed by the person
+    typing it, which is exactly what 0 with status `needs_review` does.
+    """
+    doc = models.Document(
+        filename=(body.filename.strip() if body and body.filename and body.filename.strip()
+                  else "Manual entry"),
+        # stored_path is NOT NULL and there is no file. The empty string is the
+        # "no image" marker — storage.read("") already answers None, so the
+        # image route 404s on its own and _doc_out reports has_image: false.
+        stored_path="", pages=[], content_hash=None, mime=None,
+        status="needs_review",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    ex = models.Extraction(
+        document_id=doc.id, provider="human", data=empty_invoice(),
+        confidence=0.0, warnings=[], field_flags={}, raw_text="",
+    )
+    db.add(ex)
+    db.commit()
+    db.refresh(ex)
+
+    # Shaped like _extract_into's return so the frontend opens it through the
+    # same path an upload takes, rather than growing a second way in.
+    return {
+        "document": _doc_out(doc),
+        "extraction": {
+            "id": ex.id, "provider": ex.provider, "confidence": ex.confidence,
+            "warnings": ex.warnings, "field_flags": ex.field_flags, "data": ex.data,
+        },
+        "supplier_recognised": False,
+        "profile_used": False,
+        "lr_filled": [],
+    }
 
 
 def _detach_document(db: Session, doc: models.Document, move_to=None) -> None:
