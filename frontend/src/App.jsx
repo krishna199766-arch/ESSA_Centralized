@@ -3263,8 +3263,17 @@ function Inventory({ toast }) {
     window.open(api.labelsUrl(null, labelScope), '_blank')
   }
   return (
-    <div className="body">
-      <div style={{ flex: 1, overflowY: 'auto', padding: 22 }}>
+    <div className="screen">
+      {/* the last full-width module without a title band: it opened straight
+          onto its stat tiles, so moving here from the dashboard dropped the
+          white header bar and the gold rule the other screens all keep */}
+      <div className="pagehead">
+        <h2>Inventory</h2>
+        <div className="pagesub small">
+          Stock on hand, labels and per-piece codes
+        </div>
+      </div>
+      <div className="screenbody">
         <div style={{ display: 'flex', gap: 14, marginBottom: 20 }}>
           <Stat label="Products" value={summary?.product_count ?? '—'} />
           <Stat label="Units in stock" value={summary ? summary.total_units.toLocaleString('en-IN') : '—'} />
@@ -5093,7 +5102,7 @@ function Reports() {
         )}
         {rep ? (
           <>
-            <div style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', borderBottom: '1px solid var(--line)', flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '14px var(--gutter)', borderBottom: '1px solid var(--line)', flexWrap: 'wrap', gap: 8 }}>
               <h2 style={{ margin: 0 }}>{entry?.name}</h2>
               <div style={{ marginLeft: 16, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
                 {Object.entries(rep.totals).map(([k, v]) => (
@@ -5127,7 +5136,7 @@ function Reports() {
               )}
             </div>
             {dateParams.length > 0 && (
-              <div style={{ padding: '0 22px' }}>
+              <div style={{ padding: '0 var(--gutter)' }}>
                 <FilterPanel open={filtersOpen} active={Object.keys(active()).length}
                   onClear={() => { setFilters({}); load(key, {}) }}
                   hint={`This report accepts: ${dateParams.map((p) => PARAM_LABEL[p]).join(', ')}`}>
@@ -5138,7 +5147,7 @@ function Reports() {
                 </FilterPanel>
               </div>
             )}
-            <div style={{ flex: 1, overflow: 'auto', padding: '0 22px 22px' }}>
+            <div style={{ flex: 1, overflow: 'auto', padding: '0 var(--gutter) var(--gutter)' }}>
               {rep.note && (
                 <div className="small" style={{ padding: '10px 0 2px', color: 'var(--muted)' }}>
                   ⓘ {rep.note}
@@ -5481,7 +5490,7 @@ function LREntryForm({ editing, opts, lists, onDone, onCancel, toast, reloadOpts
     <div className="section">
       <h4>{editing ? `Edit entry ${editing.lr_entry_no || '#' + editing.id}` : 'New transport entry'}
         <button className="h4btn" onClick={onCancel}>✕ close</button></h4>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '0 28px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(340px, 100%), 1fr))', gap: '0 28px' }}>
         {[LR_FORM_LEFT, LR_FORM_RIGHT].map((col, ci) => (
           <div key={ci} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 12px', alignContent: 'start' }}>
             {col.map((spec) => <LRField key={spec[0]} spec={spec} form={form} set={set} opts={opts} lists={lists} />)}
@@ -5772,7 +5781,7 @@ function LREntryView({ toast }) {
   const nDoubtful = rows.filter(isDoubtful).length
   const qtySum = toSave.reduce((s, x) => s + (+x.qty || 0), 0)
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div className="screen">
       {/* the subtitle yields before any control does — a clipped button is a
           control someone cannot reach, a clipped sentence is only a shorter one */}
       <div className="pagehead">
@@ -5784,7 +5793,7 @@ function LREntryView({ toast }) {
         <label className="btn primary uploadbtn">{busy ? 'Reading…' : 'Import LR image / PDF'}
           <input type="file" accept="image/*,.pdf" onChange={onFile} disabled={busy} /></label>
       </div>
-      <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
+      <div className="screenbody">
         {form !== null && (
           <LREntryForm editing={form.id ? form : null} opts={opts} lists={lists}
             onDone={afterSave} onCancel={() => setForm(null)} toast={toast} reloadOpts={loadOpts} />
@@ -6560,10 +6569,10 @@ function MasterScreen({ mkey, onBack, toast }) {
   }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
-      <div className="pagehead" style={{ padding: 0, border: 'none', marginBottom: 14 }}>
+    <div className="screen">
+      <div className="pagehead">
         <button className="btn" onClick={onBack}>‹ Masters</button>
-        <h2 style={{ margin: '0 0 0 10px' }}>{def.label}</h2>
+        <h2>{def.label}</h2>
         <span className="small pagesub">{def.sub}</span>
         <div style={{ flex: 1 }} />
         {!def.singleton && form === null && (
@@ -6580,6 +6589,7 @@ function MasterScreen({ mkey, onBack, toast }) {
         )}
       </div>
 
+      <div className="screenbody">
       {form !== null ? (
         <>
           {/* Inputs in a responsive grid — three or four columns on a wide screen
@@ -6650,6 +6660,7 @@ function MasterScreen({ mkey, onBack, toast }) {
           <Pager {...recPage} noun="record" style={{ maxWidth: 720 }} />
         </>
       )}
+      </div>
     </div>
   )
 }
@@ -6677,13 +6688,18 @@ const BUILTIN_MASTERS = [
 //: comes back to the hub the same way
 function MasterPane({ title, sub, onBack, children }) {
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
-      <div className="pagehead" style={{ padding: 0, border: 'none', marginBottom: 14 }}>
+    <div className="screen">
+      {/* The band, not a heading floating inside the scroll area. A master used
+          to draw its title with the page header's padding and border stripped
+          off, so opening one from the hub swapped a full-width white bar for
+          bare text — the same screen furniture appearing and disappearing as
+          you moved between modules. */}
+      <div className="pagehead">
         <button className="btn" onClick={onBack}>‹ Masters</button>
-        <h2 style={{ margin: '0 0 0 10px' }}>{title}</h2>
+        <h2>{title}</h2>
         {sub && <span className="small pagesub">{sub}</span>}
       </div>
-      {children}
+      <div className="screenbody">{children}</div>
     </div>
   )
 }
@@ -6757,7 +6773,7 @@ function Masters({ toast }) {
             <SearchBox value={q} onChange={setQ} placeholder="Search category…" style={{ width: 240 }} />
             <span className="small" style={{ color: 'var(--muted)' }}>{shown.length} shown</span>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 8 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(230px, 100%), 1fr))', gap: 8 }}>
             {catPage.slice.map((c) => (
               <div key={c.id} style={{ background: 'var(--panel)', border: '1px solid var(--line)', borderRadius: 8, padding: '9px 12px' }}>
                 <span className="mono" style={{ color: 'var(--muted)', fontSize: 11 }}>{c.section}</span>
@@ -6798,13 +6814,18 @@ function Masters({ toast }) {
     : k === 'agents' ? agents.length
     : k === 'transports' ? transports.length
     : (opts[k] || []).length
-  const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))', gap: 10 }
+  const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(258px, 100%), 1fr))', gap: 10 }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 22 }}>
-      <h2 style={{ marginTop: 0 }}>Masters</h2>
-
-      <h5 className="masterhead">ERP masters</h5>
+    <div className="screen">
+      <div className="pagehead">
+        <h2>Masters</h2>
+        <div className="pagesub small">
+          The reference data the warehouse runs on, and the lists this app fills for itself
+        </div>
+      </div>
+      <div className="screenbody">
+      <h5 className="masterhead" style={{ marginTop: 0 }}>ERP masters</h5>
       <div style={grid}>
         {erp.map((m, i) => (
           <MasterCard key={m.key} n={m.count || i + 1} icon={m.icon} label={m.label} sub={m.sub}
@@ -6825,7 +6846,7 @@ function Masters({ toast }) {
             onClick={() => setOpen({ kind: 'builtin', key })} />
         ))}
       </div>
-      <div style={{ height: 30 }} />
+      </div>
     </div>
   )
 }
@@ -7389,10 +7410,10 @@ function LabelDesigner({ toast, role }) {
   // these routes existed, which is a restart rather than a fault — and the
   // person looking at the blank screen is the person who can do it.
   if (err) return (
-    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+    <div className="screen scrolls">
       <div className="pagehead"><h2>Label Designer</h2></div>
-      <div style={{ padding: 22, maxWidth: 620 }}>
-        <div className="warnbox">
+      <div className="screenbody">
+        <div className="warnbox" style={{ maxWidth: 620 }}>
           <h4>{err === 'restart' ? 'The server needs restarting' : 'Label Designer could not start'}</h4>
           <div className="small" style={{ color: 'var(--text-2)', lineHeight: 1.5 }}>
             {err === 'restart' ? <>
@@ -7413,7 +7434,7 @@ function LabelDesigner({ toast, role }) {
 
   // ---- the template list ----
   if (!draft) return (
-    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+    <div className="screen scrolls">
       <div className="pagehead">
         <h2>Label Designer</h2>
         {/* the subtitle used to be what pushed the actions to the right edge —
@@ -7421,7 +7442,7 @@ function LabelDesigner({ toast, role }) {
         <div style={{ flex: 1 }} />
         <button className="btn primary" onClick={newTemplate}>+ New template</button>
       </div>
-      <div style={{ padding: 22 }}>
+      <div className="screenbody">
         {templates.length === 0 && <div className="empty" style={{ marginTop: 60 }}>
           No templates yet.</div>}
         <div className="tplgrid">
@@ -7891,7 +7912,7 @@ function LabelPrinting({ toast }) {
   }
 
   return (
-    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+    <div className="screen scrolls">
       <div className="pagehead">
         <h2>QR / Label Printing</h2>
       </div>
@@ -8401,7 +8422,7 @@ function DeadStock({ toast, go, intent, onIntentUsed }) {
   const cash = sum?.cash_impact
 
   return (
-    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+    <div className="screen scrolls">
       <div className="pagehead">
         <h2>Dead Stock &amp; Clearance</h2>
         <div className="pagesub small">
@@ -8412,7 +8433,7 @@ function DeadStock({ toast, go, intent, onIntentUsed }) {
           title="Re-read the stock, the till and the ledger">{busy ? 'Reading…' : '↻ Refresh'}</button>
       </div>
 
-      <div style={{ padding: '14px 22px 0' }}>
+      <div style={{ padding: '14px var(--gutter) 0' }}>
         <div className="segbar" role="tablist" aria-label="Dead stock screens">
           {DS_TABS.map(([key, label, hint]) => (
             <button key={key} role="tab" aria-selected={tab === key} title={hint}
@@ -8421,7 +8442,7 @@ function DeadStock({ toast, go, intent, onIntentUsed }) {
         </div>
       </div>
 
-      <div className="dash" style={{ padding: 22 }}>
+      <div className="dash">
         {err && <div className="warnbox" style={{ marginBottom: 14 }}>
           <h4>Dead stock could not be read</h4>
           <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div>
@@ -9347,9 +9368,13 @@ function ItemLocator({ toast }) {
   const day = (v) => fmtDate(v)
 
   return (
-    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+    <div className="screen scrolls">
       <div className="pagehead"><h2>Item Locator</h2></div>
 
+      {/* this screen had no gutter at all: the header band was padded and every
+          panel under it ran flush to the window edge, so the title started 22px
+          in and the scan box started at 0 */}
+      <div className="screenbody">
       <div className="section" style={{ maxWidth: 760 }}>
         <div className="field">
           <label>Scan a tag, or type a code</label>
@@ -9563,6 +9588,7 @@ function ItemLocator({ toast }) {
                    ['balance_after', 'Balance', true], ['note', 'Note']]} />
         </>
       )}
+      </div>
     </div>
   )
 }
@@ -9852,10 +9878,22 @@ function Users({ toast, me }) {
   const when = (iso) => fmtDate(iso)
 
   return (
-    <div className="body" style={{ display: 'block', overflow: 'auto', padding: 18 }}>
-      <div style={{ maxWidth: 1080, background: 'var(--panel)', border: '1px solid var(--line)',
-        borderRadius: 12, padding: 20 }}>
-        <h2 style={{ margin: '0 0 10px', fontSize: 18 }}>👤 Users &amp; Access</h2>
+    <div className="screen scrolls">
+      {/* this screen used to open with its own heading inside its own card, at
+          its own 18px indent — so it was the one module whose title did not
+          start where every other module's title starts. It wears the same band
+          as the rest now, and the card below it holds the page's gutter. */}
+      <div className="pagehead">
+        <h2>👤 Users &amp; Access</h2>
+        <div className="pagesub small">
+          Who can sign in, and what each account is allowed to open
+        </div>
+      </div>
+      <div className="screenbody">
+      {/* the app's own panel, not a hand-rolled one — this card used to carry a
+          12px radius and 20px of padding against the 14/16 every other panel in
+          the app uses, so it read as a slightly different object */}
+      <div className="section" style={{ maxWidth: 1080 }}>
 
         <div className="small" style={{ color: 'var(--text-2)', marginBottom: 14, lineHeight: 1.7 }}>
           Everyone signs in with their own account, on the desktop app and on the phone —
@@ -9942,6 +9980,7 @@ function Users({ toast, me }) {
           <button className="btn primary" type="submit">Add user</button>
         </form>
         <div className="small" style={{ color: 'var(--text-2)', marginTop: 8 }}>{ROLE_HELP[form.role]}</div>
+      </div>
       </div>
 
       {access && (
@@ -10824,7 +10863,7 @@ function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStoc
   const recentGrns = d.grns.slice(0, 6)
 
   return (
-    <div className="body" style={{ overflow: 'auto', display: 'block' }}>
+    <div className="screen scrolls">
       <div className="pagehead">
         <h2>Dashboard</h2>
         <div className="pagesub small">

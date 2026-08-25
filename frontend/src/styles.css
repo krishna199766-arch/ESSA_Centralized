@@ -130,6 +130,19 @@
   /* --- spacing scale --- */
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 22px; --sp-6: 32px;
 
+  /* --- the page gutter ----------------------------------------------------
+     ONE number for the distance between the window edge and the content, and
+     every screen-level band spends it: the top bar, the nav row, the page
+     header, the screen body, the action bar. That is what makes the app look
+     aligned — the title, the tiles, the table and the Save button all start on
+     the same vertical line, on every screen, and end on the same one.
+
+     It is a token rather than a value typed per screen because the two ways an
+     app like this loses its alignment are a screen that pads itself 18 where
+     the rest pad 22, and a screen that pads only the left. Both were here.
+     Nothing below this line writes a horizontal page padding of its own. */
+  --gutter: var(--sp-5);
+
   --radius: 10px; --radius-sm: 7px; --radius-lg: 14px;
   --shadow-1: 0 1px 2px rgba(42,35,32,.06), 0 1px 3px rgba(42,35,32,.05);
   --shadow-2: 0 4px 14px rgba(42,35,32,.10);
@@ -156,11 +169,44 @@ a { color: var(--brand); text-underline-offset: 2px; }
   outline: 2px solid var(--brand); outline-offset: 1px; border-radius: 4px; }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
+/* On a narrow window the gutter is the first thing that should give: 22px of
+   air either side of a 360px phone screen is 12% of the window spent on
+   nothing. It shrinks, but it stays ONE number, so the screens stay aligned
+   with each other at every width. */
+@media (max-width: 720px) { :root { --gutter: var(--sp-3); } }
+
+/* ---------- the screen frame ----------
+   Every module below the chrome is the same two parts: an optional full-bleed
+   header band, and the body under it. Both are declared here rather than in
+   each screen, because a screen that builds its own frame is a screen that
+   drifts from the other eleven — which is exactly how this app ended up with
+   four different page paddings and one module indented 4px from the rest.
+
+   `.screen` is the column: it owns the scrolling, so the header band can stay
+   put while the body moves under it. `.screenbody` is the padded content. */
+.screen { flex: 1; min-width: 0; min-height: 0; display: flex;
+  flex-direction: column; overflow: hidden; }
+/* The part that scrolls, and the only part that carries the gutter.
+   min-width:0 for the same reason `.body > *` needs it — a flex child will not
+   shrink below its content, so one wide register in here would push the screen
+   wider than the window and leave the chrome above it ending mid-page. */
+.screenbody { flex: 1; min-width: 0; min-height: 0; overflow: auto;
+  padding: var(--gutter); }
+/* a screen whose body is one flush surface — a full-width table or a split
+   pane that runs to the window edge on purpose */
+.screenbody.flush { padding: 0; }
+/* the body's own bottom edge, when an action bar is going to sit under it */
+.screenbody.tight { padding-bottom: 0; }
+/* A screen that scrolls as ONE page — header band included — rather than
+   pinning the band and scrolling the body under it. Used where the header is
+   short and the content is long, so the band is not worth the vertical space. */
+.screen.scrolls { overflow: auto; display: block; }
+.screen.scrolls > .screenbody { overflow: visible; }
 
 /* ---------- top bar ---------- */
 .topbar {
   display: flex; align-items: center; gap: var(--sp-3); flex: 0 0 auto;
-  padding: var(--sp-3) var(--sp-5);
+  padding: var(--sp-3) var(--gutter);
   background-color: var(--chrome); background-image: var(--chrome-top);
   border-bottom: 1px solid var(--chrome-line); z-index: 11;
 }
@@ -196,7 +242,7 @@ a { color: var(--brand); text-underline-offset: 2px; }
 /* navigation gets its own full-width row: it is the thing people use most, and
    it never shares a line with the account controls */
 .navbar { display: flex; align-items: center; flex: 0 0 auto;
-  padding: var(--sp-1) var(--sp-5);
+  padding: var(--sp-1) var(--gutter);
   background-color: var(--chrome); background-image: var(--chrome-nav);
   box-shadow: var(--shadow-1); position: relative; z-index: 10; }
 /* A gold hairline where the dark chrome meets the light page. It is the one
@@ -288,9 +334,15 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .posframe { flex: 1; min-height: 0; display: flex; background: var(--panel); }
 .posframe iframe { flex: 1; border: none; width: 100%; height: 100%; }
 
-/* ---------- dashboard ---------- */
-.dash { padding: var(--sp-5); max-width: 1400px; }
-.dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
+/* ---------- dashboard ----------
+   No max-width. It used to stop at 1400px while the page header above it ran
+   the full width of the window, so on any screen wider than that the white
+   header band and the gold rule under it carried on past where the tiles
+   stopped, and the dashboard read as a panel sitting slightly left of its own
+   heading. The tile grid already reflows on its own — capping it did not make
+   the rows any easier to read, it only put dead background on the right. */
+.dash { padding: var(--gutter); }
+.dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(205px, 100%), 1fr));
   gap: var(--sp-3); }
 /* The left bar is what turns twelve boxes into one row that reads: gold for a
    figure at rest, amber the moment it needs someone. --gold-line, not --gold —
@@ -325,7 +377,7 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .dtile.warn:hover { border-color: var(--warn); border-left-color: var(--warn);
   background: #FBEBD2; }
 
-.modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+.modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
   gap: var(--sp-3); }
 /* the label sits against the middle of its disc, not against the disc's top:
    the card is one line of text and a 34px mark, and `start` hung the two off
@@ -367,8 +419,15 @@ a { color: var(--brand); text-underline-offset: 2px; }
 /* 520px min so a 1440px window gets two charts per row, not three. At three the
    cards were 407px wide and a twelve-month axis had no room to breathe — the
    marks were legible but the labels were not. */
-.vizgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
-  gap: var(--sp-4); }
+/* min(520px, 100%) rather than a bare 520px: a bare minimum is a FLOOR the
+   track cannot go under, so in any pane narrower than 520px the column stayed
+   520 and the grid pushed the page sideways — the chrome then ended mid-screen
+   against bare background, which is the same fault the .tablewrap note below
+   describes. The min() lets the track collapse to the container on a narrow
+   window while still refusing to make a chart smaller than 520 when there IS
+   room, which is the whole point of the number. */
+.vizgrid { display: grid; gap: var(--sp-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr)); }
 .vizcard { background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius-lg); padding: var(--sp-4); box-shadow: var(--shadow-1);
   min-width: 0; }
@@ -411,7 +470,7 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .viztip .tipkey { width: 8px; height: 8px; border-radius: 2px; display: inline-block;
   margin-right: 5px; }
 
-.drecent { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+.drecent { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: var(--sp-5); }
 .drecent h5 { margin: 0 0 var(--sp-2); font-size: var(--fs-xs); text-transform: uppercase;
   letter-spacing: .5px; color: var(--muted); font-weight: 700; }
@@ -534,7 +593,7 @@ a { color: var(--brand); text-underline-offset: 2px; }
   align-items: flex-start; justify-content: center; padding: var(--sp-4); }
 .viewer img { max-width: 100%; border-radius: var(--radius-sm); box-shadow: var(--shadow-2); }
 @media (prefers-reduced-motion: reduce) { .viewer { transition: none; } }
-.editor { flex: 1; overflow-y: auto; padding: var(--sp-5); background: var(--bg); }
+.editor { flex: 1; overflow-y: auto; padding: var(--gutter); background: var(--bg); }
 
 /* ---------- panels ---------- */
 .section { margin-bottom: var(--sp-5); background: var(--panel);
@@ -614,7 +673,7 @@ a { color: var(--brand); text-underline-offset: 2px; }
    long way between a label and the next one. These wrap instead: as many
    columns as fit at a sane field width, which is what makes a dense ERP form
    scannable and what keeps every section on the same alignment. */
-.mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+.mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
   gap: var(--sp-3) var(--sp-4); align-items: start; }
 .mgrid .field textarea { width: 100%; background: var(--panel);
   border: 1px solid var(--line-strong); color: var(--text); padding: 8px 10px;
@@ -982,7 +1041,7 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .warnbox li { margin: 3px 0; color: var(--text-2); }
 
 /* ---------- buttons / action bar ---------- */
-.actionbar { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--sp-5);
+.actionbar { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-3) var(--gutter);
   border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap;
   box-shadow: 0 -1px 2px rgba(42,35,32,.04); }
 .btn { background: var(--panel); border: 1px solid var(--line-strong); color: var(--text);
@@ -1038,7 +1097,7 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
    stacked when there is not. Somebody holding a garment asks what it is, where it
    came from, what it cost and how much is left in one breath. */
 .locgrid { display: grid; gap: var(--sp-4); align-items: start;
-  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); }
 .locgrid .section { margin-bottom: 0; }
 .locgrid .kv { grid-template-columns: 150px 1fr; gap: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm); }
@@ -1066,7 +1125,7 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .locprint-acts a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 
 /* ---------- suppliers ---------- */
-.sup-detail { padding: var(--sp-5); overflow-y: auto; flex: 1; }
+.sup-detail { padding: var(--gutter); overflow-y: auto; flex: 1; }
 .kv { display: grid; grid-template-columns: 170px 1fr; gap: var(--sp-2) var(--sp-4);
   font-size: var(--fs-base); align-items: baseline; }
 .kv .k { color: var(--muted); font-weight: 600; }
@@ -1102,7 +1161,7 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
 .piece-head { display: flex; align-items: baseline; gap: var(--sp-3); padding: var(--sp-4) var(--sp-5);
   border-bottom: 1px solid var(--line); }
 .piece-body { overflow: auto; padding: var(--sp-4) var(--sp-5); }
-.piece-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: var(--sp-3); }
+.piece-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(168px, 100%), 1fr)); gap: var(--sp-3); }
 .piece { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--sp-3);
   text-align: center; background: var(--panel-2); }
 .piece img { width: 96px; height: 96px; background: #fff; border-radius: 4px; padding: 3px; }
@@ -1324,7 +1383,7 @@ tr.overrole td { opacity: .5; }
    the 33 reports holds your answer. It sits above them rather than among them:
    it is a different way in, not another filter. */
 .askbar { display: flex; align-items: center; gap: var(--sp-2); position: relative;
-  padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
+  padding: var(--sp-3) var(--gutter); border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, var(--brand-50), var(--panel)); }
 .askbar .ico { font-size: var(--fs-lg); line-height: 1; }
 .askfield { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
@@ -1379,7 +1438,7 @@ tr.overrole td { opacity: .5; }
 
 /* The reading. Amber when the router missed, because a miss the person doesn't
    notice is the one failure mode of this whole feature. */
-.askread { padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
+.askread { padding: var(--sp-3) var(--gutter); border-bottom: 1px solid var(--line);
   background: var(--info-bg); }
 .askread.miss { background: var(--warn-bg); }
 .askread-top { display: flex; align-items: flex-start; gap: var(--sp-2);
@@ -1397,7 +1456,7 @@ tr.overrole td { opacity: .5; }
 .asknote.warn { color: var(--warn); font-weight: 500; }
 
 .askegs { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap;
-  padding: var(--sp-2) var(--sp-5); border-bottom: 1px solid var(--line); }
+  padding: var(--sp-2) var(--gutter); border-bottom: 1px solid var(--line); }
 .askeg { font-size: var(--fs-xs); background: var(--panel-2); color: var(--text-2);
   border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px 10px;
   white-space: nowrap; }
@@ -1408,8 +1467,8 @@ tr.overrole td { opacity: .5; }
    explanation is the only part allowed to shrink: an action people cannot reach
    is a broken screen, a truncated sentence is merely a shorter one. */
 .pagehead { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
-  padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
-  background: var(--panel); }
+  padding: var(--sp-3) var(--gutter); border-bottom: 1px solid var(--line);
+  background: var(--panel); flex: 0 0 auto; }
 .pagehead h2 { margin: 0; font-size: var(--fs-xl); color: var(--brand);
   letter-spacing: -.3px; flex: 0 0 auto; display: flex; align-items: center;
   gap: var(--sp-3); }
@@ -1511,7 +1570,7 @@ tr.overrole td { opacity: .5; }
 
 /* ---------- template gallery ---------- */
 .tplgrid { display: grid; gap: var(--sp-4);
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+  grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr)); }
 .tplcard { display: flex; gap: var(--sp-3); background: var(--panel);
   border: 1px solid var(--line); border-radius: var(--radius-lg);
   padding: var(--sp-3); box-shadow: var(--shadow-1); }
@@ -1528,7 +1587,7 @@ tr.overrole td { opacity: .5; }
    like. The proof is sticky because the selection is scrolled through and the
    question it answers ("is this the right label?") does not go away. */
 .lprintwrap { display: grid; grid-template-columns: minmax(0, 1fr) 330px;
-  gap: var(--sp-5); padding: var(--sp-5); align-items: start; }
+  gap: var(--sp-5); padding: var(--gutter); align-items: start; }
 @media (max-width: 1180px) { .lprintwrap { grid-template-columns: minmax(0, 1fr); } }
 .lprintside { position: sticky; top: var(--sp-5); }
 /* The proof scales to this box (see proofPx), so it never needs to scroll — and

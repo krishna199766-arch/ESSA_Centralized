@@ -113,6 +113,12 @@ PRINT_RE = re.compile(r"(/print|/label|/qr\.(svg|png)|/barcode|\.csv$|[?&]format
 PUBLIC = [
     re.compile(r"^/api/auth/"),
     re.compile(r"^/api/status$"),
+    # Applying the schema to a deployment that skips it at start — see
+    # main.admin_boot. Public HERE and authorised THERE, by ESSA_AUTH_SECRET in
+    # a header, because the state it exists to repair includes a users table
+    # with nothing in it: there is no super admin to sign in as yet, so a token
+    # check would lock the fix behind the thing it fixes.
+    re.compile(r"^/api/admin/boot$"),
     re.compile(r"^/docs"), re.compile(r"^/redoc"), re.compile(r"^/openapi.json$"),
 ]
 

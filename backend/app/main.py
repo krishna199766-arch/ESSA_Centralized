@@ -1,11 +1,13 @@
+import hmac
 import os
 import re
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from .database import Base, engine
 from . import models  # noqa: F401  (register tables)
@@ -84,12 +86,6 @@ def _record_startup_failure(exc: BaseException, during: str) -> None:
     global STARTUP_ERROR
     if STARTUP_ERROR is None:
         STARTUP_ERROR = f"{during}: {type(exc).__name__}: {_scrub(exc)}"
-
-
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception as exc:                       # noqa: BLE001 — reported, not raised
-    _record_startup_failure(exc, "creating the schema")
 
 
 def _add_missing_columns():
@@ -314,62 +310,123 @@ def _migrate():
 
 
 SCHEMA_ADDED = []
-try:
-    # Dialect-agnostic first: this is what keeps a column added to a model from
-    # working locally and 500-ing on the deployment.
-    SCHEMA_ADDED = _add_missing_columns()
-    _migrate()
-except Exception as exc:                       # noqa: BLE001 — reported, not raised
-    _record_startup_failure(exc, "migrating the schema")
 
-# ---- accounts ----
-# Held apart from the convenience seeds below. Those are conveniences: an
-# install that starts without its category list is merely inconvenient. An
-# install that starts with an empty users table cannot be signed into at all,
-# and presenting that as a login screen which rejects every correct password is
-# the worst outcome available.
-#
-# So it is still not swallowed — it is reported, and /api/status names it. The
-# reason it is no longer raised is the one at the top of this file: a raise here
-# is invisible on a serverless deployment, and "cannot sign in, no reason given"
-# is exactly what it produces.
-from .database import SessionLocal as _Session
-from .services import users as _users
-try:
-    _udb = _Session()
+# Whether the schema/seed pass below has run in THIS process, and what it cost.
+BOOT_RAN = False
+BOOT_SECONDS = None
+
+
+def _boot_database():
+    """Build the schema, add new columns, and seed the starting data.
+
+    This used to run flat at import, and on a serverless deployment that is what
+    made the whole app unreachable. It is ~1000 SQL statements — `create_all`
+    over 36 tables, a `get_columns()` reflection PER TABLE in
+    `_add_missing_columns`, then seven seed and backfill passes. On the warehouse
+    PC those are local SQLite reads and cost about five seconds. Across a network
+    to Postgres they are a thousand round trips, and with NullPool (see
+    database.py, and it is right to be NullPool) several of them open a fresh TLS
+    connection of their own.
+
+    The platform kills a function that has not answered within its init budget,
+    so the import never finished, every route returned an opaque
+    INTERNAL_FUNCTION_INVOCATION_FAILED, and — worst of it — /api/status could
+    not report the failure either, because the app object it hangs off did not
+    exist yet. A deployment that cannot say what is wrong with it.
+
+    So it is a function now, and WHEN it runs is decided below. Nothing about
+    what it does has changed; only that a cold start no longer pays for it.
+    """
+    global SCHEMA_ADDED, BOOT_RAN, BOOT_SECONDS
+    import time
+    started = time.time()
+    BOOT_RAN = True
+
     try:
-        _users.seed(_udb)
-    finally:
-        _udb.close()
-except Exception as exc:                       # noqa: BLE001 — reported, not raised
-    _record_startup_failure(exc, "seeding the accounts")
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:                   # noqa: BLE001 — reported, not raised
+        _record_startup_failure(exc, "creating the schema")
 
-# load the product-category master (from the GRN Excel) on first run, and heal
-# any LR row that was linked to an invoice before the cross-fill was symmetric
-# (linked, but Inv No / Inv Date left blank)
-try:
-    from .database import SessionLocal
-    from .services import masters as _masters
-    from .services import lr_link as _lr_link
-    from .services import unit_types as _unit_types
-    _db = SessionLocal()
-    _n = _masters.import_categories(_db)
-    _masters.seed_options(_db)
-    # dozens-to-pieces needs a unit master to convert against, and the warehouse
-    # should not have to build one before the first receipt
-    _unit_types.seed(_db)
-    # a warehouse with no label template cannot print a sticker, and designing
-    # one before the first receipt is a wall in front of the first garment
-    from .services import label_designer as _label_designer
-    _label_designer.ensure_default(_db)
-    _lr_link.backfill_linked_rows(_db)
-    # GRNs raised before numbering existed, and numbers that never reached
-    # the consignment row beside them — see inventory.backfill_grn_numbers.
-    from .services import inventory as _inv
-    _inv.backfill_grn_numbers(_db)
-    _db.close()
-except Exception:
-    pass
+    try:
+        # Dialect-agnostic first: this is what keeps a column added to a model from
+        # working locally and 500-ing on the deployment.
+        SCHEMA_ADDED = _add_missing_columns()
+        _migrate()
+    except Exception as exc:                   # noqa: BLE001 — reported, not raised
+        _record_startup_failure(exc, "migrating the schema")
+
+    # ---- accounts ----
+    # Held apart from the convenience seeds below. Those are conveniences: an
+    # install that starts without its category list is merely inconvenient. An
+    # install that starts with an empty users table cannot be signed into at all,
+    # and presenting that as a login screen which rejects every correct password is
+    # the worst outcome available.
+    #
+    # So it is still not swallowed — it is reported, and /api/status names it. The
+    # reason it is no longer raised is the one at the top of this file: a raise here
+    # is invisible on a serverless deployment, and "cannot sign in, no reason given"
+    # is exactly what it produces.
+    from .database import SessionLocal as _Session
+    from .services import users as _users
+    try:
+        _udb = _Session()
+        try:
+            _users.seed(_udb)
+        finally:
+            _udb.close()
+    except Exception as exc:                   # noqa: BLE001 — reported, not raised
+        _record_startup_failure(exc, "seeding the accounts")
+
+    # load the product-category master (from the GRN Excel) on first run, and heal
+    # any LR row that was linked to an invoice before the cross-fill was symmetric
+    # (linked, but Inv No / Inv Date left blank)
+    try:
+        from .database import SessionLocal
+        from .services import masters as _masters
+        from .services import lr_link as _lr_link
+        from .services import unit_types as _unit_types
+        _db = SessionLocal()
+        _n = _masters.import_categories(_db)
+        _masters.seed_options(_db)
+        # dozens-to-pieces needs a unit master to convert against, and the warehouse
+        # should not have to build one before the first receipt
+        _unit_types.seed(_db)
+        # a warehouse with no label template cannot print a sticker, and designing
+        # one before the first receipt is a wall in front of the first garment
+        from .services import label_designer as _label_designer
+        _label_designer.ensure_default(_db)
+        _lr_link.backfill_linked_rows(_db)
+        # GRNs raised before numbering existed, and numbers that never reached
+        # the consignment row beside them — see inventory.backfill_grn_numbers.
+        from .services import inventory as _inv
+        _inv.backfill_grn_numbers(_db)
+        _db.close()
+    except Exception:
+        pass
+
+    BOOT_SECONDS = round(time.time() - started, 2)
+    return BOOT_SECONDS
+
+
+def _boot_wanted() -> bool:
+    """Whether to run the schema/seed pass as part of starting up.
+
+    ESSA_BOOT_MIGRATE decides it outright, either way — "1" to force it on a
+    deployment for one release, "0" to hold it off on a laptop.
+
+    Left unset, the answer is the platform: a long-lived process (the warehouse
+    PC, a container, a dev laptop) starts once and can afford it, so it behaves
+    exactly as it always has. A serverless instance starts constantly and cannot,
+    so it skips — and the schema is applied deliberately instead, either by a
+    release with the variable set to "1", or through /api/admin/boot.
+    """
+    flag = (os.environ.get("ESSA_BOOT_MIGRATE") or "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    if flag in ("0", "false", "no", "off"):
+        return False
+    return not os.environ.get("VERCEL")
+
 
 app = FastAPI(title="Essa Document Intake", version="0.1.0",
               description="Trainable invoice-to-data extraction for Essa Garments")
@@ -385,6 +442,35 @@ app = FastAPI(title="Essa Document Intake", version="0.1.0",
 # preflight OPTIONS is answered by CORS before it ever reaches an auth check it
 # carries no token to pass.
 app.middleware("http")(auth_middleware)
+
+
+@app.exception_handler(OperationalError)
+@app.exception_handler(ProgrammingError)
+def _schema_missing(request, exc):
+    """A query against a table that is not there.
+
+    Since the schema pass stopped running on every cold start, there is one new
+    way to be wrong: deployed against a database it was never applied to. The
+    raw fault for that is `no such table: users` on the login query — a 500 with
+    a traceback, which reads as the app being broken rather than as a step not
+    yet taken.
+
+    Both are reported the same way for a different reason each: SQLite says
+    OperationalError, Postgres says ProgrammingError (UndefinedTable), and the
+    person reading it should not have to know which database they got.
+    """
+    from .database import DB_URL
+    msg = _scrub(exc)
+    missing = ("no such table" in msg.lower() or "does not exist" in msg.lower()
+               or "undefinedtable" in type(exc).__name__.lower())
+    from fastapi.responses import JSONResponse
+    if missing and not BOOT_RAN:
+        return JSONResponse(
+            {"detail": "The database has no schema yet. Apply it once with "
+                       "POST /api/admin/boot (header x-essa-boot-key: "
+                       "ESSA_AUTH_SECRET), or redeploy with ESSA_BOOT_MIGRATE=1.",
+             "database": _database_status(DB_URL)}, status_code=503)
+    return JSONResponse({"detail": f"Database error: {msg}"}, status_code=500)
 
 
 @app.exception_handler(storage_svc.StorageError)
@@ -427,27 +513,44 @@ app.include_router(users.router)
 # It is optional: a missing folder or an environment without Flask leaves the
 # POS screen saying what to install, which is more use than a 500 behind a
 # button someone just clicked.
+#
+# Built on the first request to /pos rather than at import, which is the second
+# half of the cold-start fix above. Loading the shop is not a cheap import: it
+# opens a second engine, runs CREATE SCHEMA, its own create_all, and then four
+# full syncs — the whole product catalogue, the categories, the branch list and
+# the transfer history — every one of them a table scan. See pos_mount.
+#
+# All of that was happening before the warehouse could answer /api/auth/login,
+# on a deployment where nobody had asked for the till at all. Deferred, the cost
+# lands on whoever opens the POS, once per instance, and the syncs still run so
+# the shop is as up to date as it ever was.
 _pos_error = None
-try:
-    from .pos_mount import load_pos_app
-    _pos_app = load_pos_app()
-except Exception as exc:                              # noqa: BLE001 — reported, not raised
-    _pos_app, _pos_error = None, f"{type(exc).__name__}: {exc}"
+_pos_app = None
+_pos_loaded = False
 
-if _pos_app is not None:
-    import warnings
-    with warnings.catch_warnings():                   # the module warns on import
-        warnings.simplefilter("ignore", DeprecationWarning)
-        from starlette.middleware.wsgi import WSGIMiddleware
-    app.mount("/pos", WSGIMiddleware(_pos_app))
-else:
-    from fastapi.responses import HTMLResponse
 
-    @app.get("/pos", response_class=HTMLResponse)
-    @app.get("/pos/{rest:path}", response_class=HTMLResponse)
-    def pos_unavailable(rest: str = ""):
-        return HTMLResponse(
-            "<body style=\"font:14px/1.6 system-ui;padding:32px;color:#33261F\">"
+def _pos_asgi():
+    """The mounted shop, built on demand and kept for the life of the instance."""
+    global _pos_app, _pos_error, _pos_loaded
+    if _pos_loaded:
+        return _pos_app
+    _pos_loaded = True
+    try:
+        from .pos_mount import load_pos_app
+        flask_app = load_pos_app()
+        import warnings
+        with warnings.catch_warnings():                # the module warns on import
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from starlette.middleware.wsgi import WSGIMiddleware
+        _pos_app = WSGIMiddleware(flask_app)
+    except Exception as exc:                           # noqa: BLE001 — reported, not raised
+        _pos_app, _pos_error = None, f"{type(exc).__name__}: {exc}"
+    return _pos_app
+
+
+def _pos_unavailable_html(rest: str = "") -> str:
+    """Why the POS button led nowhere, as a page rather than a 500."""
+    return ("<body style=\"font:14px/1.6 system-ui;padding:32px;color:#33261F\">"
             "<h2 style='margin:0 0 8px'>POS is not loaded</h2>"
             f"<p>{_pos_error}</p>"
             "<p>The shop lives in the <b>Textile Retail Shop</b> folder beside "
@@ -455,7 +558,27 @@ else:
             "environment:</p>"
             "<pre style='background:#F2EEEB;padding:12px;border-radius:6px'>"
             "cd backend\n.venv\\Scripts\\activate\npip install -r requirements.txt</pre>"
-            "<p>Then restart the server.</p></body>", status_code=503)
+            "<p>Then restart the server.</p></body>")
+
+
+class _PosMount:
+    """An ASGI app that is the shop once the shop has been loaded.
+
+    Starlette resolves a mount at request time, so standing this in front of the
+    real WSGI middleware is enough — there is no need to re-mount anything after
+    startup, and a shop that fails to load still answers with the page below
+    rather than a 500.
+    """
+
+    async def __call__(self, scope, receive, send):
+        pos = _pos_asgi()
+        if pos is not None:
+            return await pos(scope, receive, send)
+        from starlette.responses import HTMLResponse
+        await HTMLResponse(_pos_unavailable_html(""), status_code=503)(scope, receive, send)
+
+
+app.mount("/pos", _PosMount())
 
 
 @app.get("/api/status")
@@ -468,7 +591,18 @@ def status():
         "company": {"name": COMPANY_NAME, "gstin": COMPANY_GSTIN},
         "provider_preference": runtime.get("provider_preference"),
         "providers": provider_status(),
-        "pos": {"available": _pos_app is not None, "error": _pos_error},
+        # "not loaded yet" is not "broken": the shop is built on the first
+        # request to /pos now, so before that there is nothing to report either
+        # way, and saying `available: false` would read as a fault.
+        "pos": {"loaded": _pos_loaded,
+                "available": None if not _pos_loaded else _pos_app is not None,
+                "error": _pos_error},
+        # Whether the schema/seed pass ran in this instance, and what it cost.
+        # `ran: false` on a serverless deployment is the intended state — see
+        # _boot_wanted — and means the schema is managed deliberately rather
+        # than rebuilt on every cold start.
+        "boot": {"ran": BOOT_RAN, "seconds": BOOT_SECONDS,
+                 "wanted": _boot_wanted()},
         "database": _database_status(DB_URL),
         "storage": storage_svc.backend_name(),
         # Enough to tell which build is actually serving. Three fixes in a row
@@ -520,3 +654,40 @@ if os.path.isdir(FRONTEND_DIST):
         # rebuild silently does nothing until the browser decides to look again.
         return FileResponse(os.path.join(FRONTEND_DIST, "index.html"),
                             headers={"Cache-Control": "no-cache"})
+
+
+# ---- applying the schema on a deployment that skips it at start ----
+@app.post("/api/admin/boot")
+def admin_boot(request: Request):
+    """Run the schema/seed pass once, now.
+
+    A serverless deployment no longer does this while starting (see
+    _boot_wanted), so this is how a release that adds a table or a column gets
+    it applied without a cold start having to carry ~1000 statements it would
+    be killed for.
+
+    Authorised by ESSA_AUTH_SECRET rather than by a signed-in super admin, and
+    deliberately: the case this exists for includes a database with no accounts
+    in it yet, where there is nobody to sign in AS. It is in PUBLIC in
+    security.py for the same reason, and checks the header itself.
+
+    Safe to call twice. create_all skips tables that exist, _add_missing_columns
+    only ever ADDS, and every seed creates only what is missing.
+    """
+    from .config import AUTH_SECRET
+    supplied = (request.headers.get("x-essa-boot-key") or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, AUTH_SECRET):
+        raise HTTPException(401, "Provide the ESSA_AUTH_SECRET as x-essa-boot-key")
+    seconds = _boot_database()
+    return {"ok": STARTUP_ERROR is None, "seconds": seconds,
+            "columns_added": SCHEMA_ADDED, "error": STARTUP_ERROR}
+
+
+# ---- and the ordinary case: a process that starts once and stays up ----
+# Last in the file on purpose. By here the app object exists, every router is
+# registered and /api/status can answer — so if this pass is slow, or the
+# database is unreachable and it spends its connect timeouts finding out, the
+# deployment still comes up and still says what went wrong. That is the whole
+# difference from where this code used to sit.
+if _boot_wanted():
+    _boot_database()
