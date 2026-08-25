@@ -10081,6 +10081,234 @@ function ChangePassword({ onClose, toast }) {
 //  another way — the point of hiding it is that the floor is not shown twelve
 //  buttons that answer "not for you".
 // ==========================================================================
+//  Locations — warehouse → store → POS terminal
+//  ------------------------------------------------------------------------
+//  Where this company trades from. Until now "where" was a NAME: a dispatch
+//  names its destination as free text, and the list somebody was supposed to
+//  maintain was a fixed dropdown holding one value, "NONE", that the API
+//  refused additions to — so there was no way to add a branch at all.
+//
+//  Drawn as the tree it is rather than as three lists, because the question
+//  people actually have is "what does this warehouse supply" and three tabs
+//  make that an exercise in cross-referencing. A store carries its tills
+//  inline for the same reason.
+//
+//  Closing beats deleting throughout, and the server enforces it: a branch
+//  that has taken deliveries has last year's transfers filed against it BY
+//  NAME, so removing the row would orphan them silently.
+// ==========================================================================
+function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, children }) {
+  const dim = node.active === false
+  return (
+    <div className={'locnode loc-' + kind + (dim ? ' off' : '')}>
+      <div className="locbar">
+        <span className="locico" aria-hidden="true">
+          {kind === 'warehouse' ? '🏢' : kind === 'store' ? '🏬' : '🖥'}</span>
+        <span className="locname">{node.name}</span>
+        {node.code && <span className="loccode">{node.code}</span>}
+        {dim && <span className="badge review">closed</span>}
+        {node.address && <span className="small locaddr">{node.address}</span>}
+        <span className="spacer" />
+        {onAdd && <button className="btn" onClick={onAdd}>{
+          kind === 'warehouse' ? '+ Store' : '+ POS'}</button>}
+        {onEdit && <button className="iconbtn" title="Rename or edit" onClick={onEdit}>✎</button>}
+        {onToggle && <button className="iconbtn"
+          title={dim ? 'Reopen this' : 'Close it — its history stays readable'}
+          onClick={onToggle}>{dim ? '↺' : '⊘'}</button>}
+        {onDelete && <button className="iconbtn danger"
+          title="Delete — only possible while nothing is filed under it"
+          onClick={onDelete}>×</button>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function LocationEditor({ init, kind, stores, warehouses, onSave, onClose }) {
+  const [f, setF] = useState(() => ({
+    name: init?.name || '', code: init?.code || '', address: init?.address || '',
+    warehouse_id: init?.warehouse_id || warehouses?.[0]?.id || null,
+    store_id: init?.store_id || stores?.[0]?.id || null,
+  }))
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
+  const label = kind === 'warehouse' ? 'Warehouse' : kind === 'store' ? 'Store' : 'POS terminal'
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal" style={{ width: 'min(520px, 100%)' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head"><b>{init?.id ? `Edit ${label.toLowerCase()}` : `New ${label.toLowerCase()}`}</b>
+          <button className="modal-x" onClick={onClose}>×</button></div>
+        <div className="modal-body">
+          <div className="mgrid">
+            <div className="field"><label>Name</label>
+              <input autoFocus value={f.name} onChange={(e) => set('name', e.target.value)}
+                placeholder={kind === 'warehouse' ? 'e.g. Warehouse 1'
+                  : kind === 'store' ? 'e.g. TAQUA SILKS, TIRUPUR' : 'e.g. Main Counter'} /></div>
+            <div className="field"><label>Code <span className="small">— filled in if left blank</span></label>
+              <input value={f.code} onChange={(e) => set('code', e.target.value)}
+                placeholder={kind === 'warehouse' ? 'WH-01' : kind === 'store' ? 'ST-01' : 'POS-01'} /></div>
+            {kind === 'store' && (
+              <div className="field"><label>Supplied by</label>
+                <select value={f.warehouse_id || ''} onChange={(e) => set('warehouse_id', +e.target.value)}>
+                  {(warehouses || []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select></div>
+            )}
+            {kind === 'terminal' && (
+              <div className="field"><label>At store</label>
+                <select value={f.store_id || ''} onChange={(e) => set('store_id', +e.target.value)}>
+                  {(stores || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select></div>
+            )}
+            {kind !== 'terminal' && (
+              <div className="field" style={{ gridColumn: '1 / -1' }}><label>Address</label>
+                <input value={f.address} onChange={(e) => set('address', e.target.value)} /></div>
+            )}
+          </div>
+          {kind === 'store' && (
+            <div className="infobox" style={{ marginTop: 'var(--sp-3)' }}>
+              Store names are unique across the company and are how the retail shop
+              recognises a branch. Renaming one here does not rename it there.
+            </div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button className="btn primary" disabled={!f.name.trim()}
+            onClick={() => onSave(f)}>{init?.id ? 'Save' : 'Create'}</button>
+          <button className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Locations({ toast }) {
+  const [tree, setTree] = useState(null)
+  const [err, setErr] = useState(null)
+  const [edit, setEdit] = useState(null)     // {kind, init}
+
+  const load = useCallback(() => api.locationTree()
+    .then((r) => { setTree(r.warehouses || []); setErr(null) })
+    .catch((e) => setErr(e.status === 404 ? 'restart' : (e.detail || e.message))), [])
+  useEffect(() => { load() }, [load])
+
+  const warehouses = (tree || []).filter((w) => !w.unassigned)
+  const allStores = (tree || []).flatMap((w) => w.stores || [])
+
+  const run = async (fn, ok) => {
+    try { const r = await fn(); await load(); toast(r?.warning || ok, r?.warning ? 'warn' : 'ok'); setEdit(null) }
+    catch (e) { toast(e.detail || e.message, 'err') }
+  }
+
+  const save = (kind, init, f) => {
+    const body = { name: f.name.trim(), code: f.code.trim() || null, address: f.address?.trim() || null }
+    if (kind === 'store') body.warehouse_id = f.warehouse_id
+    if (kind === 'terminal') body.store_id = f.store_id
+    if (init?.id) {
+      const fn = kind === 'warehouse' ? api.updateWarehouse : kind === 'store' ? api.updateStore : api.updateTerminal
+      return run(() => fn(init.id, body), 'Saved')
+    }
+    const fn = kind === 'warehouse' ? api.createWarehouse : kind === 'store' ? api.createStore : api.createTerminal
+    return run(() => fn(body), 'Created')
+  }
+
+  const toggle = (kind, node) => {
+    const fn = kind === 'warehouse' ? api.updateWarehouse : kind === 'store' ? api.updateStore : api.updateTerminal
+    return run(() => fn(node.id, { name: node.name, active: node.active === false }),
+      node.active === false ? 'Reopened' : 'Closed')
+  }
+
+  const remove = (kind, node) => {
+    if (!window.confirm(`Delete “${node.name}”? This is only possible while nothing is filed under it — otherwise close it instead.`)) return
+    const fn = kind === 'warehouse' ? api.deleteWarehouse : kind === 'store' ? api.deleteStore : api.deleteTerminal
+    return run(() => fn(node.id), 'Deleted')
+  }
+
+  if (err === 'restart') return (
+    <div className="screen scrolls">
+      <div className="pagehead"><h2>Locations</h2></div>
+      <div className="screenbody"><div className="warnbox" style={{ maxWidth: 620 }}>
+        <h4>The server needs restarting</h4>
+        <div className="small" style={{ color: 'var(--text-2)', lineHeight: 1.5 }}>
+          This page was loaded from disk, but <code>/api/locations</code> is registered
+          when Python starts — and this server was started before Locations existed.
+          Stop it (Ctrl-C in the run window), start it again with <code>run.bat</code>,
+          and reload.
+        </div>
+      </div></div>
+    </div>
+  )
+
+  return (
+    <div className="screen">
+      <div className="pagehead">
+        <h2>Locations</h2>
+        <div className="pagesub small">
+          The warehouses, the stores each one supplies, and the tills at each store
+        </div>
+        <div style={{ flex: 1 }} />
+        <button className="btn" onClick={load}>↻ Refresh</button>
+        <button className="btn primary" onClick={() => setEdit({ kind: 'warehouse' })}>
+          + New warehouse</button>
+      </div>
+      <div className="screenbody">
+        {err && <div className="warnbox" style={{ marginBottom: 14 }}>
+          <h4>Locations could not be read</h4>
+          <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div></div>}
+
+        <div className="infobox" style={{ marginBottom: 'var(--sp-4)' }}>
+          A <b>store</b> owns stock; a <b>POS terminal</b> only records sales against
+          its store's stock. Closing a place keeps its history and stops it being
+          offered as a destination — deleting is refused once anything is filed
+          under it.
+        </div>
+
+        {tree && tree.length === 0 && (
+          <div className="empty" style={{ marginTop: 50 }}>
+            No warehouses yet. Add one, then the stores it supplies.</div>
+        )}
+
+        {(tree || []).map((w) => (
+          <LocationRow key={w.id ?? 'orphan'} node={w} kind="warehouse"
+            onAdd={w.unassigned ? null : () => setEdit({ kind: 'store', init: { warehouse_id: w.id } })}
+            onEdit={w.unassigned ? null : () => setEdit({ kind: 'warehouse', init: w })}
+            onToggle={w.unassigned ? null : () => toggle('warehouse', w)}
+            onDelete={w.unassigned || (w.stores || []).length ? null : () => remove('warehouse', w)}>
+            <div className="lockids">
+              {(w.stores || []).length === 0 && (
+                <div className="small locempty">No stores under this warehouse yet.</div>
+              )}
+              {(w.stores || []).map((s) => (
+                <LocationRow key={s.id} node={s} kind="store"
+                  onAdd={() => setEdit({ kind: 'terminal', init: { store_id: s.id } })}
+                  onEdit={() => setEdit({ kind: 'store', init: s })}
+                  onToggle={() => toggle('store', s)}
+                  onDelete={(s.terminals || []).length ? null : () => remove('store', s)}>
+                  <div className="lockids">
+                    {(s.terminals || []).length === 0 && (
+                      <div className="small locempty">No tills at this store yet.</div>
+                    )}
+                    {(s.terminals || []).map((t) => (
+                      <LocationRow key={t.id} node={t} kind="terminal"
+                        onEdit={() => setEdit({ kind: 'terminal', init: t })}
+                        onToggle={() => toggle('terminal', t)}
+                        onDelete={() => remove('terminal', t)} />
+                    ))}
+                  </div>
+                </LocationRow>
+              ))}
+            </div>
+          </LocationRow>
+        ))}
+      </div>
+
+      {edit && (
+        <LocationEditor kind={edit.kind} init={edit.init} warehouses={warehouses}
+          stores={allStores} onClose={() => setEdit(null)}
+          onSave={(f) => save(edit.kind, edit.init?.id ? edit.init : null, f)} />
+      )}
+    </div>
+  )
+}
+
 const ROLE_RANK = { user: 1, admin: 2, superadmin: 3 }
 const ROLE_LABEL = { user: 'User', admin: 'Admin', superadmin: 'Super Admin' }
 const rank = (role) => ROLE_RANK[role] || 0
@@ -10110,6 +10338,7 @@ const MODULES = [
   { key: 'reports', icon: '📊', label: 'Reports', blurb: 'Every register, filtered and exportable', min: 'admin' },
   { key: 'suppliers', icon: '🏭', label: 'Suppliers', blurb: 'Supplier master and trained invoice formats', min: 'admin' },
   { key: 'masters', icon: '⚙', label: 'Masters', blurb: 'Categories, agents, transporters and the dropdown lists', min: 'admin' },
+  { key: 'locations', icon: '🏢', label: 'Locations', blurb: 'Warehouses, the stores they supply, and the tills at each store', min: 'admin' },
   { key: 'users', icon: '👤', label: 'Users & Access', blurb: 'Who can sign in, and how much of this they see', min: 'superadmin' },
 ]
 
@@ -11368,6 +11597,8 @@ export default function App() {
         // module from its MODULES entry, so this cannot drift out of step with
         // the menu the way a second copy of the rule would.
         <Masters toast={toast} />
+      ) : tab === 'locations' ? (
+        <Locations toast={toast} />
       ) : tab === 'users' ? (
         <Users toast={toast} me={user} />
       ) : tab === 'suppliers' ? (

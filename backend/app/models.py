@@ -12,7 +12,7 @@ LineItem         denormalised line rows for querying/reporting once confirmed.
 """
 import datetime as dt
 from sqlalchemy import (Column, Integer, String, Float, Text, DateTime,
-                        ForeignKey, JSON, Boolean)
+                        ForeignKey, JSON, Boolean, UniqueConstraint)
 from sqlalchemy.orm import relationship, backref
 from .database import Base
 
@@ -1326,3 +1326,94 @@ class AppSetting(Base):
     key = Column(String, primary_key=True)
     value = Column(JSON)
     updated_at = Column(DateTime, default=now, onupdate=now)
+
+
+# ============================================================================
+#  Locations — Warehouse → Store → POS terminal
+# ============================================================================
+#  Until now "where" was a NAME. Stock Outward dispatches to `to_destination`,
+#  free text; the branch a consignment is forwarded to is an LR column; and the
+#  list somebody maintains is `master_options` of kind `auto_transfer_location`
+#  — a bare string with no code, no address and no way to be switched off.
+#
+#  That was enough while there was one warehouse and a handful of branches. It
+#  stops being enough at ten warehouses and fifty stores, because a name cannot
+#  answer "which warehouse does this store belong to", cannot be renamed without
+#  orphaning every row that spelled it the old way, and cannot be deactivated.
+#
+#  THE SHOP ALREADY DEPENDS ON THIS LIST. The retail app (Textile Retail Shop)
+#  keeps its own `locations`/`counters` in its own database and syncs the names
+#  from `auto_transfer_location`, matching case-insensitively — see the shop's
+#  app/places.sync_locations. So `Store.name` is unique and stays the join key:
+#  these tables become the system of record, and services/locations.py mirrors
+#  every store back into the old option list so nothing that reads it breaks.
+#
+#  Stock is NOT split by location here yet. Product.stock_qty is still one
+#  figure and StockMovement still has no location column; splitting them is the
+#  next change and a much larger one. These tables are what that change needs to
+#  exist first, and what the Locations screen manages in the meantime.
+# ============================================================================
+class Warehouse(Base):
+    """A building that holds stock. The top of the location tree."""
+    __tablename__ = "warehouses"
+    id = Column(Integer, primary_key=True)
+    # Unique so it can be matched by name the way the shop matches stores, and
+    # so two people cannot create the same building twice.
+    name = Column(String, unique=True, index=True, nullable=False)
+    code = Column(String, unique=True, index=True)
+    address = Column(String)
+    # Deactivated rather than deleted, always: a warehouse that closed still has
+    # last year's transfers filed against it, and removing the row to tidy a
+    # dropdown would orphan them.
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    stores = relationship("Store", back_populates="warehouse",
+                          order_by="Store.name")
+
+
+class Store(Base):
+    """A place that sells, supplied by one warehouse.
+
+    `name` is unique across the whole company, not just within its warehouse.
+    That is deliberate and load-bearing: the shop's own Location rows are
+    matched to these by name alone, and two stores called "Main Branch" under
+    different warehouses would be one row down there — with one pool of stock
+    and one set of bills covering both.
+    """
+    __tablename__ = "stores"
+    id = Column(Integer, primary_key=True)
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    code = Column(String, unique=True, index=True)
+    address = Column(String)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    warehouse = relationship("Warehouse", back_populates="stores")
+    terminals = relationship("PosTerminal", back_populates="store",
+                             order_by="PosTerminal.name")
+
+
+class PosTerminal(Base):
+    """One till at one store.
+
+    A terminal is NOT a stock location. The store owns the stock; a terminal
+    only records sales against it. Giving each till its own holding would mean
+    a garment on the shelf belonging to counter 2, and a sale at counter 1
+    failing for stock that is standing in front of the person selling it.
+    """
+    __tablename__ = "pos_terminals"
+    id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False)
+    name = Column(String, nullable=False)
+    code = Column(String, unique=True, index=True)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    store = relationship("Store", back_populates="terminals")
+
+    # Two tills at one store are two drawers and must be told apart; the same
+    # till name at two different stores is ordinary ("Counter 1" everywhere).
+    __table_args__ = (UniqueConstraint("store_id", "name",
+                                       name="uq_terminal_store_name"),)

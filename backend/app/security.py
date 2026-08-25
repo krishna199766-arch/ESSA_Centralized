@@ -51,6 +51,11 @@ POLICY = [
     # --- setup the floor reads and only admin edits ---
     (r"^/api/masters", "user", "admin", "masters"),
     (r"^/api/master-data", "user", "admin", "masters"),
+    # Where this company trades from. The floor READS these all day — a
+    # dispatch has to name the branch it is going to — and only admin adds a
+    # warehouse or closes a store, which is the same shape as the masters
+    # above it.
+    (r"^/api/locations", "user", "admin", "locations"),
     (r"^/api/suppliers", "user", "admin", "suppliers"),
     # Label templates: the floor prints from them all day, admin lays them out.
     # /print and /templates/{id}/preview are GETs, so they fall to the read rank.

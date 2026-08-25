@@ -58,6 +58,7 @@ SCREENS = [
     ("reports",    "Reports", "Office", "admin"),
     ("suppliers",  "Suppliers", "Setup", "admin"),
     ("masters",    "Masters", "Setup", "admin"),
+    ("locations",  "Locations", "Setup", "admin"),
     ("labels",     "Label Designer", "Setup", "admin"),
     ("users",      "Users & Access", "Setup", "superadmin"),
 ]

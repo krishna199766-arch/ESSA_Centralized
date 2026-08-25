@@ -1659,3 +1659,42 @@ table.items tbody tr.sel { background: var(--brand-100); }
 .items thead tr.fillrow th .fillbox select { flex: 1 1 auto; min-width: 0;
   padding: 2px 4px; font-size: var(--fs-xs); border: 1px solid var(--line);
   border-radius: 4px; background: var(--panel); color: var(--text); }
+
+/* ---------- Locations: warehouse → store → POS terminal ----------
+   Drawn as the tree it is. Three flat lists would make "what does this
+   warehouse supply" an exercise in cross-referencing, which is the one
+   question this screen exists to answer.
+
+   Depth is carried by an indent and a rule rather than by three different
+   card styles: they are the same kind of object at three scales, and giving
+   each its own colour would say they are three unrelated things. */
+.locnode { margin-bottom: var(--sp-2); }
+.locbar { display: flex; align-items: center; gap: var(--sp-2);
+  padding: 9px var(--sp-3); background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  min-width: 0; flex-wrap: wrap; }
+.locbar .spacer { flex: 1; }
+.loc-warehouse > .locbar { background: var(--panel-2);
+  border-left: 3px solid var(--gold-line); font-weight: 600; }
+.loc-store > .locbar { border-left: 3px solid var(--brand-300); }
+.loc-terminal > .locbar { background: var(--panel-2); padding: 6px var(--sp-3); }
+/* a closed place: still listed, and visibly not in play */
+.locnode.off > .locbar { opacity: .62; }
+.locico { flex: 0 0 auto; font-size: var(--fs-md); line-height: 1; }
+.locname { font-weight: 600; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.loc-terminal .locname { font-weight: 500; }
+/* the code is an identifier, so it is monospaced and quiet — it is looked up,
+   not read */
+.loccode { font-family: ui-monospace, Menlo, monospace; font-size: var(--fs-xs);
+  color: var(--muted); background: var(--panel-3); border-radius: 4px;
+  padding: 1px 6px; flex: 0 0 auto; }
+.locaddr { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.locbar .btn { padding: 3px 10px; font-size: var(--fs-xs); }
+/* The indent that makes the tree a tree. The rule is the spine: without it a
+   store four levels down a long list reads as a top-level row. */
+.lockids { margin: var(--sp-2) 0 var(--sp-3) var(--sp-4);
+  padding-left: var(--sp-4); border-left: 1px solid var(--line); }
+.lockids .lockids { margin-bottom: var(--sp-2); }
+.locempty { color: var(--muted); padding: 2px 0 var(--sp-1); font-style: italic; }

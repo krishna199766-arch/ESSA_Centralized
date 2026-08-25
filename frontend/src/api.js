@@ -401,6 +401,39 @@ export const api = {
   masterDelete: (key, id) => fetch(`/api/master-data/${key}/records/${id}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('m'), { detail: j.detail }); return j }),
 
+  // ---- Locations: warehouse → store → POS terminal ----------------------
+  // The tree read runs the backfill server-side, so a database that predates
+  // these tables answers with its existing branches already turned into stores
+  // rather than looking empty. `status` is kept on the error the way
+  // labelFields does it: a 404 here is a backend started before this module
+  // existed, which is a restart rather than a fault.
+  locationTree: () => fetch('/api/locations')
+    .then(r => { if (!r.ok) throw Object.assign(new Error(String(r.status)), { status: r.status }); return r.json() }),
+  createWarehouse: (body) => fetch('/api/locations/warehouses', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('wh'), { detail: j.detail }); return j }),
+  updateWarehouse: (id, body) => fetch(`/api/locations/warehouses/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('wh'), { detail: j.detail }); return j }),
+  deleteWarehouse: (id) => fetch(`/api/locations/warehouses/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('wh'), { detail: j.detail }); return j }),
+  createStore: (body) => fetch('/api/locations/stores', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
+  updateStore: (id, body) => fetch(`/api/locations/stores/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
+  deleteStore: (id) => fetch(`/api/locations/stores/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
+  createTerminal: (body) => fetch('/api/locations/terminals', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pos'), { detail: j.detail }); return j }),
+  updateTerminal: (id, body) => fetch(`/api/locations/terminals/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pos'), { detail: j.detail }); return j }),
+  deleteTerminal: (id) => fetch(`/api/locations/terminals/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pos'), { detail: j.detail }); return j }),
+
   // LR entry
   lrExtract: (file) => { const fd = new FormData(); fd.append('file', file);
     return fetch('/api/lr/extract', { method: 'POST', body: fd }).then(J) },

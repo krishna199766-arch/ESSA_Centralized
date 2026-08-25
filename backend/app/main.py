@@ -14,7 +14,7 @@ from . import models  # noqa: F401  (register tables)
 from .routers import (documents, suppliers, purchases, inventory, outward,
                       payments, returns, reports, settings, auth, masters, lr,
                       bundles, dashboard, master_data, labels, dead_stock,
-                      notifications, voice, users)
+                      notifications, voice, users, locations)
 from .extraction.engine import provider_status
 from .security import auth_middleware
 from .config import COMPANY_NAME, COMPANY_GSTIN
@@ -505,6 +505,7 @@ app.include_router(labels.router)
 app.include_router(dead_stock.router)
 app.include_router(notifications.router)
 app.include_router(voice.router)
+app.include_router(locations.router)
 app.include_router(users.router)
 
 

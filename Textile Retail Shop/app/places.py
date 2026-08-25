@@ -90,6 +90,29 @@ def _warehouse_locations():
     names = []
     try:
         # rows come back as dicts keyed by column name — see warehouse_items._Result
+        #
+        # `stores` first: it is the warehouse's system of record now, and unlike
+        # the option list it says whether a branch is still OPEN. A store closed
+        # upstairs should stop being offered as a place to bill from, and the
+        # option list cannot express that — it is a list of strings.
+        #
+        # Filtered in Python, not in the WHERE clause. `active` is a BOOLEAN on
+        # the deployment's Postgres and an INTEGER on the warehouse PC's SQLite,
+        # and `active = 1` is a type error on the first while `active IS NOT
+        # FALSE` is a syntax error on the second. A NULL — a row written by hand
+        # — counts as open, which is how this behaved when the source was a list
+        # of strings with no status at all.
+        try:
+            names += [r["name"] for r in con.execute(
+                "SELECT name, active FROM stores").fetchall()
+                if r.get("name") and (r.get("active") is None or r.get("active"))]
+        except SQLAlchemyError:
+            # A warehouse that predates the locations tables. It mirrors every
+            # active store into the option list anyway (see the warehouse's
+            # services/locations.mirror_to_options), so this fallback is also
+            # what keeps a half-upgraded pair of deployments working: whichever
+            # side is older, the names still arrive.
+            pass
         sql = ("SELECT value FROM master_options "
                "WHERE kind = 'auto_transfer_location'")
         try:
