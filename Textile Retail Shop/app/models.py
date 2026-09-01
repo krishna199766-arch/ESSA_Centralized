@@ -297,7 +297,12 @@ class Invoice(db.Model):
     loyalty_earned = db.Column(db.Float, default=0.0)
     loyalty_redeemed = db.Column(db.Float, default=0.0)
 
-    payment_method = db.Column(db.String(16), default="cash")  # cash/card/upi
+    # How it was settled, in one word, for the screens and reports that want a
+    # single answer: cash / card / upi, or "mixed" when it took more than one.
+    # The real breakdown is in `payments` below — this stays because every
+    # invoice raised before settlements existed has only this, and the invoice
+    # list, the printed bill and the day's reports all read it.
+    payment_method = db.Column(db.String(16), default="cash")  # cash/card/upi/mixed
     # Who billed it, from where, at which till. Nullable because every invoice
     # raised before there were counters has no answer, and inventing one would be
     # worse than leaving it blank. The company is the one that MATTERS: it is
@@ -313,6 +318,70 @@ class Invoice(db.Model):
     notes = db.Column(db.String(256))
 
     items = db.relationship("InvoiceItem", backref="invoice", lazy=True, cascade="all, delete-orphan")
+    payments = db.relationship("InvoicePayment", backref="invoice", lazy=True,
+                               cascade="all, delete-orphan",
+                               order_by="InvoicePayment.id")
+
+    @property
+    def settled(self):
+        """What was actually tendered against this bill, by method.
+
+        Falls back to the whole total under `payment_method` for every invoice
+        raised before settlements were recorded — and for the floor-sales path,
+        which still bills a single method. Without that fallback the day's cash
+        figure would drop to zero the moment this table arrived, on history that
+        was perfectly well recorded.
+        """
+        if self.payments:
+            out = {}
+            for p in self.payments:
+                out[p.method] = round(out.get(p.method, 0.0) + (p.amount or 0), 2)
+            return out
+        return {(self.payment_method or "cash"): round(self.total or 0, 2)}
+
+    @property
+    def change_given(self):
+        """Cash handed back. Only cash is ever over-tendered."""
+        return round(sum(max(0.0, (p.tendered or p.amount or 0) - (p.amount or 0))
+                         for p in self.payments if p.method == "cash"), 2)
+
+
+class InvoicePayment(db.Model):
+    """One tender against one bill — ₹2,000 cash, ₹1,340 on a card.
+
+    A bill is settled by however many of these add up to its total, which is what
+    lets a customer put half on a card and hand over the rest. One column on the
+    invoice could not say that; it could only say which method to blame the whole
+    amount on, and the day's cash reconciliation would be wrong by whatever the
+    other half was.
+
+    `tendered` is what physically changed hands and is only ever different for
+    cash: a customer pays 2,000 against 1,860 and takes 140 back. The bill is
+    still settled for 1,860 — `amount` is what the invoice received, `tendered`
+    is what the drawer saw — and keeping both is the only way the till and the
+    invoice can each be right.
+    """
+    __tablename__ = "invoice_payments"
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey("invoices.id"),
+                           nullable=False, index=True)
+    method = db.Column(db.String(16), nullable=False)      # cash | card | upi
+    amount = db.Column(db.Float, nullable=False, default=0.0)
+    # What was handed over. Equal to `amount` for everything but over-tendered cash.
+    tendered = db.Column(db.Float)
+    # The card's last four, a UPI reference, an approval code — whatever the
+    # cashier has to be able to quote when a payment is queried later.
+    reference = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    @property
+    def change(self):
+        return round(max(0.0, (self.tendered or self.amount or 0) - (self.amount or 0)), 2)
+
+
+#: The tenders a till accepts. One list, so the counter, the settlement check and
+#: the reports cannot disagree about what a payment method is.
+PAYMENT_METHODS = ("cash", "card", "upi")
 
 
 class InvoiceItem(db.Model):

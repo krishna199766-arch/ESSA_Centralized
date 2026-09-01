@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { api, session, setUnauthorizedHandler } from './api.js'
+import { api, session, warehouse, setUnauthorizedHandler } from './api.js'
 import { parseDictation, coerceSpoken, dictationTargets } from './voicefill.js'
 
 // ---------- helpers ----------
@@ -2197,11 +2197,26 @@ function Purchases({ selId, setSelId, toast }) {
   const [shrows, setShrows] = useState([])         // editable shortage rows
   const [shortOpts, setShortOpts] = useState({ reasons: [] })
   const [units, setUnits] = useState({ types: [], rules: [] })   // unit master
+  const [warehouses, setWarehouses] = useState([])  // where a delivery can land
   const refresh = useCallback(() => api.listPurchases().then(setList), [])
   useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    api.locationTree().then((t) => setWarehouses(
+      (t.warehouses || []).filter((w) => w.id && w.active !== false))).catch(() => {})
+  }, [])
   useEffect(() => { if (selId) api.getPurchase(selId).then(setGrn); else setGrn(null) }, [selId])
   useEffect(() => { api.unitTypes().then(setUnits).catch(() => {}) }, [])
-  useEffect(() => { api.categories().then((c) => setCats((c.items || []).map((i) => i.name))).catch(() => {}) }, [])
+  // The category master this GRN may classify into is the RECEIVING WAREHOUSE'S.
+  // A silk receipt must never be offered ESSA KIDS-TRUNK, and a warehouse whose
+  // catalogue is still empty correctly offers nothing at all — which is the
+  // prompt to go and build it, not a reason to file silk as a garment.
+  useEffect(() => {
+    const wh = warehouses.find((w) => w.id === grn?.warehouse_id)
+    const cid = wh?.catalogue_id
+    const p = cid ? api.catalogueCategories(cid).then((r) => (r.categories || []).map((i) => i.name))
+      : api.categories().then((c) => (c.items || []).map((i) => i.name))
+    p.then(setCats).catch(() => setCats([]))
+  }, [grn?.warehouse_id, warehouses])
   useEffect(() => { api.shortageOptions().then(setShortOpts).catch(() => {}) }, [])
   useEffect(() => { setSplitFor(null); setSrows([]); setShortFor(null); setShrows([]) }, [selId])
 
@@ -2224,9 +2239,21 @@ function Purchases({ selId, setSelId, toast }) {
       // stock figure looks like it lost half of what was billed
       const conv = r.converted?.length ? `\n${r.converted.join('\n')}` : ''
       const labels = r.pieces ? ` · ${r.pieces} QR label(s)` : ''
-      toast(`✓ Posted to inventory · ${r.products_created} new, ${r.products_updated} updated${sizes}${labels}${short}${conv}`, 'ok')
+      // WHERE it landed, said on the receipt confirmation. With more than one
+      // warehouse the answer is no longer obvious, and the moment to catch a
+      // delivery booked into the wrong building is now — while unposting it is
+      // still just an unpost.
+      const at = r.warehouse ? ` into ${r.warehouse}` : ''
+      toast(`✓ Posted to inventory${at} · ${r.products_created} new, ${r.products_updated} updated${sizes}${labels}${short}${conv}`, 'ok')
       reload()
     } catch (e) { toast('Post failed: ' + (e.detail || e.message), 'err') }
+  }
+
+  const setWarehouse = async (warehouse_id) => {
+    try {
+      setGrn(await api.setGrnWarehouse(selId, warehouse_id ? +warehouse_id : null))
+      refresh()
+    } catch (e) { toast(e.detail || 'Could not set the warehouse', 'err') }
   }
 
   // --- shortage entry ---
@@ -2645,6 +2672,31 @@ function Purchases({ selId, setSelId, toast }) {
               <div className="k">Invoice</div><div>{grn.invoice_number} · {fmtDate(grn.invoice_date)}</div>
               <div className="k">Taxable</div><div>₹ {money(grn.taxable_total)}</div>
               <div className="k">Grand total</div><div>₹ {money(grn.grand_total)}</div>
+              {/* Which building took the delivery in. Editable only while the GRN
+                  is a draft: once posted the goods are standing on a shelf, and
+                  relabelling the receipt would not move them. */}
+              <div className="k" title="The warehouse this delivery was unloaded at. Its stock is what this GRN adds to.">Receive at</div>
+              <div>{editable ? (
+                <select value={grn.warehouse_id || ''} style={{ minWidth: 240 }}
+                  onChange={(e) => setWarehouse(e.target.value)}>
+                  <option value="">— default warehouse —</option>
+                  {warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>{w.name}{w.code ? ` · ${w.code}` : ''}</option>
+                  ))}
+                </select>
+              ) : (grn.warehouse_name || '—')}</div>
+              {/* What that warehouse trades in, and therefore which category
+                  master and attribute set this receipt works against. Shown
+                  because it is the thing that silently decides how every line
+                  below classifies. */}
+              <div className="k" title="The business line this warehouse trades in. Its category master and attributes are what this GRN uses.">Trades in</div>
+              <div>{(() => {
+                const wh = warehouses.find((w) => w.id === grn.warehouse_id)
+                if (!wh?.catalogue) return <span className="small">— default —</span>
+                return <>{wh.catalogue}
+                  {!cats.length && <span className="small" style={{ color: 'var(--danger)', marginLeft: 8 }}>
+                    ⚠ no categories yet — add them under Masters → Catalogues</span>}</>
+              })()}</div>
             </div>
             <Section id="grn.lines" title="Lines → inventory match"
               summary={`${grn.lines.length} line(s) · ${grn.new_products} new product(s)`}>
@@ -3996,8 +4048,16 @@ function StockOutward({ toast }) {
   // for a dispatch drawn from more than one place, so the paperwork says so
   // instead of naming a single location that isn't the whole truth.
   const FROM_LOCATIONS = ['WAREHOUSE', 'MULTI']
-  const [form, setForm] = useState({ date: '', to_destination: '', packed_by: '',
-    from_location: 'WAREHOUSE', lines: [] })
+  // The places this company trades from. Loaded once: the destination picker and
+  // the source picker both read it, and the list changes about once a year.
+  const [places, setPlaces] = useState({ warehouses: [], stores: [] })
+  // `to_kind` is a UI-only choice of WHICH picker is showing. The server is sent
+  // one of to_warehouse_id / to_store_id / to_destination and decides the kind
+  // from that — see models.StockOutward.
+  const BLANK = { date: '', to_destination: '', packed_by: '',
+    from_location: 'WAREHOUSE', from_warehouse_id: '', to_kind: 'store',
+    to_warehouse_id: '', to_store_id: '', lines: [] }
+  const [form, setForm] = useState(BLANK)
   const [q, setQ] = useState('')
   // derived AFTER the state it reads — a const referenced above its own
   // declaration is a temporal-dead-zone throw, and in a render that is the whole
@@ -4010,6 +4070,19 @@ function StockOutward({ toast }) {
   const [picking, setPicking] = useState(false)   // the tick-sheet over stock is open
   const refresh = useCallback(() => api.listOutwards().then(setList), [])
   useEffect(() => { refresh(); api.listProducts().then(setProducts) }, [refresh])
+  useEffect(() => {
+    api.locationTree().then((t) => {
+      const warehouses = (t.warehouses || []).filter((w) => w.id && w.active !== false)
+      const stores = warehouses.flatMap((w) => (w.stores || [])
+        .filter((s) => s.active !== false)
+        .map((s) => ({ ...s, warehouse_name: w.name })))
+      setPlaces({ warehouses, stores })
+      // Default the source to the first warehouse so a one-warehouse install
+      // never has to answer a question it has only one answer to.
+      setForm((f) => (f.from_warehouse_id || !warehouses.length ? f
+        : { ...f, from_warehouse_id: String(warehouses[0].id) }))
+    }).catch(() => { /* the old free-text destination still works without it */ })
+  }, [])
   useEffect(() => { if (sel) api.getOutward(sel).then(setForm2); function setForm2(o){ setDetail(o) } }, [sel])
   const [detail, setDetail] = useState(null)
 
@@ -4067,17 +4140,40 @@ function StockOutward({ toast }) {
   const save = async () => {
     const lines = form.lines.filter(l => l.product_id).map(l => ({ product_id: +l.product_id, qty: +l.qty }))
     if (!lines.length) { toast('Add at least one product', 'err'); return }
-    const o = await api.createOutward({ ...form, lines })
-    toast(`✓ Outward ${o.code} created`, 'ok'); setCreating(false)
-    setForm({ date: '', to_destination: '', packed_by: '', from_location: 'WAREHOUSE', lines: [] })
-    refresh(); setSel(o.id)
+    // Only the destination the chosen kind names is sent. Passing all three and
+    // letting the server pick would mean a destination left over from a kind the
+    // person switched away from silently deciding where the goods go.
+    if (form.to_kind === 'warehouse' && !form.to_warehouse_id) {
+      toast('Choose the warehouse this is going to', 'err'); return }
+    if (form.to_kind === 'store' && !form.to_store_id) {
+      toast('Choose the store this is going to', 'err'); return }
+    const body = {
+      date: form.date, packed_by: form.packed_by, from_location: form.from_location,
+      from_warehouse_id: form.from_warehouse_id ? +form.from_warehouse_id : null,
+      to_warehouse_id: form.to_kind === 'warehouse' ? +form.to_warehouse_id : null,
+      to_store_id: form.to_kind === 'store' ? +form.to_store_id : null,
+      to_destination: form.to_kind === 'other' ? form.to_destination : null,
+      lines,
+    }
+    try {
+      const o = await api.createOutward(body)
+      toast(`✓ Outward ${o.code} created`, 'ok'); setCreating(false)
+      setForm({ ...BLANK, from_warehouse_id: form.from_warehouse_id })
+      refresh(); setSel(o.id)
+    } catch (e) { toast(e.detail || 'Could not create the outward', 'err') }
   }
   const post = async () => {
     try { const r = await api.postOutward(sel); toast(`✓ Dispatched · ${r.total_qty} units out`, 'ok'); api.getOutward(sel).then(setDetail); refresh() }
     catch (e) {
       const d = e.detail
-      if (d && d.error === 'insufficient_stock') toast('Insufficient stock: ' + d.problems.map(p => `${p.product} (need ${p.requested}, have ${p.on_hand})`).join('; '), 'err')
-      else toast('Post failed', 'err')
+      if (d && d.error === 'insufficient_stock') {
+        // Named per warehouse, and "there is more of it elsewhere" is said out
+        // loud — otherwise a picker reads this as "we are out of it" and stops,
+        // when the answer is a transfer from the branch that has it.
+        toast('Not enough at ' + (d.problems[0]?.warehouse || 'this warehouse') + ': '
+          + d.problems.map(p => `${p.product} (need ${p.requested}, have ${p.on_hand}`
+            + (p.elsewhere > 0 ? `, ${p.elsewhere} elsewhere` : '') + ')').join('; '), 'err')
+      } else toast(typeof d === 'string' ? d : 'Post failed', 'err')
     }
   }
   // scanning a garment against an open dispatch — is it on this note?
@@ -4111,7 +4207,12 @@ function StockOutward({ toast }) {
             <div key={o.id} className={'doc-row' + (sel === o.id && !creating ? ' sel' : '')} onClick={() => { setSel(o.id); setCreating(false) }}>
               <div className="t">{o.to_destination || o.code}</div>
               <div className="m"><span className={'badge ' + (o.status === 'posted' ? 'confirmed' : 'uploaded')}>{o.status}</span>
-                <span>{o.code}</span><span style={{ marginLeft: 'auto' }}>{o.total_qty} units</span></div>
+                {/* A transfer comes back to us and a shop dispatch does not, which
+                    is the difference that decides whether anyone has to receive it */}
+                {o.kind === 'transfer' && <span className="badge" title="Warehouse to warehouse — the far end still has to count it in">transfer</span>}
+                <span>{o.code}</span>
+                {o.from_warehouse && <span title="Dispatched from">{o.from_warehouse}</span>}
+                <span style={{ marginLeft: 'auto' }}>{o.total_qty} units</span></div>
             </div>
           ))}
         </div>
@@ -4123,7 +4224,56 @@ function StockOutward({ toast }) {
             <h2 style={{ marginTop: 0 }}>New Stock Outward</h2>
             <div className="grid" style={{ maxWidth: 640 }}>
               <DateField label="Date" value={form.date} onChange={(v) => setForm({ ...form, date: v })} />
-              <div className="field"><label>To (destination)</label><input value={form.to_destination} placeholder="e.g. Tasjue Silks, Tirupur" onChange={(e) => setForm({ ...form, to_destination: e.target.value })} /></div>
+              <div className="field"><label>From warehouse</label>
+                <select value={form.from_warehouse_id} style={{ width: '100%' }}
+                  onChange={(e) => setForm({ ...form, from_warehouse_id: e.target.value })}>
+                  {!places.warehouses.length && <option value="">(no warehouses set up)</option>}
+                  {places.warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>{w.name}{w.code ? ` · ${w.code}` : ''}</option>
+                  ))}
+                </select>
+                <div className="hint">The stock comes off this building's shelf, and
+                  it is this building's on-hand figure the dispatch is checked against.</div>
+              </div>
+              <div className="field"><label>Send to</label>
+                <select value={form.to_kind} style={{ width: '100%' }}
+                  onChange={(e) => setForm({ ...form, to_kind: e.target.value,
+                    to_warehouse_id: '', to_store_id: '', to_destination: '' })}>
+                  <option value="store">A store</option>
+                  <option value="warehouse">Another warehouse (transfer)</option>
+                  <option value="other">Somewhere else</option>
+                </select></div>
+              {form.to_kind === 'warehouse' && (
+                <div className="field"><label>To warehouse</label>
+                  <select value={form.to_warehouse_id} style={{ width: '100%' }}
+                    onChange={(e) => setForm({ ...form, to_warehouse_id: e.target.value })}>
+                    <option value="">— choose —</option>
+                    {places.warehouses.filter((w) => String(w.id) !== String(form.from_warehouse_id))
+                      .map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                  </select>
+                  <div className="hint">A transfer. The stock leaves here now and
+                    arrives there when that warehouse counts it in — until then it
+                    is in transit and belongs to neither.</div>
+                </div>
+              )}
+              {form.to_kind === 'store' && (
+                <div className="field"><label>To store</label>
+                  <select value={form.to_store_id} style={{ width: '100%' }}
+                    onChange={(e) => setForm({ ...form, to_store_id: e.target.value })}>
+                    <option value="">— choose —</option>
+                    {places.stores.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name} · {s.warehouse_name}</option>
+                    ))}
+                  </select>
+                  <div className="hint">The shop's own till takes it from here —
+                    it does not come back into the warehouse ledger.</div>
+                </div>
+              )}
+              {form.to_kind === 'other' && (
+                <div className="field"><label>To (destination)</label>
+                  <input value={form.to_destination} placeholder="e.g. a customer, or a place not set up yet"
+                    onChange={(e) => setForm({ ...form, to_destination: e.target.value })} /></div>
+              )}
               <div className="field"><label>Packed by</label><input value={form.packed_by} onChange={(e) => setForm({ ...form, packed_by: e.target.value })} /></div>
               <div className="field"><label>From location</label>
                 <select value={form.from_location} style={{ width: '100%' }}
@@ -4182,10 +4332,16 @@ function StockOutward({ toast }) {
           <div className="editor">
             <div style={{ display: 'flex', gap: 12, alignItems: 'baseline' }}>
               <h2 style={{ margin: 0 }}>{detail.to_destination}</h2>
-              <span className={'badge ' + (detail.status === 'posted' ? 'confirmed' : 'uploaded')}>{detail.status}</span></div>
+              <span className={'badge ' + (detail.status === 'posted' ? 'confirmed' : 'uploaded')}>{detail.status}</span>
+              {detail.kind === 'transfer' && <span className="badge">warehouse transfer</span>}</div>
             <div className="kv" style={{ margin: '12px 0 20px', gridTemplateColumns: '130px 1fr 130px 1fr' }}>
               <div className="k">Code</div><div>{detail.code}</div><div className="k">Date</div><div>{fmtDate(detail.date)}</div>
-              <div className="k">From</div><div>{detail.from_location}</div><div className="k">Packed by</div><div>{detail.packed_by || '—'}</div>
+              <div className="k">From</div><div>{detail.from_warehouse || detail.from_location}</div>
+              <div className="k">To</div>
+              <div>{detail.to_warehouse || detail.to_store || detail.to_destination || '—'}
+                {detail.to_store && <span className="small"> (store)</span>}</div>
+              <div className="k">Packed by</div><div>{detail.packed_by || '—'}</div>
+              <div className="k" /><div />
               {detail.status === 'received' && <>
                 <div className="k">Received by</div><div>{detail.received_by || '—'}</div>
                 <div className="k">Received on</div><div>{fmtDate(detail.received_date || detail.received_at)}</div>
@@ -4229,9 +4385,15 @@ function StockOutward({ toast }) {
           <div className="actionbar">
             <span className="small">{detail.status === 'received'
               ? `Received at ${detail.to_destination || 'the destination'}.`
+                + (detail.kind === 'transfer' ? ' The accepted quantity is now that warehouse’s stock.' : '')
               : detail.status === 'posted'
-                ? 'Dispatched — stock reduced in Inventory. Accept it on Stock Inward when it lands.'
-                : 'Posting reduces warehouse stock for each item.'}</span>
+                ? 'Dispatched — stock is out of ' + (detail.from_warehouse || 'the warehouse') + '. '
+                  + (detail.kind === 'transfer'
+                    ? `In transit until ${detail.to_warehouse} counts it in on Stock Inward.`
+                    : detail.kind === 'store'
+                      ? 'The shop’s till takes it from here.'
+                      : 'Accept it on Stock Inward when it lands.')
+                : 'Posting takes the stock out of ' + (detail.from_warehouse || 'the warehouse') + '.'}</span>
             <div className="spacer" />
             <button className="btn primary" disabled={detail.status !== 'draft'} onClick={post}>
               {detail.status === 'draft' ? 'Post Outward (reduce stock)' : 'Posted ✓'}</button>
@@ -9660,6 +9822,10 @@ const ROLE_HELP = {
 function AccessEditor({ user, catalog, onSave, onClose, toast }) {
   const [map, setMap] = useState(() => ({ ...(user.permissions?.screens || {}) }))
   const [data, setData] = useState(() => [...(user.permissions?.data || [])])
+  // Which buildings this account may work inside. Empty means every one of
+  // them — the same "nothing recorded means unrestricted" rule the screen map
+  // above follows, and what keeps every existing account working untouched.
+  const [whs, setWhs] = useState(() => [...(user.permissions?.warehouses || [])])
   const [busy, setBusy] = useState(false)
   // The grid is normally drawn from the catalog that rides along with the user
   // list. When that is missing the screen must not open as an empty box: an
@@ -9712,10 +9878,15 @@ function AccessEditor({ user, catalog, onSave, onClose, toast }) {
   const submit = async () => {
     setBusy(true)
     try {
-      await api.setUserPermissions(user.id, { screens: map, data })
+      await api.setUserPermissions(user.id, { screens: map, data, warehouses: whs })
+      const where = whs.length
+        ? `${whs.length} warehouse(s)`
+        : 'every warehouse'
       toast(Object.keys(map).length
-        ? `✓ ${user.username} is restricted to ${Object.keys(map).length} screen(s)`
-        : `✓ ${user.username} is back to their role — nothing restricted`, 'ok')
+        ? `✓ ${user.username} is restricted to ${Object.keys(map).length} screen(s), ${where}`
+        : whs.length
+          ? `✓ ${user.username} may work in ${where} — screens still decided by their role`
+          : `✓ ${user.username} is back to their role — nothing restricted`, 'ok')
       await onSave(); onClose()
     } catch (e) { toast(e.detail || 'Could not save that', 'err') }
     setBusy(false)
@@ -9804,6 +9975,31 @@ function AccessEditor({ user, catalog, onSave, onClose, toast }) {
             </table>
           </div>
 
+          <h4 style={{ marginTop: 18 }}>Warehouses</h4>
+          <div className="small" style={{ marginBottom: 8 }}>
+            <b>Nothing ticked means EVERY warehouse</b> — this account is not tied
+            to a building, which is what every existing account is. Tick one or
+            more and they can only work inside those: other warehouses stop
+            appearing on the dashboard, in the pickers, and in every list.
+            Tick exactly one and they are taken straight into it at sign-in.
+          </div>
+          <div className="datagrid">
+            {!(cat.warehouses || []).length && (
+              <span className="small" style={{ color: 'var(--text-2)' }}>
+                No warehouses to allot — add them under Locations.</span>
+            )}
+            {(cat.warehouses || []).map((w) => (
+              <label className="mcheck" key={w.id}
+                title={w.active === false ? 'This warehouse is closed' : ''}>
+                <input type="checkbox" checked={whs.includes(w.id)}
+                  onChange={() => setWhs((v) => (v.includes(w.id)
+                    ? v.filter((x) => x !== w.id) : [...v, w.id]))} />
+                {w.name}{w.code ? ` · ${w.code}` : ''}
+                {w.active === false && <span className="small"> (closed)</span>}
+              </label>
+            ))}
+          </div>
+
           <h4 style={{ marginTop: 18 }}>Figures to withhold</h4>
           <div className="small" style={{ marginBottom: 8 }}>
             Ticked here, the figure is stripped by the server before it reaches
@@ -9821,8 +10017,8 @@ function AccessEditor({ user, catalog, onSave, onClose, toast }) {
           </div>
         </div>
         <div className="modal-foot">
-          <button className="btn" onClick={() => { setMap({}); setData([]) }}
-            title="Back to role-only — this account stops being restricted">Clear all</button>
+          <button className="btn" onClick={() => { setMap({}); setData([]); setWhs([]) }}
+            title="Back to role-only — every screen and every warehouse">Clear all</button>
           <span style={{ flex: 1 }} />
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy} onClick={submit}>
@@ -10097,8 +10293,25 @@ function ChangePassword({ onClose, toast }) {
 //  that has taken deliveries has last year's transfers filed against it BY
 //  NAME, so removing the row would orphan them silently.
 // ==========================================================================
+//  The address as one line, in the order it is written on an envelope. Built
+//  from the parts rather than stored that way, because the state has to be a
+//  column of its own — it decides whether a sale is inter-state — and a row
+//  that showed only line 1 would say a place has no city.
+function locWhere(node) {
+  const parts = [node.address, node.address2, node.city, node.district,
+    node.state, node.pincode, node.country]
+    .map((s) => (s || '').trim()).filter(Boolean)
+  // "Coimbatore, Coimbatore" is what a district that shares its city's name
+  // prints as, and around here most of them do. Both are still stored — a GST
+  // address needs the district in its own right — but a line that says it
+  // twice reads as a mistake in the data.
+  return parts.filter((p, i) => i === 0 || p.toLowerCase() !== parts[i - 1].toLowerCase())
+    .join(', ')
+}
+
 function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, children }) {
   const dim = node.active === false
+  const where = locWhere(node)
   return (
     <div className={'locnode loc-' + kind + (dim ? ' off' : '')}>
       <div className="locbar">
@@ -10106,8 +10319,27 @@ function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, children }
           {kind === 'warehouse' ? '🏢' : kind === 'store' ? '🏬' : '🖥'}</span>
         <span className="locname">{node.name}</span>
         {node.code && <span className="loccode">{node.code}</span>}
+        {/* What this building trades in. On the row rather than only in the
+            editor, because "which of these is the silk warehouse" is the
+            question this screen is opened to answer once there is more than one
+            line. */}
+        {kind === 'warehouse' && node.catalogue && (
+          <span className="badge" title="Business line — its categories and attributes">
+            {node.catalogue}</span>
+        )}
+        {/* Deliberately its own badge and not the catalogue's — a franchise
+            store still trades in one of the real lines. */}
+        {node.loc_type && (
+          <span className="badge loctype" title="Type of place">{node.loc_type}</span>
+        )}
+        {/* A registered place shows that it is one. Its number is on the form;
+            what belongs on a list is which places have one at all, because that
+            is what decides where a bill can be raised. */}
+        {node.gstin && (
+          <span className="badge gstbadge" title={'GSTIN ' + node.gstin}>GST</span>
+        )}
         {dim && <span className="badge review">closed</span>}
-        {node.address && <span className="small locaddr">{node.address}</span>}
+        {where && <span className="small locaddr" title={where}>{where}</span>}
         <span className="spacer" />
         {onAdd && <button className="btn" onClick={onAdd}>{
           kind === 'warehouse' ? '+ Store' : '+ POS'}</button>}
@@ -10124,56 +10356,277 @@ function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, children }
   )
 }
 
-function LocationEditor({ init, kind, stores, warehouses, onSave, onClose }) {
+//  The editor
+//  ------------------------------------------------------------------------
+//  ONE form for all three levels, not three. The field set is identical
+//  because the thing that needs it is a document and all three print one —
+//  see models.LocationProfile. Three near-copies would drift, and the field
+//  that went missing would be missing on exactly one level, which is the
+//  hardest kind of gap to notice.
+//
+//  Seventeen fields is a lot to meet at once, so they arrive in the order the
+//  question is actually answered: what is it and whose, where is it, who do I
+//  ring, what is it registered as, is it open. The rules between those groups
+//  are doing real work — an undifferentiated grid of seventeen boxes reads as
+//  a form to endure rather than one to fill in.
+const LOC_LABEL = { warehouse: 'Warehouse', store: 'Store / Shop', terminal: 'POS / Counter' }
+//  Written out rather than lower-cased from the badge above, because POS is an
+//  abbreviation and "New pos / counter" reads as a typo.
+const LOC_TITLE = { warehouse: 'warehouse', store: 'store / shop', terminal: 'POS / counter' }
+
+//  What the server will refuse, said here first. Duplicated deliberately: the
+//  server check is the one that counts (see routers/locations._apply_profile)
+//  and stays whatever this does, but finding out a GSTIN is a character short
+//  after pressing Create means re-reading a form you thought you had finished.
+function locProblems(f) {
+  const out = {}
+  const g = (f.gstin || '').trim().toUpperCase()
+  if (g && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]{3}$/.test(g))
+    out.gstin = 'A GST number is 15 characters, like 33AADCE6591N1Z7'
+  const p = (f.pincode || '').trim()
+  if (p && !/^\d{6}$/.test(p)) out.pincode = 'A PIN code is 6 digits'
+  const e = (f.email || '').trim()
+  if (e && !e.includes('@')) out.email = 'That is not an email address'
+  if (!(f.name || '').trim()) out.name = 'required'
+  return out
+}
+
+function LocField({ label, hint, error, wide, children }) {
+  return (
+    <div className={'field' + (wide ? ' wide' : '') + (error ? ' flag' : '')}>
+      <label>{label}</label>
+      {children}
+      {error && <div className="flagnote">{error}</div>}
+      {!error && hint && <div className="hint">{hint}</div>}
+    </div>
+  )
+}
+
+function LocationEditor({ init, kind, stores, warehouses, catalogues, options, onSave, onClose }) {
   const [f, setF] = useState(() => ({
-    name: init?.name || '', code: init?.code || '', address: init?.address || '',
+    name: init?.name || '', code: init?.code || '',
+    loc_type: init?.loc_type || '',
+    address: init?.address || '', address2: init?.address2 || '',
+    city: init?.city || '', district: init?.district || '',
+    state: init?.state || '',
+    // A new place is in India until somebody says otherwise; an existing one is
+    // left exactly as it was, blank included, because filling a blank column on
+    // open would save a value nobody typed.
+    country: init?.country || (init?.id ? '' : 'India'),
+    pincode: init?.pincode || '',
+    contact_person: init?.contact_person || '', phone: init?.phone || '',
+    email: init?.email || '', gstin: init?.gstin || '', cin: init?.cin || '',
+    active: init?.active !== false,
+    // Blank means "the same company as the thing above it", which is what the
+    // server does with it. Offered as a real choice rather than pre-filled,
+    // because pre-filling would make every branch look deliberately assigned.
+    business_id: init?.business_id || '',
     warehouse_id: init?.warehouse_id || warehouses?.[0]?.id || null,
     store_id: init?.store_id || stores?.[0]?.id || null,
+    catalogue_id: init?.catalogue_id
+      || (catalogues || []).find((c) => c.is_default)?.id
+      || catalogues?.[0]?.id || null,
   }))
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
-  const label = kind === 'warehouse' ? 'Warehouse' : kind === 'store' ? 'Store' : 'POS terminal'
+  const label = LOC_LABEL[kind] || 'Location'
+  const bad = locProblems(f)
+  const blocked = Object.keys(bad).length > 0
+
+  // The GST state code is not asked for — it IS the first two digits of the
+  // GSTIN, and two fields that must agree, both typed by hand, disagree
+  // eventually. Shown as it is derived so nobody goes looking for the box.
+  const gst = (f.gstin || '').trim().toUpperCase()
+  const stateCode = /^\d{2}/.test(gst) ? gst.slice(0, 2) : null
+
+  const businesses = (options?.businesses || [])
+  const types = options?.types || ['Garments', 'Silks', 'Franchise']
+  const inherits = kind === 'warehouse' ? 'the default company'
+    : kind === 'store' ? 'the supplying warehouse’s company' : 'the store’s company'
+
   return (
     <div className="modal-back" onClick={onClose}>
-      <div className="modal" style={{ width: 'min(520px, 100%)' }} onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head"><b>{init?.id ? `Edit ${label.toLowerCase()}` : `New ${label.toLowerCase()}`}</b>
-          <button className="modal-x" onClick={onClose}>×</button></div>
+      <div className="modal locmodal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>{`${init?.id ? 'Edit' : 'New'} ${LOC_TITLE[kind] || 'location'}`}</b>
+          <span className="badge">{label}</span>
+          {init?.code && <span className="loccode">{init.code}</span>}
+          <button className="modal-x" onClick={onClose}>×</button>
+        </div>
+
         <div className="modal-body">
-          <div className="mgrid">
-            <div className="field"><label>Name</label>
-              <input autoFocus value={f.name} onChange={(e) => set('name', e.target.value)}
-                placeholder={kind === 'warehouse' ? 'e.g. Warehouse 1'
-                  : kind === 'store' ? 'e.g. TAQUA SILKS, TIRUPUR' : 'e.g. Main Counter'} /></div>
-            <div className="field"><label>Code <span className="small">— filled in if left blank</span></label>
-              <input value={f.code} onChange={(e) => set('code', e.target.value)}
-                placeholder={kind === 'warehouse' ? 'WH-01' : kind === 'store' ? 'ST-01' : 'POS-01'} /></div>
-            {kind === 'store' && (
-              <div className="field"><label>Supplied by</label>
-                <select value={f.warehouse_id || ''} onChange={(e) => set('warehouse_id', +e.target.value)}>
-                  {(warehouses || []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                </select></div>
-            )}
-            {kind === 'terminal' && (
-              <div className="field"><label>At store</label>
-                <select value={f.store_id || ''} onChange={(e) => set('store_id', +e.target.value)}>
-                  {(stores || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select></div>
-            )}
-            {kind !== 'terminal' && (
-              <div className="field" style={{ gridColumn: '1 / -1' }}><label>Address</label>
-                <input value={f.address} onChange={(e) => set('address', e.target.value)} /></div>
-            )}
+          {/* ---- 1. what it is, and whose ---- */}
+          <div className="formsec">
+            <h5>Identity</h5>
+            <div className="mgrid">
+              <LocField label="Name" error={bad.name === 'required' ? null : bad.name}>
+                <input autoFocus value={f.name} onChange={(e) => set('name', e.target.value)}
+                  placeholder={kind === 'warehouse' ? 'e.g. Warehouse 1'
+                    : kind === 'store' ? 'e.g. TAQUA SILKS, TIRUPUR' : 'e.g. Main Counter'} />
+              </LocField>
+              <LocField label="Code" hint="Filled in for you if left blank">
+                <input value={f.code} onChange={(e) => set('code', e.target.value)}
+                  placeholder={kind === 'warehouse' ? 'WH-01' : kind === 'store' ? 'ST-01' : 'POS-01'} />
+              </LocField>
+              <LocField label="Type">
+                <select value={f.loc_type} onChange={(e) => set('loc_type', e.target.value)}>
+                  <option value="">— not set —</option>
+                  {types.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </LocField>
+              <LocField label="Business" hint={`Blank uses ${inherits}`}>
+                <select value={f.business_id} onChange={(e) => set('business_id', e.target.value)}>
+                  <option value="">— {inherits} —</option>
+                  {businesses.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}{b.code ? ` · ${b.code}` : ''}</option>
+                  ))}
+                </select>
+              </LocField>
+
+              {kind === 'warehouse' && (
+                <LocField label="Trades in" hint="Decides its categories and attributes">
+                  <select value={f.catalogue_id || ''}
+                    onChange={(e) => set('catalogue_id', +e.target.value)}>
+                    {(catalogues || []).filter((c) => c.active !== false || c.id === init?.catalogue_id)
+                      .map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </LocField>
+              )}
+              {kind === 'store' && (
+                <LocField label="Supplied by">
+                  <select value={f.warehouse_id || ''} onChange={(e) => set('warehouse_id', +e.target.value)}>
+                    {(warehouses || []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                  </select>
+                </LocField>
+              )}
+              {kind === 'terminal' && (
+                <LocField label="At store">
+                  <select value={f.store_id || ''} onChange={(e) => set('store_id', +e.target.value)}>
+                    {(stores || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </LocField>
+              )}
+            </div>
           </div>
+
+          {/* ---- 2. where it is ---- */}
+          <div className="formsec">
+            <h5>Address <span className="small">as it should print on a document</span></h5>
+            <div className="mgrid">
+              <LocField label="Address line 1" wide>
+                <input value={f.address} onChange={(e) => set('address', e.target.value)}
+                  placeholder="Door / building / street" />
+              </LocField>
+              <LocField label="Address line 2" wide>
+                <input value={f.address2} onChange={(e) => set('address2', e.target.value)}
+                  placeholder="Area / landmark" />
+              </LocField>
+              <LocField label="City">
+                <input value={f.city} onChange={(e) => set('city', e.target.value)} />
+              </LocField>
+              <LocField label="District">
+                <input value={f.district} onChange={(e) => set('district', e.target.value)} />
+              </LocField>
+              <LocField label="ZIP / PIN code" error={bad.pincode}>
+                <input value={f.pincode} onChange={(e) => set('pincode', e.target.value)}
+                  inputMode="numeric" maxLength={6} placeholder="641604" />
+              </LocField>
+              <LocField label="State"
+                hint={stateCode ? `GST state code ${stateCode}` : null}>
+                <input value={f.state} onChange={(e) => set('state', e.target.value)}
+                  placeholder="Tamil Nadu" />
+              </LocField>
+              <LocField label="Country">
+                <input value={f.country} onChange={(e) => set('country', e.target.value)} />
+              </LocField>
+            </div>
+          </div>
+
+          {/* ---- 3. who to ring ---- */}
+          <div className="formsec">
+            <h5>Contact</h5>
+            <div className="mgrid">
+              <LocField label="Contact person">
+                <input value={f.contact_person} onChange={(e) => set('contact_person', e.target.value)} />
+              </LocField>
+              <LocField label={kind === 'warehouse' ? 'Contact number' : 'Store contact number'}>
+                <input value={f.phone} onChange={(e) => set('phone', e.target.value)}
+                  inputMode="tel" placeholder="+91 …" />
+              </LocField>
+              <LocField label="Email ID" error={bad.email}>
+                <input value={f.email} onChange={(e) => set('email', e.target.value)}
+                  inputMode="email" />
+              </LocField>
+            </div>
+          </div>
+
+          {/* ---- 4. what it is registered as ---- */}
+          <div className="formsec">
+            <h5>Statutory</h5>
+            <div className="mgrid">
+              <LocField label="GST number" error={bad.gstin}
+                hint={stateCode ? `State code ${stateCode}, taken from these first two digits`
+                  : 'Its first two digits set the GST state code'}>
+                <input value={f.gstin} style={{ textTransform: 'uppercase' }}
+                  onChange={(e) => set('gstin', e.target.value.toUpperCase())}
+                  maxLength={15} placeholder="33AADCE6591N1Z7" />
+              </LocField>
+              <LocField label="CIN" hint="The MCA registration, if this place has its own">
+                <input value={f.cin} style={{ textTransform: 'uppercase' }}
+                  onChange={(e) => set('cin', e.target.value.toUpperCase())}
+                  placeholder="U17111TZ2011PTC017…" />
+              </LocField>
+            </div>
+          </div>
+
+          {/* ---- 5. open or closed ---- */}
+          <div className="formsec">
+            <h5>Status</h5>
+            <div className="segbar">
+              <button type="button" className={'seg' + (f.active ? ' on' : '')}
+                onClick={() => set('active', true)}>● Active</button>
+              <button type="button" className={'seg' + (!f.active ? ' on' : '')}
+                onClick={() => set('active', false)}>○ Inactive</button>
+            </div>
+            <div className="hint" style={{ marginTop: 'var(--sp-2)' }}>
+              {f.active
+                ? 'Offered wherever a place is chosen — as a destination, on a GRN, in the shop.'
+                : 'Closed: kept on the record with all its history, and no longer offered anywhere.'}
+            </div>
+          </div>
+
+          {kind === 'warehouse' && (
+            <div className="infobox" style={{ marginTop: 'var(--sp-4)' }}>
+              <b>Trades in</b> is the business line — it decides which categories this
+              warehouse’s GRN offers and which attributes its items carry, so a silk
+              warehouse is never asked a garment’s sleeve length. Edit the lines under
+              <b> Masters → Catalogues</b>. A warehouse already holding stock cannot be
+              moved to another line. <b>Type</b> is separate and only describes the
+              place, so a franchise still trades in one of the real lines.
+            </div>
+          )}
           {kind === 'store' && (
-            <div className="infobox" style={{ marginTop: 'var(--sp-3)' }}>
+            <div className="infobox" style={{ marginTop: 'var(--sp-4)' }}>
               Store names are unique across the company and are how the retail shop
               recognises a branch. Renaming one here does not rename it there.
             </div>
           )}
+          {kind === 'terminal' && (
+            <div className="infobox" style={{ marginTop: 'var(--sp-4)' }}>
+              A counter carries its own address and GSTIN because it <b>prints</b> — a
+              counter run under a franchise agreement bills under a different number
+              from the store it stands in. Leave them blank and its bills use the
+              store’s, which is the ordinary case.
+            </div>
+          )}
         </div>
+
         <div className="modal-foot">
-          <button className="btn primary" disabled={!f.name.trim()}
+          <button className="btn primary" disabled={blocked}
             onClick={() => onSave(f)}>{init?.id ? 'Save' : 'Create'}</button>
           <button className="btn" onClick={onClose}>Cancel</button>
+          {blocked && !bad.name && <span className="small" style={{ color: 'var(--warn)' }}>
+            Fix the highlighted field to save</span>}
         </div>
       </div>
     </div>
@@ -10184,11 +10637,21 @@ function Locations({ toast }) {
   const [tree, setTree] = useState(null)
   const [err, setErr] = useState(null)
   const [edit, setEdit] = useState(null)     // {kind, init}
+  const [catalogues, setCatalogues] = useState([])
+  const [options, setOptions] = useState(null)
 
   const load = useCallback(() => api.locationTree()
     .then((r) => { setTree(r.warehouses || []); setErr(null) })
     .catch((e) => setErr(e.status === 404 ? 'restart' : (e.detail || e.message))), [])
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    api.listCatalogues().then((r) => setCatalogues(r.catalogues || [])).catch(() => {})
+    // Swallowed on purpose: the form falls back to the three type words it
+    // ships with and an empty company list, which is a form that still saves.
+    // Losing the whole screen because a lookup 404'd on an older server would
+    // be the worse failure.
+    api.locationFormOptions().then(setOptions).catch(() => {})
+  }, [])
 
   const warehouses = (tree || []).filter((w) => !w.unassigned)
   const allStores = (tree || []).flatMap((w) => w.stores || [])
@@ -10198,8 +10661,22 @@ function Locations({ toast }) {
     catch (e) { toast(e.detail || e.message, 'err') }
   }
 
+  // Every text field is sent as a STRING, empty ones included, never dropped.
+  // The server reads `null` as "not mentioned, leave the column alone" — which
+  // is what lets the close-a-branch button PATCH {name, active} without wiping
+  // an address — so omitting a field the person deliberately cleared would
+  // silently refuse to clear it.
+  const TEXT = ['loc_type', 'address', 'address2', 'city', 'district', 'state',
+    'country', 'pincode', 'contact_person', 'phone', 'email', 'gstin', 'cin']
+
   const save = (kind, init, f) => {
-    const body = { name: f.name.trim(), code: f.code.trim() || null, address: f.address?.trim() || null }
+    const body = { name: f.name.trim(), code: f.code.trim() || null, active: !!f.active }
+    for (const k of TEXT) body[k] = (f[k] ?? '').trim()
+    // 0, not null, for "no company of its own — inherit". null would mean "not
+    // mentioned" and would make the blank option unable to clear a business
+    // that had already been set.
+    body.business_id = f.business_id ? +f.business_id : 0
+    if (kind === 'warehouse') body.catalogue_id = f.catalogue_id
     if (kind === 'store') body.warehouse_id = f.warehouse_id
     if (kind === 'terminal') body.store_id = f.store_id
     if (init?.id) {
@@ -10302,12 +10779,1069 @@ function Locations({ toast }) {
 
       {edit && (
         <LocationEditor kind={edit.kind} init={edit.init} warehouses={warehouses}
-          stores={allStores} onClose={() => setEdit(null)}
+          stores={allStores} catalogues={catalogues} options={options}
+          onClose={() => setEdit(null)}
           onSave={(f) => save(edit.kind, edit.init?.id ? edit.init : null, f)} />
       )}
     </div>
   )
 }
+
+// ==========================================================================
+//  Choose a warehouse
+//  ------------------------------------------------------------------------
+//  The way into a building for anyone who cannot open the Central Dashboard —
+//  which is admin-only, while this app is mostly used by the floor. Without
+//  this screen a warehouse user signing in has no route into any warehouse at
+//  all: the company menu offers them almost nothing, and the access-denied
+//  panel sends them back to a screen they may not have.
+//
+//  It reads GET /api/locations, which the floor may already call and which the
+//  server narrows to the warehouses this account is allotted. So the list IS
+//  the allotment — a manager tied to one building sees exactly one card.
+// ==========================================================================
+function ChooseWarehouse({ onEnter, user }) {
+  const [rows, setRows] = useState(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    api.locationTree()
+      .then((t) => setRows((t.warehouses || []).filter((w) => w.id && w.active !== false)))
+      .catch((e) => setErr(e.detail || e.message))
+  }, [])
+
+  return (
+    <div className="screen scrolls">
+      <div className="pagehead"><h2>Choose a warehouse</h2></div>
+      <div className="screenbody">
+        <div className="infobox" style={{ marginBottom: 'var(--sp-4)' }}>
+          Every screen after this one shows <b>one warehouse's</b> work — its
+          deliveries, its stock, its dispatches. Pick the building you are
+          standing in.
+        </div>
+        {err && <div className="warnbox"><h4>Could not read the warehouses</h4>
+          <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div></div>}
+        {rows === null && !err && <div className="empty">Loading…</div>}
+        {rows && rows.length === 0 && (
+          <div className="empty" style={{ marginTop: 40, lineHeight: 1.7 }}>
+            <b>No warehouse is allotted to {user}.</b><br />
+            Ask a super admin to tick one for you in Users &amp; Access.
+          </div>
+        )}
+        <div className="dgrid">
+          {(rows || []).map((w) => (
+            <button key={w.id} className="dtile" style={{ textAlign: 'left' }}
+              title={`Work inside ${w.name}`} onClick={() => onEnter(w)}>
+              <span className="lbl">{w.code || 'Warehouse'}</span>
+              <span className="val long">{w.name}</span>
+              <span className="sub">
+                {w.catalogue ? w.catalogue + ' · ' : ''}
+                {(w.stores || []).length} store(s) · Open →
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ==========================================================================
+//  Central Dashboard — every warehouse, from one place
+//  ------------------------------------------------------------------------
+//  The company-wide view: what is standing where, what it is worth, and what
+//  moved. The Dashboard beside it answers "what needs doing today" for the
+//  warehouse in front of you; this one answers "how is the whole operation
+//  doing", which is a different question asked by a different person.
+//
+//  The warehouse picker scopes the tiles, the movement figures and the chart —
+//  but never the table. The table is how somebody switches warehouse, and
+//  filtering it to the one already chosen would leave no way back.
+//
+//  One request feeds all of it (/api/locations/overview). A screen with six
+//  tiles, a table and two charts that fetched each part separately would open
+//  in N round trips.
+// ==========================================================================
+function CentralDashboard({ toast, go, onEnter }) {
+  const [ov, setOv] = useState(null)
+  const [err, setErr] = useState(null)
+  const [scope, setScope] = useState(null)      // warehouse id, or null for all
+  const [days, setDays] = useState(14)
+  const [busy, setBusy] = useState(false)
+
+  const [sales, setSales] = useState(null)
+  const load = useCallback(() => api.locationOverview(days, scope)
+    .then((r) => { setOv(r); setErr(null) })
+    .catch((e) => setErr(e.status === 404 ? 'restart' : (e.detail || e.message))),
+  [days, scope])
+  useEffect(() => { load() }, [load])
+  // Fetched on its own, and its failure is its own. The shop is a second
+  // database; if it is switched off this section says so while everything above
+  // it still draws.
+  useEffect(() => {
+    api.storeSales(days, scope)
+      .then(setSales)
+      .catch((e) => setSales({ available: false, reason: e.detail || e.message }))
+  }, [days, scope])
+
+  const rebuild = async () => {
+    setBusy(true)
+    try {
+      const r = await api.rebuildStock()
+      toast(`✓ Recomputed ${r.products_rebuilt} product(s) from the movement ledger`, 'ok')
+      await load()
+    } catch (e) { toast(e.detail || e.message, 'err') }
+    setBusy(false)
+  }
+
+  if (err === 'restart') return (
+    <div className="screen scrolls">
+      <div className="pagehead"><h2>Central Dashboard</h2></div>
+      <div className="screenbody"><div className="warnbox" style={{ maxWidth: 620 }}>
+        <h4>The server needs restarting</h4>
+        <div className="small" style={{ color: 'var(--text-2)', lineHeight: 1.5 }}>
+          <code>/api/locations/overview</code> is registered when Python starts,
+          and this server was started before it existed. Stop it and run it again.
+        </div></div></div>
+    </div>
+  )
+
+  const rows = ov?.warehouses || []
+  const t = ov?.totals || {}
+  const scoped = rows.find((w) => w.warehouse_id === scope)
+  // Only warehouses that actually hold something are charted. A bar of zero is
+  // ink that says nothing, and four of them crowd out the one that has stock.
+  const valued = rows.filter((w) => w.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .map((w) => ({ label: w.name, value: w.value }))
+  const s = ov?.series
+  const stores = ov?.stores || []
+  const tf = ov?.transfers || { totals: {}, warehouses: [] }
+
+  return (
+    <div className="screen scrolls">
+      <div className="pagehead">
+        <h2>Central Dashboard</h2>
+        <span className="spacer" />
+        <select value={scope || ''} style={{ minWidth: 200 }}
+          onChange={(e) => setScope(e.target.value ? +e.target.value : null)}
+          title="Scope the tiles and the chart to one warehouse">
+          <option value="">All warehouses</option>
+          {rows.map((w) => (
+            <option key={w.warehouse_id} value={w.warehouse_id}>{w.name}</option>
+          ))}
+        </select>
+        <select value={days} style={{ minWidth: 120 }}
+          onChange={(e) => setDays(+e.target.value)}
+          title="How far back the movement chart looks">
+          <option value={7}>Last 7 days</option>
+          <option value={14}>Last 14 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+        </select>
+        <button className="btn" onClick={load}>Refresh</button>
+      </div>
+
+      <div className="screenbody">
+        {err && <div className="warnbox" style={{ marginBottom: 14 }}>
+          <h4>The dashboard could not be read</h4>
+          <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div></div>}
+
+        {!ov ? <div className="empty" style={{ marginTop: 40 }}>Loading…</div> : (
+          <>
+            <div className="dgrid" style={{ marginBottom: 'var(--sp-4)' }}>
+              <DashTile label="Total Warehouses" value={t.warehouses ?? 0}
+                sub={scoped ? scoped.name : 'active'}
+                hint="Warehouses that are open. A closed one keeps its history and stops being offered."
+                onClick={() => go && go('locations')} />
+              <DashTile label="Total Stores / POS" value={t.stores ?? 0}
+                sub={scope ? 'supplied by this warehouse' : 'active'}
+                hint="Stores that sell. Their stock lives in the shop's own till database."
+                onClick={() => go && go('locations')} />
+              <DashTile label="Total Inventory (Qty)" value={fmtQty(t.qty)}
+                sub={`${t.items ?? 0} distinct item(s)`}
+                hint="Units on hand, counted in each product's own unit."
+                onClick={() => go && go('inventory')} />
+              <DashTile label="Total Value" value={'₹ ' + money(t.value)}
+                sub="at weighted-average cost"
+                hint="Quantity × the warehouse's own average cost, summed."
+                onClick={() => go && go('inventory')} />
+              <DashTile label="Today's Inward" value={fmtQty(ov.today?.inward)}
+                sub="units received" tone={ov.today?.inward ? 'ok' : ''}
+                hint="Everything that added stock today — receipts and transfers in."
+                onClick={() => go && go('purchases')} />
+              <DashTile label="Today's Outward" value={fmtQty(ov.today?.outward)}
+                sub="units dispatched" tone={ov.today?.outward ? 'ok' : ''}
+                hint="Everything that removed stock today — dispatches, transfers out, returns."
+                onClick={() => go && go('outward')} />
+            </div>
+
+            <Section id="cd.overview" title="Warehouse Overview"
+              summary={`${rows.length} warehouse(s)`}>
+              <div className="tablewrap">
+                <table className="items">
+                  <thead><tr>
+                    <th>Warehouse</th><th>Code</th><th>Location</th><th>Trades in</th>
+                    <th className="num">Stores / POS</th>
+                    <th className="num">Stock (Qty)</th>
+                    <th className="num">Stock Value</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr></thead>
+                  <tbody>
+                    {!rows.length && (
+                      <tr><td colSpan={9} className="small" style={{ padding: 16 }}>
+                        No warehouses yet. Add one under Locations.</td></tr>
+                    )}
+                    {rows.map((w) => (
+                      <tr key={w.warehouse_id}
+                        className={w.warehouse_id === scope ? 'sel' : ''}
+                        style={{ cursor: 'pointer' }}
+                        title="Scope this dashboard to this warehouse"
+                        onClick={() => setScope(w.warehouse_id === scope ? null : w.warehouse_id)}>
+                        <td><b>{w.name}</b></td>
+                        <td className="mono small">{w.code || '—'}</td>
+                        <td className="small">{w.address || '—'}</td>
+                        <td className="small">{w.catalogue || '—'}</td>
+                        <td className="num">{w.store_count}</td>
+                        <td className="num mono">{fmtQty(w.qty)}</td>
+                        <td className="num mono">₹ {money(w.value)}</td>
+                        <td>{w.active
+                          ? <span className="badge confirmed">Active</span>
+                          : <span className="badge review">Closed</span>}</td>
+                        {/* The way IN. Everything from here — LR entry, invoices,
+                            GRN, inventory, labels, outward, inward, returns —
+                            then shows this warehouse's work and nobody else's. */}
+                        <td><button className="btn primary" style={{ padding: '2px 10px' }}
+                          title={`Work inside ${w.name} — every screen shows only its own`}
+                          onClick={(e) => { e.stopPropagation(); onEnter && onEnter(w) }}>
+                          Open →</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="items-foot">
+                <span>{rows.length} warehouse(s)</span>
+                <span>Σ qty <b>{fmtQty(sum(rows, (r) => r.qty))}</b></span>
+                <span>Σ value <b>₹ {money(sum(rows, (r) => r.value))}</b></span>
+                <span className="spacer" />
+                <button className="btn" disabled={busy} onClick={rebuild}
+                  title="Recompute every warehouse balance from the movement ledger. Always safe — the ledger is the source of truth and this only rebuilds the running totals from it.">
+                  {busy ? 'Recomputing…' : 'Recompute from ledger'}</button>
+              </div>
+            </Section>
+
+            {/* ---- Stores / POS, under the warehouse that supplies each ---- */}
+            <Section id="cd.stores" title="Stores / POS"
+              summary={`${stores.length} store(s)`}
+              actions={<button className="btn" style={{ padding: '2px 9px' }}
+                onClick={() => go && go('reports')}
+                title="Open the Stores / POS by Warehouse report">Report →</button>}>
+              <div className="tablewrap">
+                <table className="items">
+                  <thead><tr>
+                    <th>Store / POS</th><th>Code</th><th>Warehouse</th>
+                    <th>Trades in</th><th>Type</th>
+                    <th className="num">Tills</th><th>Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {!stores.length && (
+                      <tr><td colSpan={7} className="small" style={{ padding: 16 }}>
+                        No stores yet. Add them under Locations.</td></tr>
+                    )}
+                    {stores.map((s) => (
+                      <tr key={s.id}>
+                        <td><b>{s.name}</b></td>
+                        <td className="mono small">{s.code || '—'}</td>
+                        <td className="small">{s.warehouse || '(not assigned)'}</td>
+                        <td className="small">{s.catalogue || '—'}</td>
+                        <td className="small" title={s.terminals
+                          ? 'Has a till, so it can bill'
+                          : 'No till — it holds stock but cannot bill'}>{s.type}</td>
+                        <td className="num">{s.terminals}</td>
+                        <td>{s.active
+                          ? <span className="badge confirmed">Active</span>
+                          : <span className="badge review">Closed</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="items-foot">
+                <span>{stores.length} store(s)</span>
+                <span>Σ tills <b>{sum(stores, (s) => s.terminals)}</b></span>
+              </div>
+            </Section>
+
+            {/* ---- What the shops sold, per branch ---- */}
+            <Section id="cd.sales" title="POS Sales by Store"
+              summary={sales?.available
+                ? `₹ ${money(sales.totals?.net)} net`
+                : 'the till could not be read'}
+              actions={<button className="btn" style={{ padding: '2px 9px' }}
+                onClick={() => go && go('reports')}
+                title="Open the Sales by Store report">Report →</button>}>
+              {!sales ? <div className="empty" style={{ padding: 20 }}>Loading…</div>
+                : !sales.available ? (
+                  <div className="warnbox">
+                    <h4>No sales figures</h4>
+                    <div className="small" style={{ color: 'var(--text-2)' }}>
+                      {sales.reason || 'The shop could not be read.'} Everything
+                      above is the warehouse's own ledger and is unaffected.
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="dgrid" style={{ marginBottom: 'var(--sp-3)' }}>
+                      <DashTile label="Net Sales" value={'₹ ' + money(sales.totals?.net)}
+                        sub={`last ${days} days`}
+                        hint="Billed less returns, across every shop." />
+                      <DashTile label="Bills" value={sales.totals?.bills ?? 0}
+                        sub={`${sales.totals?.stores ?? 0} store(s) selling`}
+                        hint="Bills raised at a branch in this window." />
+                      <DashTile label="Units Sold" value={fmtQty(sales.totals?.units)}
+                        sub="net of returns" />
+                      <DashTile label="Returns" value={'₹ ' + money(sales.totals?.returns)}
+                        tone={sales.totals?.returns ? 'warn' : ''}
+                        sub="credit notes" />
+                    </div>
+                    <div className="tablewrap">
+                      <table className="items">
+                        <thead><tr><th>Store</th><th>Warehouse</th>
+                          <th className="num">Bills</th><th className="num">Units</th>
+                          <th className="num">Gross</th><th className="num">Returns</th>
+                          <th className="num">Net</th><th>Last sale</th></tr></thead>
+                        <tbody>
+                          {!(sales.stores || []).length && (
+                            <tr><td colSpan={8} className="small" style={{ padding: 16 }}>
+                              No shop sales in this window.</td></tr>
+                          )}
+                          {(sales.stores || []).map((s) => (
+                            <tr key={s.store}>
+                              <td><b>{s.store}</b></td>
+                              <td className="small">{s.warehouse || '—'}</td>
+                              <td className="num">{s.bills}</td>
+                              <td className="num mono">{fmtQty(s.units)}</td>
+                              <td className="num mono">₹ {money(s.gross)}</td>
+                              <td className="num mono">₹ {money(s.returns)}</td>
+                              <td className="num mono"><b>₹ {money(s.net)}</b></td>
+                              <td className="small">{fmtDate(s.last_sale)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {/* Never folded into the totals — a branch the two systems
+                        spell differently, and its money is real. Said out loud
+                        because a figure that quietly vanished is unfindable. */}
+                    {(sales.unmatched || []).length > 0 && (
+                      <div className="warnbox" style={{ marginTop: 12 }}>
+                        <h4>{sales.unmatched.length} branch(es) not recognised</h4>
+                        <div className="small" style={{ color: 'var(--text-2)' }}>
+                          The till sold ₹ {money(sales.unmatched.reduce(
+                            (a, u) => a + u.net, 0))} at{' '}
+                          {sales.unmatched.map((u) => `“${u.store}”`).join(', ')},
+                          which matches no store here. The two are linked by NAME —
+                          rename the store under Locations to match, and this money
+                          joins the totals above.
+                        </div>
+                      </div>
+                    )}
+                    {sales.unplaced?.bills > 0 && (
+                      <div className="items-foot">
+                        <span className="small">Plus {sales.unplaced.bills} bill(s)
+                          worth ₹ {money(sales.unplaced.net)} raised before the till
+                          recorded a branch — real money, belonging to no store.</span>
+                      </div>
+                    )}
+                  </>
+                )}
+            </Section>
+
+            {/* ---- Transfers between our own places ---- */}
+            <Section id="cd.transfers" title="Stock Transfers"
+              summary={`${tf.totals?.transfers || 0} warehouse transfer(s)`}
+              actions={<button className="btn" style={{ padding: '2px 9px' }}
+                onClick={() => go && go('reports')}
+                title="Open the Stock Transfer Register report">Report →</button>}>
+              <div className="dgrid" style={{ marginBottom: 'var(--sp-3)' }}>
+                <DashTile label="Warehouse Transfers" value={tf.totals?.transfers ?? 0}
+                  sub={`last ${s?.days || days} days`}
+                  hint="Movements between two of your own warehouses."
+                  onClick={() => go && go('outward')} />
+                <DashTile label="Sent to Stores" value={tf.totals?.to_store ?? 0}
+                  sub="dispatch notes"
+                  hint="Goods sent to a shop. Its own till database owns them from there."
+                  onClick={() => go && go('outward')} />
+                <DashTile label="Units Moved" value={fmtQty(tf.totals?.qty_moved)}
+                  sub="dispatched in the window"
+                  hint="Everything that actually left a warehouse — drafts excluded." />
+                <DashTile label="In Transit" value={fmtQty(tf.totals?.in_transit)}
+                  tone={tf.totals?.in_transit ? 'warn' : ''}
+                  sub="not yet counted in"
+                  hint="Dispatched between warehouses and not yet accepted at the far end — standing in neither building."
+                  onClick={() => go && go('inward')} />
+              </div>
+              <div className="tablewrap">
+                <table className="items">
+                  <thead><tr><th>Warehouse</th>
+                    <th className="num">Sent out</th>
+                    <th className="num">To stores</th>
+                    <th className="num">Received in</th>
+                    <th className="num">In transit to it</th>
+                    <th className="num">Notes</th></tr></thead>
+                  <tbody>
+                    {!(tf.warehouses || []).length && (
+                      <tr><td colSpan={6} className="small" style={{ padding: 16 }}>
+                        Nothing has moved between places in this window.</td></tr>
+                    )}
+                    {(tf.warehouses || []).map((w) => (
+                      <tr key={w.warehouse_id}>
+                        <td><b>{w.name}</b></td>
+                        <td className="num mono">{fmtQty(w.sent)}</td>
+                        <td className="num mono">{fmtQty(w.to_stores)}</td>
+                        <td className="num mono">{fmtQty(w.received)}</td>
+                        <td className="num mono"
+                          style={{ color: w.in_transit ? 'var(--danger)' : undefined }}>
+                          {fmtQty(w.in_transit)}</td>
+                        <td className="num">{w.documents}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Section>
+
+            <div className="vizgrid">
+              <ChartCard title="Net Sales by Store"
+                note={sales?.available
+                  ? `Billed less returns, last ${days} days.`
+                  : 'The till could not be read.'}
+                columns={['Store', 'Net']}
+                rows={(sales?.stores || []).map((s) => [s.store, '₹ ' + money(s.net)])}>
+                {(sales?.stores || []).some((s) => s.net > 0)
+                  ? <HBars unit="rupees" rows={(sales.stores || [])
+                    .filter((s) => s.net > 0)
+                    .map((s) => ({ label: s.store, value: s.net }))} />
+                  : <div className="empty" style={{ padding: 30 }}>
+                      {sales?.available === false
+                        ? 'No sales figures — the shop could not be read.'
+                        : 'No shop sales in this window.'}</div>}
+              </ChartCard>
+
+              <ChartCard title="Shop Sales per Day"
+                note={`Net takings across the shops, last ${days} days.`}
+                columns={['Day', 'Net']}
+                rows={(sales?.series?.labels || []).map((l, i) =>
+                  [l, '₹ ' + money(sales.series.net[i])])}>
+                {(sales?.series?.net || []).some(Boolean)
+                  ? <LineChart labels={sales.series.labels} values={sales.series.net}
+                    unit="rupees" valueFmt={(v) => '₹ ' + money(v)} />
+                  : <div className="empty" style={{ padding: 30 }}>
+                      Nothing sold in this window.</div>}
+              </ChartCard>
+            </div>
+
+            <div className="vizgrid">
+              <ChartCard title="Stores per Warehouse"
+                note="How many shops each warehouse supplies. A warehouse with none is stocking, not supplying."
+                columns={['Warehouse', 'Stores']}
+                rows={rows.map((w) => [w.name, w.store_count])}>
+                {rows.some((w) => w.store_count > 0)
+                  ? <HBars unit="stores" rows={rows.filter((w) => w.store_count > 0)
+                    .sort((a, b) => b.store_count - a.store_count)
+                    .map((w) => ({ label: w.name, value: w.store_count }))} />
+                  : <div className="empty" style={{ padding: 30 }}>
+                      No stores are assigned to a warehouse yet.</div>}
+              </ChartCard>
+
+              <ChartCard title="Transfers by Warehouse"
+                legend={<Legend items={[
+                  { label: 'Sent out', color: 'var(--viz-1)' },
+                  { label: 'Received in', color: 'var(--viz-2)' },
+                  { label: 'In transit', color: 'var(--viz-3)' }]} />}
+                note={`Units moved between your own places over the last ${s?.days || days} days.`}
+                columns={['Warehouse', 'Sent', 'Received', 'In transit']}
+                rows={(tf.warehouses || []).map((w) => [w.name, fmtQty(w.sent),
+                  fmtQty(w.received), fmtQty(w.in_transit)])}>
+                {(tf.warehouses || []).length
+                  ? <GroupedBars unit="units"
+                    labels={(tf.warehouses || []).map((w) => w.name)}
+                    series={[
+                      { name: 'Sent out', values: tf.warehouses.map((w) => w.sent) },
+                      { name: 'Received in', values: tf.warehouses.map((w) => w.received) },
+                      { name: 'In transit', values: tf.warehouses.map((w) => w.in_transit) },
+                    ]} />
+                  : <div className="empty" style={{ padding: 30 }}>
+                      Nothing has moved between places in this window.</div>}
+              </ChartCard>
+            </div>
+
+            <div className="vizgrid">
+              <ChartCard title="Stock Value by Warehouse"
+                note={scope ? `Scoped to ${scoped?.name}. Clear the filter to compare.` : null}
+                columns={['Warehouse', 'Value']}
+                rows={valued.map((r) => [r.label, '₹ ' + money(r.value)])}>
+                {valued.length
+                  ? <HBars rows={valued} unit="rupees" />
+                  : <div className="empty" style={{ padding: 30 }}>
+                      No stock is valued yet. Post a GRN and it appears here.</div>}
+              </ChartCard>
+
+              <ChartCard title="Inward vs Outward"
+                legend={<Legend items={[
+                  { label: 'Inward', color: 'var(--viz-1)' },
+                  { label: 'Outward', color: 'var(--viz-2)' }]} />}
+                note={`Units moved per day over the last ${s?.days || days} days`
+                  + (scope ? ` at ${scoped?.name}` : '')
+                  + `. Σ in ${fmtQty(ov.window?.inward)} · Σ out ${fmtQty(ov.window?.outward)}.`}
+                columns={['Day', 'Inward', 'Outward']}
+                rows={(s?.labels || []).map((l, i) => [l, fmtQty(s.inward[i]), fmtQty(s.outward[i])])}>
+                {s && (s.inward.some(Boolean) || s.outward.some(Boolean))
+                  ? <GroupedBars labels={s.labels} unit="units" series={[
+                      { name: 'Inward', values: s.inward },
+                      { name: 'Outward', values: s.outward }]} />
+                  : <div className="empty" style={{ padding: 30 }}>
+                      Nothing moved in this window.</div>}
+              </ChartCard>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Quantities are floats but are read as counts: 12 rather than 12.0, and 12.5
+// kept when a half really is a half.
+function fmtQty(v) {
+  const n = +v || 0
+  return Number.isInteger(n) ? n.toLocaleString('en-IN')
+    : n.toLocaleString('en-IN', { maximumFractionDigits: 3 })
+}
+
+// ==========================================================================
+//  Catalogues — what each warehouse trades in
+//  ------------------------------------------------------------------------
+//  Essa receives garments and Taqua receives silks. The PROCESS over them is
+//  identical — LR entry, invoice entry, GRN, inventory, labels, outward,
+//  inward, POS — and none of it differs. What differs is the NOUNS: the
+//  categories a receiving clerk picks from, the attributes an item carries,
+//  and the values those attributes offer.
+//
+//  So a catalogue is a business line, not a building. Essa, Palakkad and
+//  Madurai can all stock garments and share one list maintained once; Taqua
+//  points at its own. See backend/app/services/catalogues.py.
+// ==========================================================================
+function TagList({ values, onAdd, onRemove, placeholder }) {
+  const [draft, setDraft] = useState('')
+  const add = () => {
+    // A comma-separated paste is how somebody enters twenty colours at once,
+    // and splitting it here is the difference between that and twenty clicks.
+    const parts = draft.split(',').map((s) => s.trim()).filter(Boolean)
+    if (!parts.length) return
+    onAdd(parts)
+    setDraft('')
+  }
+  return (
+    <div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+        {!values.length && <span className="small" style={{ color: 'var(--text-2)' }}>
+          Nothing offered yet — type the first value below.</span>}
+        {values.map((v) => (
+          <span key={v} className="badge" style={{ display: 'inline-flex', gap: 6 }}>
+            {v}
+            <button className="link" title="Remove from the list"
+              onClick={() => onRemove(v)}>×</button>
+          </span>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input value={draft} placeholder={placeholder || 'Add a value — or paste several, comma separated'}
+          style={{ flex: 1 }} onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add() } }} />
+        <button className="btn" onClick={add} disabled={!draft.trim()}>Add</button>
+      </div>
+    </div>
+  )
+}
+
+// Upload a master out of a file, and SHOW WHAT IT FOUND before writing it.
+//
+// Two steps, always. Reading a spreadsheet is a guess about somebody's layout,
+// and a guess that silently added four hundred wrong values to a live master
+// would not be noticed until products had been classified against them. So the
+// first call previews (the server writes nothing) and the second commits what
+// was just shown.
+function ImportBox({ label, hint, accept, onPreview, onCommit, onDone, toast }) {
+  const [file, setFile] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const input = useRef(null)
+
+  const reset = () => {
+    setFile(null); setPreview(null)
+    if (input.current) input.current.value = ''
+  }
+
+  const pick = async (f) => {
+    if (!f) return
+    setFile(f); setPreview(null); setBusy(true)
+    try { setPreview(await onPreview(f)) }
+    catch (e) { toast(e.detail || e.message, 'err'); reset() }
+    setBusy(false)
+  }
+
+  const commit = async () => {
+    setBusy(true)
+    try {
+      const r = await onCommit(file)
+      toast(r.message || 'Imported', 'ok')
+      reset()
+      onDone && onDone()
+    } catch (e) { toast(e.detail || e.message, 'err') }
+    setBusy(false)
+  }
+
+  return (
+    <div className="infobox" style={{ marginTop: 'var(--sp-3)' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b>{label}</b>
+        <input ref={input} type="file" accept={accept} style={{ flex: 1, minWidth: 220 }}
+          onChange={(e) => pick(e.target.files?.[0])} />
+        {busy && <span className="small">Reading…</span>}
+      </div>
+      <div className="small" style={{ color: 'var(--text-2)', marginTop: 6 }}>{hint}</div>
+      {preview && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--line)' }}>
+          {preview.body}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button className="btn primary" disabled={busy || !preview.canCommit}
+              onClick={commit}>{preview.cta}</button>
+            <button className="btn" disabled={busy} onClick={reset}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// The download half. Two links rather than a format dropdown: there are exactly
+// two answers, and a dropdown plus a button is three clicks for what should be
+// one. What comes down is a file ImportBox reads back, so this is also how you
+// get a correctly-headed template for a master you have not built yet.
+function DownloadLinks({ url, label }) {
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+      <span className="small" style={{ color: 'var(--text-2)' }}>{label}</span>
+      <a className="btn" style={{ padding: '2px 9px' }} href={url('xlsx')}
+        title="Download as an Excel workbook — edit it and upload it back">Excel</a>
+      <a className="btn" style={{ padding: '2px 9px' }} href={url('csv')}
+        title="Download as CSV">CSV</a>
+    </span>
+  )
+}
+
+const ACCEPT = '.xlsx,.xlsm,.csv,.tsv,.txt,.pdf'
+const FILE_HINT = 'Excel (.xlsx), CSV or PDF. A PDF is read as one value per line — '
+  + 'a spreadsheet is read properly and is always the better file if you have one.'
+
+function Catalogues({ toast }) {
+  const [list, setList] = useState([])
+  const [columnAttrs, setColumnAttrs] = useState([])
+  const [selId, setSelId] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [err, setErr] = useState(null)
+  const [creating, setCreating] = useState(false)
+  const [nf, setNf] = useState({ code: '', name: '', description: '' })
+  const [newAttr, setNewAttr] = useState('')
+  const [newCat, setNewCat] = useState('')
+  const [openAttr, setOpenAttr] = useState(null)
+
+  const load = useCallback(() => api.listCatalogues()
+    .then((r) => {
+      setList(r.catalogues || [])
+      setColumnAttrs(r.column_attributes || [])
+      setErr(null)
+      setSelId((cur) => cur || (r.catalogues || []).find((c) => c.is_default)?.id
+        || (r.catalogues || [])[0]?.id || null)
+    })
+    .catch((e) => setErr(e.status === 404 ? 'restart' : (e.detail || e.message))), [])
+  useEffect(() => { load() }, [load])
+
+  const loadDetail = useCallback(() => {
+    if (!selId) { setDetail(null); return }
+    api.getCatalogue(selId).then(setDetail).catch((e) => toast(e.detail || e.message, 'err'))
+  }, [selId, toast])
+  useEffect(() => { loadDetail() }, [loadDetail])
+
+  const run = async (fn, ok) => {
+    try { await fn(); await load(); loadDetail(); if (ok) toast(ok, 'ok') }
+    catch (e) { toast(e.detail || e.message, 'err') }
+  }
+
+  const create = () => {
+    if (!nf.code.trim() || !nf.name.trim()) { toast('A catalogue needs a code and a name', 'err'); return }
+    run(async () => {
+      const c = await api.createCatalogue({
+        code: nf.code.trim(), name: nf.name.trim(),
+        description: nf.description.trim() || null })
+      setSelId(c.id); setCreating(false); setNf({ code: '', name: '', description: '' })
+    }, 'Catalogue created — now add its attributes and categories')
+  }
+
+  if (err === 'restart') return (
+    <div className="screen scrolls">
+      <div className="pagehead"><h2>Catalogues</h2></div>
+      <div className="screenbody"><div className="warnbox" style={{ maxWidth: 620 }}>
+        <h4>The server needs restarting</h4>
+        <div className="small" style={{ color: 'var(--text-2)', lineHeight: 1.5 }}>
+          <code>/api/catalogues</code> is registered when Python starts, and this
+          server was started before catalogues existed. Stop it and run it again.
+        </div></div></div>
+    </div>
+  )
+
+  const known = new Set((detail?.attributes || []).map((a) => a.key))
+
+  return (
+    <div className="screen scrolls">
+      <div className="pagehead">
+        <h2>Catalogues</h2>
+        <span className="spacer" />
+        <button className="btn primary" onClick={() => setCreating(true)}>+ New catalogue</button>
+      </div>
+      <div className="screenbody">
+        <div className="infobox" style={{ marginBottom: 'var(--sp-4)' }}>
+          A <b>catalogue</b> is a line of business — what a warehouse actually deals
+          in. It owns the <b>categories</b> its GRN offers and the <b>attributes</b> its
+          items carry, so a silk warehouse is never asked a garment’s sleeve length.
+          Any number of warehouses can share one. Assign them under <b>Locations</b>.
+        </div>
+
+        {err && <div className="warnbox" style={{ marginBottom: 14 }}>
+          <h4>Catalogues could not be read</h4>
+          <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div></div>}
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 'var(--sp-4)' }}>
+          {list.map((c) => (
+            <button key={c.id} className={'btn' + (c.id === selId ? ' primary' : '')}
+              onClick={() => setSelId(c.id)}>
+              {c.name}
+              <span className="small" style={{ marginLeft: 6, opacity: 0.75 }}>
+                {c.category_count} cat · {c.attribute_count} attr · {c.warehouse_count} wh</span>
+              {c.is_default && <span className="badge" style={{ marginLeft: 6 }}>default</span>}
+              {c.active === false && <span className="badge review" style={{ marginLeft: 6 }}>off</span>}
+            </button>
+          ))}
+        </div>
+
+        {detail && (
+          <>
+            <Section id="cat.about" title={`${detail.name} · ${detail.code}`}
+              summary={`${detail.product_count} product(s) filed under it`}>
+              <div className="kv" style={{ gridTemplateColumns: '150px 1fr' }}>
+                <div className="k">Description</div><div>{detail.description || '—'}</div>
+                <div className="k">Warehouses</div>
+                <div>{detail.warehouses?.length
+                  ? detail.warehouses.map((w) => w.name).join(', ')
+                  : <span className="small">None yet — assign one under Locations.</span>}</div>
+              </div>
+              {!detail.is_default && (
+                <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                  <button className="btn" onClick={() => run(
+                    () => api.updateCatalogue(detail.id, { active: detail.active === false }),
+                    detail.active === false ? 'Reopened' : 'Switched off')}>
+                    {detail.active === false ? 'Reopen' : 'Switch off'}</button>
+                  <button className="btn" onClick={() => {
+                    if (!window.confirm(`Delete “${detail.name}”? Only possible while nothing is filed under it.`)) return
+                    run(async () => { await api.deleteCatalogue(detail.id); setSelId(null) }, 'Deleted')
+                  }}>Delete</button>
+                </div>
+              )}
+            </Section>
+
+            <Section id="cat.attrs" title="Attributes"
+              summary={`${detail.attributes?.length || 0} recorded against each item`}
+              actions={<DownloadLinks label="Download all"
+                url={(f) => api.attributesFileUrl(detail.id, f)} />}>
+              <div className="small" style={{ color: 'var(--text-2)', marginBottom: 10 }}>
+                What this line records about an item. A name the stock master already
+                has a column for — colour, size, brand and the rest — is stored there
+                and is visible to every existing screen and label. Anything else is
+                stored against the item itself, no release needed.
+              </div>
+              <div className="tablewrap">
+                <table className="items">
+                  <thead><tr><th>Attribute</th><th>Key</th><th>Stored</th>
+                    <th>Values offered</th><th></th></tr></thead>
+                  <tbody>
+                    {!(detail.attributes || []).length && (
+                      <tr><td colSpan={5} className="small" style={{ padding: 14 }}>
+                        No attributes yet. Add the ones this trade actually records.</td></tr>
+                    )}
+                    {(detail.attributes || []).map((a) => (
+                      <tr key={a.key}>
+                        <td><b>{a.label}</b></td>
+                        <td className="mono small">{a.key}</td>
+                        <td className="small" title={a.stored === 'column'
+                          ? 'A column on the stock master — shared with every other line and visible to every screen'
+                          : 'Stored against the item itself, so this line can record it without a schema change'}>
+                          {a.stored === 'column' ? 'stock master column' : 'item attribute'}</td>
+                        <td>
+                          <button className="link"
+                            onClick={() => setOpenAttr(openAttr === a.key ? null : a.key)}>
+                            {(detail.options?.[a.key] || []).length} value(s)
+                            {openAttr === a.key ? ' ▴' : ' ▾'}</button>
+                          {openAttr === a.key && (
+                            <div style={{ marginTop: 8 }}>
+                              <TagList values={detail.options?.[a.key] || []}
+                                onAdd={(vals) => run(
+                                  () => api.setAttrOptions(detail.id, a.key, vals))}
+                                onRemove={(v) => run(
+                                  () => api.removeAttrOption(detail.id, a.key, v))} />
+                              <div style={{ marginTop: 8 }}>
+                                <DownloadLinks label={`Download ${a.label} list`}
+                                  url={(f) => api.attrOptionsFileUrl(detail.id, a.key, f)} />
+                              </div>
+                              {/* The individual counterpart to the bulk import
+                                  below: somebody has this one attribute's list
+                                  and only this one. */}
+                              <ImportBox toast={toast} accept={ACCEPT}
+                                label={`Import ${a.label} values`}
+                                hint={`A single column of ${a.label.toLowerCase()} values. `
+                                  + `A first row naming the attribute is skipped. ` + FILE_HINT}
+                                onPreview={async (f) => {
+                                  const r = await api.importAttrOptions(detail.id, a.key, f, false)
+                                  return {
+                                    canCommit: r.values_new > 0,
+                                    cta: `Add ${r.values_new} value(s)`,
+                                    body: (
+                                      <div className="small">
+                                        <b>{r.values_in_file}</b> value(s) in {r.source},
+                                        {' '}<b>{r.values_new}</b> not already listed.
+                                        {r.sample.length > 0 && <div style={{ marginTop: 6 }}>
+                                          {r.sample.join(', ')}
+                                          {r.values_new > r.sample.length && ' …'}</div>}
+                                      </div>
+                                    ),
+                                  }
+                                }}
+                                onCommit={async (f) => {
+                                  const r = await api.importAttrOptions(detail.id, a.key, f, true)
+                                  return { message: `✓ ${a.label}: ${r.options.length} value(s) now listed` }
+                                }}
+                                onDone={loadDetail} />
+                            </div>
+                          )}
+                        </td>
+                        <td><button className="btn" style={{ padding: '2px 7px' }}
+                          title="Stop recording this. Items already carrying a value keep it."
+                          onClick={() => run(() => api.removeCatalogueAttr(detail.id, a.key),
+                            'Attribute switched off')}>×</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 10, alignItems: 'center' }}>
+                <input list="cat-colattrs" value={newAttr} placeholder="e.g. weave, zari, border — or pick a stock master column"
+                  style={{ flex: 1 }} onChange={(e) => setNewAttr(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && newAttr.trim()) {
+                    e.preventDefault()
+                    run(() => api.addCatalogueAttr(detail.id, { key: newAttr.trim() }), 'Attribute added')
+                    setNewAttr('') } }} />
+                <datalist id="cat-colattrs">
+                  {columnAttrs.filter((c) => !known.has(c.key))
+                    .map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                </datalist>
+                <button className="btn" disabled={!newAttr.trim()} onClick={() => {
+                  run(() => api.addCatalogueAttr(detail.id, { key: newAttr.trim() }), 'Attribute added')
+                  setNewAttr('')
+                }}>+ Add attribute</button>
+              </div>
+
+              <ImportBox toast={toast} accept={ACCEPT}
+                label="Import attributes in bulk"
+                hint={'One column per attribute with its name as the heading (Colour, Size, Weave…) '
+                  + 'and its values beneath — or two columns headed Attribute and Value. '
+                  + FILE_HINT}
+                onPreview={async (f) => {
+                  const r = await api.importAttributes(detail.id, f, false)
+                  const some = r.new_attributes > 0 || r.new_values > 0
+                  return {
+                    canCommit: some,
+                    cta: `Import ${r.new_attributes} attribute(s) · ${r.new_values} value(s)`,
+                    body: (
+                      <>
+                        <div className="small" style={{ marginBottom: 8 }}>
+                          Found <b>{r.attributes.length}</b> attribute(s) in
+                          {' '}<b>{r.source}</b>.
+                          {!some && ' Everything in it is already in this catalogue.'}
+                        </div>
+                        <div className="tablewrap">
+                          <table className="items">
+                            <thead><tr><th>Attribute</th><th>Stored</th>
+                              <th className="num">In file</th><th className="num">New</th>
+                              <th>First few new values</th></tr></thead>
+                            <tbody>{r.attributes.map((a) => (
+                              <tr key={a.key}>
+                                <td><b>{a.label}</b> <span className="mono small">{a.key}</span>
+                                  {a.new_attribute && <span className="badge" style={{ marginLeft: 6 }}>new</span>}</td>
+                                <td className="small">{a.stored === 'column'
+                                  ? 'stock master column' : 'item attribute'}</td>
+                                <td className="num">{a.values_in_file}</td>
+                                <td className="num">{a.values_new}</td>
+                                <td className="small">{a.sample.join(', ') || '—'}</td>
+                              </tr>
+                            ))}</tbody>
+                          </table>
+                        </div>
+                      </>
+                    ),
+                  }
+                }}
+                onCommit={async (f) => {
+                  const r = await api.importAttributes(detail.id, f, true)
+                  return { message: `✓ ${r.new_attributes} attribute(s) and `
+                    + `${r.new_values} value(s) imported` }
+                }}
+                onDone={() => { load(); loadDetail() }} />
+            </Section>
+
+            <Section id="cat.cats" title="Categories"
+              summary={`${detail.categories?.length || 0} in this line's master`}
+              actions={<DownloadLinks label="Download"
+                url={(f) => api.categoriesFileUrl(detail.id, f)} />}>
+              <div className="small" style={{ color: 'var(--text-2)', marginBottom: 10 }}>
+                What a GRN in this line may classify an item as. A warehouse whose
+                catalogue has none offers none — which is the prompt to build it,
+                not a reason to file its goods under another trade’s list.
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                {!(detail.categories || []).length && (
+                  <span className="small" style={{ color: 'var(--text-2)' }}>
+                    Nothing yet — add this trade’s categories below.</span>
+                )}
+                {(detail.categories || []).map((c) => (
+                  <span key={c.id} className="badge" style={{ display: 'inline-flex', gap: 6 }}>
+                    {c.name}
+                    <button className="link" title="Remove from this master"
+                      onClick={() => run(() => api.removeCatalogueCategory(detail.id, c.id),
+                        'Removed')}>×</button>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input value={newCat} placeholder="e.g. SILK-SAREE — or paste several, comma separated"
+                  style={{ flex: 1 }} onChange={(e) => setNewCat(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCats() } }} />
+                <button className="btn" disabled={!newCat.trim()} onClick={() => addCats()}>
+                  + Add category</button>
+              </div>
+
+              <ImportBox toast={toast} accept={ACCEPT}
+                label="Import categories"
+                hint={'A column of category names, and a Section column if you have one '
+                  + '(OVERALL / KIDS / LADIES / MENS). Names are stored in capitals. '
+                  + FILE_HINT}
+                onPreview={async (f) => {
+                  const r = await api.importCategories(detail.id, f, false)
+                  return {
+                    canCommit: r.new > 0,
+                    cta: `Import ${r.new} categor${r.new === 1 ? 'y' : 'ies'}`,
+                    body: (
+                      <div className="small">
+                        <b>{r.in_file}</b> name(s) in {r.source} — <b>{r.new}</b> new,
+                        {' '}{r.already_there} already in this catalogue.
+                        {r.sample.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                            {r.sample.map((c) => (
+                              <span key={c.name} className="badge">{c.name}
+                                {c.section && c.section !== 'OVERALL'
+                                  && <span className="text-muted"> · {c.section}</span>}</span>
+                            ))}
+                            {r.new > r.sample.length && <span className="small">
+                              …and {r.new - r.sample.length} more</span>}
+                          </div>
+                        )}
+                      </div>
+                    ),
+                  }
+                }}
+                onCommit={async (f) => {
+                  const r = await api.importCategories(detail.id, f, true)
+                  return { message: `✓ ${r.new} categor${r.new === 1 ? 'y' : 'ies'} imported` }
+                }}
+                onDone={() => { load(); loadDetail() }} />
+            </Section>
+          </>
+        )}
+      </div>
+
+      {creating && (
+        <div className="modal-back" onClick={() => setCreating(false)}>
+          <div className="modal" style={{ width: 'min(520px, 100%)' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><b>New catalogue</b>
+              <button className="modal-x" onClick={() => setCreating(false)}>×</button></div>
+            <div className="modal-body">
+              <div className="mgrid">
+                <div className="field"><label>Code</label>
+                  <input autoFocus value={nf.code} placeholder="SILKS"
+                    onChange={(e) => setNf({ ...nf, code: e.target.value.toUpperCase() })} /></div>
+                <div className="field"><label>Name</label>
+                  <input value={nf.name} placeholder="Silks"
+                    onChange={(e) => setNf({ ...nf, name: e.target.value })} /></div>
+                <div className="field" style={{ gridColumn: '1 / -1' }}><label>Description</label>
+                  <input value={nf.description} placeholder="Sarees, dhotis and silk fabric"
+                    onChange={(e) => setNf({ ...nf, description: e.target.value })} /></div>
+              </div>
+              <div className="infobox" style={{ marginTop: 'var(--sp-3)' }}>
+                It starts <b>empty</b>. Nobody but the people who trade in this line
+                knows what belongs in it, and a guessed list is one somebody has to
+                delete before they can build the real one.
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn primary" onClick={create}>Create</button>
+              <button className="btn" onClick={() => setCreating(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
+  function addCats() {
+    const parts = newCat.split(',').map((s) => s.trim()).filter(Boolean)
+    if (!parts.length) return
+    run(async () => {
+      for (const name of parts) await api.addCatalogueCategory(detail.id, { name })
+    }, `${parts.length} categor${parts.length === 1 ? 'y' : 'ies'} added`)
+    setNewCat('')
+  }
+}
+
+// ==========================================================================
+//  Two altitudes, two menus
+//  ------------------------------------------------------------------------
+//  COMPANY level is for looking ACROSS the business: how the warehouses
+//  compare, where one item is, what the registers say, which places exist and
+//  who may sign in. Nothing operational — there is no such thing as "receive
+//  goods" without a building to receive them into, and offering GRN with no
+//  warehouse chosen is offering a form whose most important field is missing.
+//
+//  WAREHOUSE level is the day's work, and it is everything else. The two
+//  company screens that manage warehouses themselves (the comparison, and the
+//  list of places) drop away, because neither has an answer from inside one.
+//
+//  So the menu is not one list with things greyed out. It is two lists, and
+//  which one you get says where you are standing.
+// ==========================================================================
+const COMPANY_ONLY = new Set(['central', 'locations'])
+
+//: The whole company-level menu. Anything not here needs a warehouse first.
+const COMPANY_LEVEL = new Set(['central', 'locator', 'reports', 'locations', 'users'])
 
 const ROLE_RANK = { user: 1, admin: 2, superadmin: 3 }
 const ROLE_LABEL = { user: 'User', admin: 'Admin', superadmin: 'Super Admin' }
@@ -10315,6 +11849,10 @@ const rank = (role) => ROLE_RANK[role] || 0
 const atLeast = (role, need) => rank(role) >= rank(need)
 
 const MODULES = [
+  // Drawn at the very top of the menu, above the warehouse Dashboard — see the
+  // NavMenu items below, which hoists it out of this list. It stays HERE so it
+  // is gated like every other module rather than being a special case.
+  { key: 'central', icon: '🏦', label: 'Central Dashboard', blurb: 'Every warehouse at once — stock, value and what moved', min: 'admin' },
   { key: 'lr', icon: '🚚', label: 'LR Entry', blurb: 'The transport register — consignments as they arrive' },
   { key: 'documents', icon: '🧾', label: 'Invoice Entry', blurb: 'Read a supplier invoice and review what came off it' },
   { key: 'purchases', icon: '📋', label: 'GRN', blurb: 'Receive against an invoice — count, claim shortages, post' },
@@ -10338,6 +11876,10 @@ const MODULES = [
   { key: 'reports', icon: '📊', label: 'Reports', blurb: 'Every register, filtered and exportable', min: 'admin' },
   { key: 'suppliers', icon: '🏭', label: 'Suppliers', blurb: 'Supplier master and trained invoice formats', min: 'admin' },
   { key: 'masters', icon: '⚙', label: 'Masters', blurb: 'Categories, agents, transporters and the dropdown lists', min: 'admin' },
+  // Beside Locations because they answer two halves of one question: Locations
+  // is WHERE this company trades, Catalogues is WHAT each of those places
+  // trades in.
+  { key: 'catalogues', icon: '📚', label: 'Catalogues', blurb: 'What each warehouse deals in — its categories, its attributes and their values', min: 'admin' },
   { key: 'locations', icon: '🏢', label: 'Locations', blurb: 'Warehouses, the stores they supply, and the tills at each store', min: 'admin' },
   { key: 'users', icon: '👤', label: 'Users & Access', blurb: 'Who can sign in, and how much of this they see', min: 'superadmin' },
 ]
@@ -10390,7 +11932,7 @@ const POS_ITEMS = [POS_HOME, null, ...POS_SCREENS]
 
 // One frame, keyed on the path so choosing another screen from the menu loads
 // it rather than leaving the frame on whatever it had drifted to.
-function PosScreen({ screen, available, error }) {
+function PosScreen({ screen, available, error, warehouse: wh }) {
   if (available === false) return (
     <div className="empty" style={{ margin: 40, maxWidth: 620 }}>
       <p><b>The POS module is not loaded.</b></p>
@@ -10400,9 +11942,16 @@ function PosScreen({ screen, available, error }) {
         and restart the server.</p>
     </div>
   )
+  // `wh` scopes the till to the warehouse this frame was opened from: the shop
+  // remembers it and offers only the branches that warehouse supplies. Sent as a
+  // query parameter because a frame cannot carry a header, and only on the first
+  // load of each screen — the shop keeps it in its own session from there.
+  const src = '/pos' + screen.path
+    + (wh?.id ? (screen.path.includes('?') ? '&' : '?') + 'wh=' + wh.id : '')
   return (
     <div className="posframe">
-      <iframe key={screen.path} src={'/pos' + screen.path} title={'POS — ' + screen.label} />
+      <iframe key={screen.path + ':' + (wh?.id || '')} src={src}
+        title={'POS — ' + screen.label} />
     </div>
   )
 }
@@ -11280,6 +12829,34 @@ export default function App() {
   // someone works in, and losing it on every refresh is a small daily tax
   const [tab, setTabState] = useState(() => localStorage.getItem('essa_tab') || 'dashboard')
   const setTab = (t) => { setTabState(t); try { localStorage.setItem('essa_tab', t) } catch { /* private mode */ } }
+  // Which warehouse this session is working INSIDE, or null for the whole
+  // company. Every API call carries it as a header (see api.js), so the screens
+  // below need no per-screen plumbing — but they DO need to refetch when it
+  // changes, which is what keying the content on `here.id` achieves: React
+  // remounts them and each one loads its own data again. Anything subtler would
+  // leave one screen showing the warehouse you just left.
+  const [here, setHere] = useState(() => warehouse.get())
+  const enterWarehouse = (w) => {
+    // The dashboard's rows key their id as `warehouse_id`, the Locations tree as
+    // `id`. Normalised here so callers can hand over whichever row they have
+    // rather than every one of them remembering which shape it holds.
+    warehouse.set(w && { id: w.id || w.warehouse_id, name: w.name,
+                         code: w.code, catalogue: w.catalogue })
+    setHere(warehouse.get())
+    setSel(null); setSelPurchase(null)
+    // Leaving lands on whichever company screen this account can actually have:
+    // the Central Dashboard for an admin, the warehouse picker for the floor.
+    setTab(w ? 'dashboard' : (atLeast(role, 'admin') ? 'central' : 'pickwh'))
+  }
+  // Both the warehouse and the open tab survive a reload, and they can come back
+  // contradicting each other — signed out on the Central Dashboard while inside
+  // Taqua, then signed back in. Hiding the menu entry is not enough on its own:
+  // it would leave somebody looking at a company screen with no way to see they
+  // had left the warehouse behind. So the tab is corrected, not just the menu.
+  // NOTE: the tab/warehouse reconciliation that used to sit here has moved
+  // BELOW `role` — it reads it, and `const` is not hoisted like `var`, so
+  // running it up here threw "Cannot access 'role' before initialization" on
+  // every render. The whole app came up blank.
   const [status, setStatus] = useState(null)
   const [docs, setDocs] = useState([])
   const [sel, setSel] = useState(null)
@@ -11311,6 +12888,25 @@ export default function App() {
   //: the role decides on its own — see services/permissions.has_map.
   const [perms, setPerms] = useState({})
   const [showPassword, setShowPassword] = useState(false)
+
+  // Where an account lands when it is outside every warehouse. The Central
+  // Dashboard is the natural home, but it is ADMIN — and for a floor user it
+  // would be a dead end: the menu offers them almost nothing at company level,
+  // the effect would send them to `central`, and the "needs Admin access" panel's
+  // only button sends them back again. A loop with no way into any building. So
+  // an account that cannot open `central` gets the warehouse PICKER instead.
+  //
+  // Placed AFTER `role` deliberately — it reads it, and reading a `const` above
+  // its declaration is a TDZ throw, not undefined.
+  const canCentral = atLeast(role, 'admin')
+  const homeTab = canCentral ? 'central' : 'pickwh'
+  // The warehouse and the open tab are remembered separately and can come back
+  // contradicting each other, so the tab is corrected, not just the menu.
+  useEffect(() => {
+    if (here && COMPANY_ONLY.has(tab)) { setTab('dashboard'); return }
+    if (!here && tab !== 'pickwh' && !COMPANY_LEVEL.has(tab)) setTab(homeTab)
+    if (!here && tab === 'central' && !canCentral) setTab('pickwh')
+  }, [here, tab, canCentral, homeTab])
 
   const refreshStatus = useCallback(() => api.status().then(setStatus), [])
   const refresh = useCallback(() => api.listDocuments().then(setDocs), [])
@@ -11434,7 +13030,14 @@ export default function App() {
   // it is that nobody is shown twelve buttons that answer "not for you".
   const granted = perms?.screens || null
   const modules = MODULES.filter((m) => (!m.min || atLeast(role, m.min))
-    && (!granted || (granted[m.key] || []).length))
+    && (!granted || (granted[m.key] || []).length)
+    // Company-level screens are hidden once you are standing inside a warehouse.
+    // Neither has an answer at that altitude: the Central Dashboard compares
+    // every warehouse, and Locations is where warehouses are created and closed.
+    // Offering them from inside one invites the reading that they are showing
+    // that warehouse — and a person who opens Locations expecting Taqua's
+    // settings and edits the company's list has been misled by the menu.
+    && (here ? !COMPANY_ONLY.has(m.key) : COMPANY_LEVEL.has(m.key)))
   const isSuper = atLeast(role, 'superadmin')
   // A `pos:` tab is a screen of the shop rather than one of ours, and is served
   // in a frame — so it is answered before the warehouse chain below.
@@ -11478,12 +13081,24 @@ export default function App() {
             typing a bill out is the fallback for the one that has no usable
             picture. Same label and glyph as LR Entry's, because it is the same
             gesture — start a record by hand. */}
-        <button className="btn" onClick={onNewEntry}
-          title="Key an invoice in by hand — for one with no scan, or dictated over the phone">
-          📄 New entry</button>
-        <label className="btn primary uploadbtn"
-          title="One invoice. Pick both pages together if it is printed on more than one.">
-          Upload invoice<input type="file" accept="image/*,.pdf" multiple onChange={onUpload} /></label>
+        {/* Both of these CREATE AN INVOICE, and an invoice belongs to the
+            warehouse whose desk keyed it — that is what stamps
+            Document.warehouse_id (see routers/documents). Raised from the
+            company view they would land unassigned, showing up on every
+            warehouse's queue and belonging to none; raised from Inventory or
+            Reports they are a gesture with no obvious home.
+
+            So they appear where they mean something: inside a warehouse, on the
+            Invoice Entry screen. Hidden rather than disabled — a permanently
+            greyed button on nine screens out of ten is furniture nobody reads. */}
+        {here && tab === 'documents' && <>
+          <button className="btn" onClick={onNewEntry}
+            title={`Key an invoice in by hand for ${here.name} — for one with no scan, or dictated over the phone`}>
+            📄 New entry</button>
+          <label className="btn primary uploadbtn"
+            title={`One invoice for ${here.name}. Pick both pages together if it is printed on more than one.`}>
+            Upload invoice<input type="file" accept="image/*,.pdf" multiple onChange={onUpload} /></label>
+        </>}
         {/* Who you are signed in as, and at what level. On a shared warehouse
             terminal the second half is the load-bearing one: it is the answer
             to "why can I not see Reports today", visible without asking. */}
@@ -11497,25 +13112,70 @@ export default function App() {
           rules (nowrap above all) reach into the menu's own buttons and stop the
           descriptions wrapping. There is no strip left to style anyway. */}
       <div className="navbar">
-        <NavMenu tab={tab} setTab={setTab} items={[DASHBOARD, null, ...modules]}
-          icon="🏬" label="Warehouse" hint="Every warehouse screen" />
-        <span className="navsep" aria-hidden="true" />
-        <NavMenu tab={tab} setTab={setTab} items={POS_ITEMS}
-          icon="🛍" label="POS" hint="The retail shop — billing, floor sales and shop stock" />
+        {/* WHERE YOU ARE. Loud on purpose: every screen to the right of this is
+            showing one warehouse's work, and a person who has forgotten which
+            will post a receipt into the wrong building. Absent when nobody has
+            gone inside one, so a single-warehouse shop never sees it. */}
+        {here ? (
+          <>
+            <span className="badge confirmed" title={'Working inside ' + here.name}
+              style={{ marginRight: 2 }}>
+              🏢 {here.name}{here.code ? ' · ' + here.code : ''}</span>
+            <button className="btn" style={{ padding: '2px 9px' }}
+              title="Leave this warehouse and go back to the company view"
+              onClick={() => enterWarehouse(null)}>Exit</button>
+            <span className="navsep" aria-hidden="true" />
+          </>
+        ) : null}
+        {/* Central Dashboard sits ABOVE the warehouse Dashboard, and the two are
+            grouped before the separator: they are the same kind of screen at two
+            altitudes — the whole company, then the building in front of you.
+            Hoisted out of `modules` rather than declared separately so it keeps
+            that list's role and permission gating: an account that may not see
+            it simply has no entry to hoist. */}
+        {/* The warehouse Dashboard belongs to a warehouse, so it is only in the
+            list once you are inside one. At company level the Central Dashboard
+            leads, and there is no second dashboard to confuse it with. */}
+        <NavMenu tab={tab} setTab={setTab}
+          items={here
+            ? [DASHBOARD, null, ...modules]
+            : [...modules.filter((m) => m.key === 'central'), null,
+              ...modules.filter((m) => m.key !== 'central')]}
+          icon="🏬" label={here ? 'Warehouse' : 'Company'}
+          hint={here ? `Everything at ${here.name}` : 'The whole business'} />
+        {/* A till belongs to a STORE, and a store belongs to a warehouse. So POS
+            is reachable from inside the warehouse that supplies it, and the
+            frame is told which — see the `wh` parameter, which limits the till's
+            own branch picker to that warehouse's shops. */}
+        {here && <>
+          <span className="navsep" aria-hidden="true" />
+          <NavMenu tab={tab} setTab={setTab} items={POS_ITEMS}
+            icon="🛍" label="POS"
+            hint={`The shops ${here.name} supplies — billing, floor sales and shop stock`} />
+        </>}
       </div>
 
+      {/* Keyed on the warehouse. Switching one remounts every screen below, so
+          each refetches its own data under the new context — the alternative is
+          asking fifty components to notice a change, and the one that forgets
+          quietly shows the warehouse you just left. */}
+      <React.Fragment key={'wh-' + (here?.id || 'all')}>
       {denied ? (
         <div className="body"><div className="empty" style={{ margin: 'auto', maxWidth: 420, lineHeight: 1.7 }}>
           <div style={{ fontSize: 26, marginBottom: 6 }}>{denied.icon}</div>
           <b>{denied.label}</b> needs {ROLE_LABEL[denied.min]} access.<br />
           You are signed in as <b>{user}</b> ({ROLE_LABEL[role] || role}).
           <div style={{ marginTop: 12 }}>
-            <button className="btn primary" onClick={() => setTab('dashboard')}>Back to the dashboard</button>
+            {/* Back to somewhere this account can actually be. Sending them to
+                'dashboard' bounced a floor user straight back here. */}
+            <button className="btn primary"
+              onClick={() => setTab(here ? 'dashboard' : homeTab)}>
+              {here ? 'Back to the dashboard' : 'Choose a warehouse'}</button>
           </div>
         </div></div>
       ) : posScreen ? (
         <PosScreen screen={posScreen} available={status?.pos?.available}
-          error={status?.pos?.error} />
+          error={status?.pos?.error} warehouse={here} />
       ) : tab === 'dashboard' ? (
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
           docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
@@ -11597,6 +13257,12 @@ export default function App() {
         // module from its MODULES entry, so this cannot drift out of step with
         // the menu the way a second copy of the rule would.
         <Masters toast={toast} />
+      ) : tab === 'pickwh' ? (
+        <ChooseWarehouse onEnter={enterWarehouse} user={user} />
+      ) : tab === 'central' ? (
+        <CentralDashboard toast={toast} go={setTab} onEnter={enterWarehouse} />
+      ) : tab === 'catalogues' ? (
+        <Catalogues toast={toast} />
       ) : tab === 'locations' ? (
         <Locations toast={toast} />
       ) : tab === 'users' ? (
@@ -11609,6 +13275,7 @@ export default function App() {
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
           docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
       )}
+      </React.Fragment>
 
       {scanning && <ScanningOverlay url={scanning.url} name={scanning.name}
         vision={!!providers.claude_vision} />}

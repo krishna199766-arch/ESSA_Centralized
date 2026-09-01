@@ -12,6 +12,7 @@ from ..config import DATA_DIR
 from ..services import inventory as inv
 from ..services import barcode_svc
 from ..services import stock_view
+from ..services import scope
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
@@ -26,7 +27,14 @@ class ProductDetail(BaseModel):
 
     The full attribute set Essa keeps against its stock — the columns of the
     stock master (Attributes Reference.xlsx): brand, colour, pattern, style, fit,
-    sleeve, type, material, size."""
+    sleeve, type, material, size.
+
+    `attrs` carries anything this item's CATALOGUE records that the stock master
+    has no column for — a saree's weave, its zari, its border. Keys the catalogue
+    does not declare are ignored rather than stored: a value nothing can display
+    is not data. See services/catalogues.write_attrs.
+    """
+    attrs: Optional[dict] = None
     color: Optional[str] = None
     size: Optional[str] = None
     pattern: Optional[str] = None
@@ -97,6 +105,31 @@ def _base_options():
 BASE_OPTIONS = _base_options()
 
 
+def _localise(d: dict, db: Session, product, wid):
+    """Restate a product payload as THIS warehouse sees it.
+
+    Inside a warehouse the word "Stock" on a screen means that warehouse's
+    stock — a picker at Erode reading the company total would pick goods that
+    are standing in Karur. So `stock_qty`, `avg_cost` and `stock_value` are
+    replaced with the local figures, and the company-wide ones are kept beside
+    them under their own names rather than thrown away: "we have none here but
+    forty elsewhere" is the answer to a shortage, and it is only reachable if
+    both numbers survive.
+    """
+    if not wid or product is None:
+        return d
+    from ..services import stock_locations as stock_loc
+    qty = stock_loc.qty_at(db, product.id, wid)
+    cost = stock_loc.cost_at(db, product.id, wid)
+    return {**d,
+            "company_stock_qty": d.get("stock_qty"),
+            "company_stock_value": d.get("stock_value"),
+            "stock_qty": qty, "avg_cost": cost,
+            "stock_value": round(qty * cost, 2),
+            "warehouse_id": wid,
+            "stock_elsewhere": round(float(product.stock_qty or 0) - qty, 3)}
+
+
 def _product_out(p: models.Product, ctx=None):
     """One product. `ctx` adds its provenance and whether its labels may print —
     passed in by the callers that already built one, so a list of 500 products
@@ -131,13 +164,42 @@ def _product_fields(p: models.Product):
         "brand": p.brand, "style": p.style, "sleeve": p.sleeve,
         "sale_price": p.sale_price, "sale_discount_pct": p.sale_discount_pct,
         "category": p.category, "category_section": p.category_section,
+        # Which business line this item belongs to, and the attributes its line
+        # records that have no column above. Carried on every product payload so
+        # a screen can draw a saree's weave beside a t-shirt's sleeve without
+        # knowing in advance which it is looking at.
+        "catalogue_id": p.catalogue_id,
+        "attrs": p.attrs if isinstance(p.attrs, dict) else {},
         "detailed": bool(p.detailed), "detailed_by": p.detailed_by,
         "detailed_at": p.detailed_at.isoformat() if p.detailed_at else None,
     }
 
 
 @router.get("/summary")
-def summary(db: Session = Depends(get_db)):
+def summary(db: Session = Depends(get_db),
+            wid: Optional[int] = Depends(scope.current)):
+    """Headline stock figures, for this warehouse when inside one.
+
+    Not the company's totals divided up — the warehouse's own balances, summed.
+    A workspace showing the company valuation under a heading that names one
+    building would be the most expensive kind of wrong number to have on a
+    screen."""
+    if wid:
+        from ..services import stock_locations as stock_loc
+        rows = stock_loc.stock_at(db, wid)
+        ids = {r["product_id"] for r in rows}
+        detailed = db.query(models.Product).filter(
+            models.Product.id.in_(ids or {0}),
+            models.Product.detailed == True).count()  # noqa: E712
+        return {
+            "product_count": len(rows),
+            "total_units": round(sum(r["qty"] for r in rows), 3),
+            "total_stock_value": round(sum(r["value"] for r in rows), 2),
+            "excluded_products": 0,
+            "detailed": detailed,
+            "pending_detail": len(rows) - detailed,
+            "warehouse_id": wid,
+        }
     s = inv.inventory_summary(db)
     s["detailed"] = db.query(models.Product).filter(models.Product.detailed == True).count()  # noqa: E712
     s["pending_detail"] = s["product_count"] - s["detailed"]
@@ -145,30 +207,64 @@ def summary(db: Session = Depends(get_db)):
 
 
 @router.get("/product-options")
-def product_options(db: Session = Depends(get_db)):
-    """Dropdown option sets for the mobile detail form — base list merged with
-    any distinct values already recorded."""
-    opts = {k: list(v) for k, v in BASE_OPTIONS.items()}
-    fields = {"color": models.Product.color, "size": models.Product.size,
-              "pattern": models.Product.pattern, "fit": models.Product.fit,
-              "product_type": models.Product.product_type, "material": models.Product.material,
-              "brand": models.Product.brand, "style": models.Product.style,
-              "sleeve": models.Product.sleeve, "uom": models.Product.uom}
-    for key, col in fields.items():
+def product_options(warehouse_id: Optional[int] = None,
+                    catalogue_id: Optional[int] = None,
+                    db: Session = Depends(get_db)):
+    """The attribute dropdowns for one business line, and which attributes apply.
+
+    Two things come back, and screens need both:
+
+      * `attributes` — WHICH attributes this catalogue records, in order, with
+        their labels. A silk catalogue has no sleeve and no fit; a form that
+        drew ten garment fields regardless would ask a saree what length its
+        sleeves are.
+      * the option lists themselves, per attribute key.
+
+    Values already recorded against this catalogue's own products are merged in,
+    so a value typed once is offered next time — the list guides, it never gates,
+    and free text stays accepted everywhere.
+
+    Passing neither warehouse nor catalogue answers for the default line, which
+    is exactly what this endpoint has always returned.
+    """
+    from ..services import catalogues as cat_svc
+    if warehouse_id and not catalogue_id:
+        c = cat_svc.for_warehouse(db, warehouse_id)
+        catalogue_id = c.id if c else None
+    catalogue_id = cat_svc.resolve_id(db, catalogue_id)
+
+    attrs = cat_svc.attributes(db, catalogue_id)
+    opts = {k: list(v) for k, v in cat_svc.options(db, catalogue_id).items()}
+
+    # Values this catalogue's products already carry, merged in. Restricted to
+    # its OWN products: offering a silk warehouse every colour a t-shirt has ever
+    # been is how one line's vocabulary leaks into another's.
+    cols = {a["key"]: getattr(models.Product, a["column"])
+            for a in attrs if a["column"]}
+    for key, col in cols.items():
         opts.setdefault(key, [])
         # case-insensitive: the master says "Regular Fit", and a product already
         # carrying "REGULAR FIT" is the same fit, not a second one to offer
         have = {v.strip().lower() for v in opts[key]}
-        seen = {v[0] for v in db.query(col).distinct() if v[0]}
-        for val in sorted(seen):
+        rows = (db.query(col).filter(
+            (models.Product.catalogue_id == catalogue_id)
+            | (models.Product.catalogue_id.is_(None))).distinct().all())
+        for val in sorted({v[0] for v in rows if v[0]}):
             if val.strip().lower() not in have:
                 opts[key].append(val)
                 have.add(val.strip().lower())
+
+    # uom is ours, not a catalogue's — it is the unit-type master's business, and
+    # a metre is a metre whichever trade is measuring in it
+    opts["uom"] = list(BASE_OPTIONS.get("uom") or [])
+    opts["attributes"] = attrs
+    opts["catalogue_id"] = catalogue_id
     return opts
 
 
 @router.get("/products")
-def list_products(status: str = "all", q: str = "", db: Session = Depends(get_db)):
+def list_products(status: str = "all", q: str = "", db: Session = Depends(get_db),
+                  wid: Optional[int] = Depends(scope.current)):
     """status: all | pending (not yet detailed) | detailed | excluded. q: text search.
 
     Stock is only ever created by posting a GRN, so a product that traces back to
@@ -179,7 +275,10 @@ def list_products(status: str = "all", q: str = "", db: Session = Depends(get_db
     exclusion is never silent."""
     from ..services import integrity
     ctx = integrity.Context(db)
-    query = db.query(models.Product)
+    # Only what THIS warehouse has anything to do with. Items whose balance here
+    # has fallen to zero are kept: they are this building's stock lines, and a
+    # list that dropped them the moment they sold out would hide the re-orders.
+    query = scope.products(db, db.query(models.Product), wid)
     if status == "pending":
         query = query.filter((models.Product.detailed == False) | (models.Product.detailed.is_(None)))  # noqa: E712
     elif status == "detailed":
@@ -194,7 +293,7 @@ def list_products(status: str = "all", q: str = "", db: Session = Depends(get_db
         ps = [p for p in ps if ql in (p.description or "").lower()
               or ql in (p.sku or "").lower() or ql in (p.barcode or "").lower()
               or ql in (p.hsn or "").lower()]
-    return [_product_out(p, ctx) for p in ps]
+    return [_localise(_product_out(p, ctx), db, p, wid) for p in ps]
 
 
 @router.get("/products/{prod_id}")
@@ -231,6 +330,12 @@ def detail_product(prod_id: int, body: ProductDetail, db: Session = Depends(get_
     for k in (*inv.SPLIT_ATTRS, "mrp", "sale_price", "sale_discount_pct"):
         if k in data:
             setattr(p, k, data[k])
+    # Whatever this item's own business line records beyond those columns. Routed
+    # through the catalogue so each value lands where that attribute belongs —
+    # and so a key this line does not declare is dropped rather than stored.
+    if data.get("attrs"):
+        from ..services import catalogues as cat_svc
+        cat_svc.write_attrs(db, p, data["attrs"])
     p.detailed = True
     p.detailed_at = dt.datetime.utcnow()
     p.detailed_by = data.get("detailed_by") or p.detailed_by or "mobile"
@@ -542,15 +647,25 @@ def product_qr_payload(prod_id: int, db: Session = Depends(get_db)):
 
 @router.get("/categorize")
 def categorize_description(description: str, section: Optional[str] = None,
-                           limit: int = 5, db: Session = Depends(get_db)):
+                           limit: int = 5, warehouse_id: Optional[int] = None,
+                           catalogue_id: Optional[int] = None,
+                           db: Session = Depends(get_db)):
     """Map a free-text description onto the category master.
 
     `confident` says whether this would be applied automatically; `candidates`
     are the ranked alternatives for a human to choose from when it wouldn't.
-    Pass `section` to force OVERALL/KIDS/LADIES/MENS instead of the detected one."""
+    Pass `section` to force OVERALL/KIDS/LADIES/MENS instead of the detected one.
+
+    Scoped to one business line: pass `warehouse_id` (the natural thing a screen
+    knows) or `catalogue_id` directly. Neither means every category, which is
+    what a single-catalogue install has always meant by the question."""
     from ..services import categorize
+    from ..services import catalogues as cat_svc
+    if warehouse_id and not catalogue_id:
+        c = cat_svc.for_warehouse(db, warehouse_id)
+        catalogue_id = c.id if c else None
     return categorize.suggest(db, description, limit=max(1, min(limit, 25)),
-                              section=section)
+                              section=section, catalogue_id=catalogue_id)
 
 
 @router.post("/products/{prod_id}/categorize")

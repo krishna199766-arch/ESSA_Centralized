@@ -14,6 +14,7 @@ from ..config import UPLOAD_DIR, COMPANY_GSTIN
 from ..extraction import engine
 from ..extraction.base import empty_invoice
 from ..services import storage
+from ..services import scope
 from ..schemas import ConfirmRequest
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -62,8 +63,15 @@ def _doc_out(doc: models.Document):
 
 
 @router.get("")
-def list_documents(db: Session = Depends(get_db)):
-    docs = db.query(models.Document).order_by(models.Document.id.desc()).all()
+def list_documents(db: Session = Depends(get_db),
+                   wid: Optional[int] = Depends(scope.current)):
+    """The invoice queue for the warehouse this call is being made inside.
+
+    Bills with no warehouse — everything keyed before workspaces existed — stay
+    on every queue rather than disappearing from all of them. See services/scope.
+    """
+    q = scope.documents(db.query(models.Document), wid)
+    docs = q.order_by(models.Document.id.desc()).all()
     return [_doc_out(d) for d in docs]
 
 
@@ -199,7 +207,8 @@ def _extract_into(doc: models.Document, db: Session) -> dict:
 
 @router.post("/upload")
 async def upload_and_extract(file: List[UploadFile] = File(...),
-                             db: Session = Depends(get_db)):
+                             db: Session = Depends(get_db),
+                             wid: Optional[int] = Depends(scope.current)):
     """One invoice, one or more pages.
 
     `file` is repeated rather than a second `files` field, so the same endpoint
@@ -226,6 +235,9 @@ async def upload_and_extract(file: List[UploadFile] = File(...),
     doc = models.Document(filename=file[0].filename,
                           stored_path=refs[0], pages=refs,
                           content_hash=content_hash, mime=file[0].content_type,
+                          # Filed to the warehouse whose desk keyed it, so it
+                          # lands on that branch's queue and nobody else's.
+                          warehouse_id=wid,
                           status="uploaded")
     db.add(doc)
     db.commit()
@@ -239,7 +251,8 @@ class ManualIn(BaseModel):
 
 
 @router.post("/manual")
-def create_manual(body: Optional[ManualIn] = None, db: Session = Depends(get_db)):
+def create_manual(body: Optional[ManualIn] = None, db: Session = Depends(get_db),
+                  wid: Optional[int] = Depends(scope.current)):
     """Start an invoice that has no photograph — one keyed in by hand.
 
     Everything else on this screen arrives as an image and is read into the
@@ -266,6 +279,7 @@ def create_manual(body: Optional[ManualIn] = None, db: Session = Depends(get_db)
         # "no image" marker — storage.read("") already answers None, so the
         # image route 404s on its own and _doc_out reports has_image: false.
         stored_path="", pages=[], content_hash=None, mime=None,
+        warehouse_id=wid,
         status="needs_review",
     )
     db.add(doc)

@@ -50,9 +50,12 @@ from . import shortages as shortage_svc
 from . import dates
 
 
-def _next_code(db):
-    n = db.query(models.PurchaseReturn).count() + 1
-    return f"PR-{n:05d}"
+def _next_code(db, warehouse_id=None):
+    from . import numbering
+    return numbering.next_number(
+        db, "debit_note", warehouse_id=warehouse_id,
+        is_taken=lambda code: db.query(models.PurchaseReturn).filter(
+            models.PurchaseReturn.code == code).first() is not None)
 
 
 def _effective_tax_rate(purchase):
@@ -376,13 +379,17 @@ def post(db, ret, reason=None, date=None):
         else:
             prod = db.get(models.Product, l.product_id) if l.product_id else None
             if prod:
-                prod.stock_qty = round((prod.stock_qty or 0) - qty, 3)
-                db.add(models.StockMovement(
-                    product_id=prod.id, qty_delta=-qty, kind="return",
-                    ref_type="purchase_return", ref_id=ret.id,
-                    rate=l.rate or prod.avg_cost or 0, balance_after=prod.stock_qty,
-                    note=f"Purchase return {ret.code} → {ret.supplier.name if ret.supplier else ''}".strip(),
-                ))
+                # Out of the building the GRN received them into. Goods go back to
+                # the supplier from where they are standing, and taking them off a
+                # different warehouse's shelf would leave that one short and this
+                # one holding stock that has already been sent away.
+                from . import stock_locations as stock_loc
+                stock_loc.apply(
+                    db, prod, ret.purchase.warehouse_id if ret.purchase else None,
+                    -qty, kind="return", ref_type="purchase_return", ref_id=ret.id,
+                    rate=l.rate or prod.avg_cost or 0,
+                    note=f"Purchase return {ret.code} → "
+                         f"{ret.supplier.name if ret.supplier else ''}".strip())
         taxable += l.amount or 0
 
     rate = _effective_tax_rate(ret.purchase)

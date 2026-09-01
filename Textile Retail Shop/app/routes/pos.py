@@ -4,11 +4,71 @@ from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
 from app import places, transfers, warehouse_items
-from app.models import (Product, Customer, Invoice, InvoiceItem, StockMovement,
-                        LoyaltyTxn, User)
+from app.models import (Product, Customer, Invoice, InvoiceItem, InvoicePayment,
+                        StockMovement, LoyaltyTxn, User, PAYMENT_METHODS)
 from app.utils import generate_number
 
 pos_bp = Blueprint("pos", __name__)
+
+#: Money is compared to the paisa. Floats do not land exactly on a total built
+#: from percentages, so "did this balance" needs a tolerance rather than ==.
+SETTLE_TOLERANCE = 0.01
+
+
+def parse_payments(data):
+    """The tenders offered for this bill, cleaned. Raises ValueError on nonsense.
+
+    Accepts the new `payments` list — [{method, amount, tendered, reference}] —
+    and falls back to the single `payment_method` this route has always taken, so
+    anything still posting the old shape keeps working. The fallback carries no
+    amount: it means "settle the whole bill this way", and the amount is filled
+    in below once the total is known.
+    """
+    # Whether a settlement was SENT, not whether it has anything in it. An empty
+    # list is a settlement with no money in it and has to be refused; a missing
+    # key is the old single-method shape and falls back. Reading both as "no
+    # payments" let a till bill an empty settlement as cash for the full amount.
+    if "payments" not in data:
+        method = (data.get("payment_method") or "cash").strip().lower()
+        if method not in PAYMENT_METHODS:
+            raise ValueError(f"“{method}” is not a payment method")
+        return None, method              # None = settle the whole total this way
+
+    raw = data.get("payments")
+    if isinstance(raw, str):
+        import json
+        raw = json.loads(raw or "[]")
+    if not raw:
+        raise ValueError("no payment was entered")
+
+    out = []
+    for row in raw:
+        method = (row.get("method") or "").strip().lower()
+        if method not in PAYMENT_METHODS:
+            raise ValueError(f"“{method}” is not a payment method")
+        try:
+            amount = round(float(row.get("amount") or 0), 2)
+            tendered = row.get("tendered")
+            tendered = round(float(tendered), 2) if tendered not in (None, "") else amount
+        except (TypeError, ValueError):
+            raise ValueError("payment amounts must be numbers")
+        if amount <= 0:
+            continue                     # a blank row is not a payment
+        if tendered < amount - SETTLE_TOLERANCE:
+            raise ValueError(f"{method}: {tendered:g} tendered against {amount:g} — "
+                             f"less was handed over than is being settled")
+        if method != "cash" and tendered > amount + SETTLE_TOLERANCE:
+            # Only a drawer gives change. A card or a UPI transfer is for an
+            # exact amount, and recording an over-tender on one would invent
+            # change that nobody handed back.
+            raise ValueError(f"{method} cannot be over-tendered — "
+                             f"it is settled for an exact amount")
+        out.append({"method": method, "amount": amount, "tendered": tendered,
+                    "reference": (row.get("reference") or "").strip() or None})
+    if not out:
+        raise ValueError("no payment was entered")
+    return out, ("mixed" if len({p["method"] for p in out}) > 1
+                 else out[0]["method"])
 
 #: Where the till's Company / Location / Counter choice is kept.
 #:
@@ -28,11 +88,24 @@ def _chosen():
 @pos_bp.route("/")
 @login_required
 def counter():
-    products = Product.query.filter(Product.active == True, Product.stock_qty > 0).order_by(Product.name).all()
+    """The billing counter. Scan-driven: no product list.
+
+    The grid used to render every in-stock product as a tile. On a shop with a
+    few hundred items that is a wall of near-identical names — five tiles reading
+    PILLOW COVER at ₹0.00 tell a cashier nothing about which one is in their hand
+    — and picking off it is how the wrong variant gets billed. The tag on the
+    garment is unambiguous, so the counter takes the scan and nothing else.
+
+    Every product still resolves: `api_product` looks up a SKU, a barcode or a
+    warehouse QR against the whole catalogue, and pulls the item in from the
+    warehouse if the shop has not seen it yet. Dropping the grid removed a
+    listing, not a capability — and it removed a query that loaded the entire
+    catalogue on every page load.
+    """
     customers = Customer.query.order_by(Customer.name).all()
     staff = User.query.filter(User.active.is_(True)).order_by(User.full_name).all()
     company, location, till = _chosen()
-    return render_template("pos/counter.html", products=products,
+    return render_template("pos/counter.html",
                            customers=customers, staff=staff,
                            places=places.picker_options(),
                            chosen_company=company, chosen_location=location,
@@ -146,7 +219,12 @@ def checkout():
         customer_id = int(customer_id) if customer_id else None
         customer = Customer.query.get(customer_id) if customer_id else None
 
-        payment_method = data.get("payment_method", "cash")
+        # Parsed before anything is written, so a malformed settlement is refused
+        # while the cart is still a cart — not after stock has come off the shelf.
+        try:
+            payments, payment_method = parse_payments(data)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
         discount = float(data.get("discount") or 0)
         redeem_points = float(data.get("redeem_points") or 0)
 
@@ -256,6 +334,30 @@ def checkout():
 
         inv.total = round(pre_loyalty_total - loyalty_redeemed_value, 2)
 
+        # ---- settlement -------------------------------------------------------
+        # Checked HERE and nowhere earlier, because this is the first moment the
+        # amount to settle actually exists: the discount and the points redeemed
+        # both come off before it, and a till that balanced its tenders against
+        # the pre-loyalty figure would refuse every sale a customer used points on.
+        if payments is None:
+            # the old single-method shape — settle the whole bill that way
+            payments = [{"method": payment_method, "amount": inv.total,
+                         "tendered": inv.total, "reference": None}]
+        settled = round(sum(p["amount"] for p in payments), 2)
+        if abs(settled - inv.total) > SETTLE_TOLERANCE:
+            db.session.rollback()
+            short = round(inv.total - settled, 2)
+            return jsonify({
+                "error": (f"Payment does not settle the bill — "
+                          f"₹{abs(short):.2f} {'short' if short > 0 else 'over'}. "
+                          f"Bill ₹{inv.total:.2f}, entered ₹{settled:.2f}."),
+                "total": inv.total, "settled": settled, "balance": short}), 400
+        for p in payments:
+            db.session.add(InvoicePayment(
+                invoice_id=inv.id, method=p["method"], amount=p["amount"],
+                tendered=p["tendered"], reference=p["reference"]))
+        inv.payment_method = payment_method
+
         # Loyalty earning
         if customer and inv.total >= current_app.config["LOYALTY_MIN_BILL"]:
             earned = round(inv.total * current_app.config["LOYALTY_EARN_RATE"], 2)
@@ -270,7 +372,12 @@ def checkout():
             customer.total_spent = (customer.total_spent or 0) + inv.total
 
         db.session.commit()
-        return jsonify({"success": True, "invoice_id": inv.id, "invoice_number": inv.invoice_number})
+        return jsonify({"success": True, "invoice_id": inv.id,
+                        "invoice_number": inv.invoice_number,
+                        "total": inv.total, "payment_method": inv.payment_method,
+                        # what to hand back, so the counter can say it out loud
+                        # instead of the cashier working it out on the counter
+                        "change": inv.change_given})
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500

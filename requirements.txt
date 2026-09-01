@@ -40,6 +40,18 @@ anthropic==0.40.0
 python-barcode==0.15.1
 segno==1.6.1
 
+# Reading a master somebody already keeps in a spreadsheet. Categories and
+# attribute vocabularies arrive as .xlsx far more often than they arrive typed,
+# and the alternative to reading one is a person retyping several hundred rows.
+#
+# openpyxl only READS here — nothing writes a workbook — and it is pure Python
+# with one dependency, so it costs a serverless cold start almost nothing.
+# pypdf is for the same job when the list only exists as a PDF; it extracts TEXT,
+# which is honest for a printed list and unreliable for a laid-out table (see
+# services/master_import.py, which says so to the user rather than guessing).
+openpyxl==3.1.5
+pypdf==6.16.2
+
 # Postgres. SQLite is a file, and this runtime has nowhere to keep one.
 psycopg2-binary==2.9.12
 

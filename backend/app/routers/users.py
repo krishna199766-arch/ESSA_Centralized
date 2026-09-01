@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from .. import models
 from ..models import User
 from ..services import permissions as perms_svc, users as users_svc
 
@@ -49,7 +50,9 @@ class PermissionsIn(BaseModel):
     """
     screens: dict[str, list[str]] | None = None
     data: list[str] | None = None
-    locations: list[str] | None = None
+    #: Which warehouses this account may work inside. Ids, and an EMPTY list
+    #: means every warehouse — see services/permissions.allotted.
+    warehouses: list[int] | None = None
 
 
 def _me(request: Request) -> dict:
@@ -81,6 +84,22 @@ def _guard_self(request: Request, user: User) -> None:
                                  "ask another super admin.")
 
 
+def _catalog(db: Session) -> dict:
+    """The access editor's vocabulary: screens, actions, data flags, warehouses.
+
+    ONE builder for both places that serve it. The editor prefers the catalog
+    that rides along with the user list and only fetches /catalog when that one
+    looks empty — so a key added to just the standalone route would never reach
+    the screen. That is exactly how the warehouse ticks went missing the first
+    time this was written.
+    """
+    out = perms_svc.catalog()
+    out["warehouses"] = [
+        {"id": w.id, "name": w.name, "code": w.code, "active": bool(w.active)}
+        for w in db.query(models.Warehouse).order_by(models.Warehouse.name).all()]
+    return out
+
+
 @router.get("")
 def list_users(db: Session = Depends(get_db)):
     rows = db.query(User).order_by(User.active.desc(), User.username).all()
@@ -88,7 +107,7 @@ def list_users(db: Session = Depends(get_db)):
             "roles": [{"value": r, "label": users_svc.ROLE_LABEL[r]} for r in users_svc.ROLES],
             # the screens and actions the editor draws itself from, so the two
             # sides cannot disagree about what a screen is called
-            "catalog": perms_svc.catalog()}
+            "catalog": _catalog(db)}
 
 
 @router.put("/{uid}/permissions")
@@ -103,6 +122,18 @@ def set_permissions(uid: int, body: PermissionsIn, request: Request,
     user = _get(db, uid)
     _guard_self(request, user)
     clean = perms_svc.normalise(body.model_dump())
+    # An id that names no warehouse is dropped — but if the caller named some and
+    # NONE of them survive, that is refused rather than saved. Silently emptying
+    # the list would flip the account from "these two buildings" to "every
+    # building", which is the exact opposite of what was asked for.
+    asked = [int(x) for x in (body.warehouses or [])
+             if str(x).strip().lstrip("-").isdigit() and int(x) > 0]
+    if asked:
+        real = {w.id for w in db.query(models.Warehouse.id).all()}
+        kept = [w for w in clean.get("warehouses", []) if w in real]
+        if not kept:
+            raise HTTPException(400, f"none of those warehouses exist: {asked}")
+        clean["warehouses"] = kept
     user.permissions = clean or None
     db.commit()
     # No token to rotate and nobody to sign out: the middleware resolves the user
@@ -114,9 +145,12 @@ def set_permissions(uid: int, body: PermissionsIn, request: Request,
 
 
 @router.get("/catalog")
-def catalog():
-    """Every screen, action and data flag this app can actually enforce."""
-    return perms_svc.catalog()
+def catalog(db: Session = Depends(get_db)):
+    """Every screen, action, data flag and warehouse this app can enforce.
+
+    The warehouses ride along so the access editor can offer them without a
+    second call — and so it shows the same names the rest of the app does."""
+    return _catalog(db)
 
 
 @router.post("")

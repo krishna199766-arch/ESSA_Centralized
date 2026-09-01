@@ -89,12 +89,8 @@ def next_entry_no(db, taken=()):
     for (v,) in db.query(models.LREntry.lr_entry_no).filter(
             models.LREntry.lr_entry_no.isnot(None)).all():
         used.add(v)
-    high = 0
-    for v in used:
-        s = str(v or "")
-        if s.startswith("LRE-") and s[4:].isdigit():
-            high = max(high, int(s[4:]))
-    return f"LRE-{high + 1:05d}"
+    from . import numbering
+    return numbering.next_number(db, "lr", is_taken=lambda code: code in used)
 
 
 def _sample_rows():

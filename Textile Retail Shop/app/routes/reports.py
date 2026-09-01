@@ -110,16 +110,25 @@ def index():
         *where,
     ).group_by(Product.id).order_by(func.sum(InvoiceItem.line_total + InvoiceItem.tax_amount).desc()).limit(10).all()
 
-    # Payment breakdown
-    pay_rows = db.session.query(
-        Invoice.payment_method,
-        func.count(Invoice.id),
-        func.coalesce(func.sum(Invoice.total), 0)
-    ).filter(
-        func.date(Invoice.invoice_date) >= start,
-        func.date(Invoice.invoice_date) <= end,
-        *where,
-    ).group_by(Invoice.payment_method).all()
+    # Payment breakdown, by TENDER rather than by the invoice's one-word label.
+    #
+    # Grouping on Invoice.payment_method was right while a bill had exactly one.
+    # It is not any more: a bill settled half on a card is labelled "mixed", and
+    # that put its whole value in a bucket of its own — the cash line understated
+    # by the cash actually taken, and the drawer no longer reconciling to the
+    # report. So the split comes off the settlement rows, and `Invoice.settled`
+    # falls back to the single method for every bill raised before them.
+    pay_totals, pay_counts = {}, {}
+    for inv in invoices:
+        for method, amount in inv.settled.items():
+            pay_totals[method] = round(pay_totals.get(method, 0.0) + amount, 2)
+            # Counted as a bill this tender appeared on. A split bill therefore
+            # counts once under cash and once under card, which is the honest
+            # answer to "how many sales took a card" — not to "how many sales",
+            # which is `invoice_count` above.
+            pay_counts[method] = pay_counts.get(method, 0) + 1
+    pay_rows = [(m, pay_counts[m], pay_totals[m])
+                for m in sorted(pay_totals, key=lambda k: -pay_totals[k])]
 
     # GST summary
     gst_summary = {

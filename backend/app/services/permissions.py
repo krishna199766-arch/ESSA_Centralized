@@ -43,6 +43,10 @@ ACTION_KEYS = [a for a, _, _ in ACTIONS]
 #: under; `min` repeats the role floor from security.POLICY so the editor can say
 #: WHY a box it is showing will not take effect for this user.
 SCREENS = [
+    # The company-wide view. Admin, because it puts every warehouse's stock
+    # valuation on one screen — which is a different thing from the floor
+    # dashboard beside it, and a different audience.
+    ("central",    "Central Dashboard", "Warehouse", "admin"),
     ("dashboard",  "Warehouse Dashboard", "Warehouse", None),
     ("lr",         "Transport / LR Entry", "Warehouse", None),
     ("documents",  "Invoice Entry", "Warehouse", None),
@@ -58,6 +62,7 @@ SCREENS = [
     ("reports",    "Reports", "Office", "admin"),
     ("suppliers",  "Suppliers", "Setup", "admin"),
     ("masters",    "Masters", "Setup", "admin"),
+    ("catalogues", "Catalogues", "Setup", "admin"),
     ("locations",  "Locations", "Setup", "admin"),
     ("labels",     "Label Designer", "Setup", "admin"),
     ("users",      "Users & Access", "Setup", "superadmin"),
@@ -99,15 +104,51 @@ def normalise(raw):
             screens[key] = keep
     data = sorted({d for d in (raw.get("data") or []) if d in DATA_KEYS},
                   key=DATA_KEYS.index)
-    locations = [str(x).strip() for x in (raw.get("locations") or []) if str(x).strip()]
+    # Which BUILDINGS this account may work inside. Ids, not names: a warehouse
+    # can be renamed, and an allotment that pointed at a string would silently
+    # come loose the moment somebody corrected a spelling.
+    #
+    # This replaces an earlier `locations` key that held NAMES and that nothing
+    # ever enforced. It is a new key rather than a reused one because the old
+    # word already means something else here — `locations` is a SCREEN key in
+    # SCREENS above — and one word meaning two things in one blob is how the
+    # wrong check gets written later.
+    warehouses = sorted({int(x) for x in (raw.get("warehouses") or [])
+                         if str(x).strip().lstrip("-").isdigit() and int(x) > 0})
     out = {}
     if screens:
         out["screens"] = screens
     if data:
         out["data"] = data
-    if locations:
-        out["locations"] = sorted(set(locations))
+    if warehouses:
+        out["warehouses"] = warehouses
     return out
+
+
+def allotted(perms):
+    """The warehouse ids this account is confined to, or [] for all of them.
+
+    EMPTY MEANS EVERY WAREHOUSE, exactly as an empty screen map means every
+    screen. That is what keeps every account that predates allotments working:
+    nobody is restricted until somebody deliberately restricts them, and an
+    empty list is never read as "denied everywhere" — which would lock the whole
+    company out of its own app on the morning of an upgrade.
+    """
+    return list((perms or {}).get("warehouses") or [])
+
+
+def may_enter(perms, warehouse_id):
+    """Whether this account may work inside that warehouse.
+
+    True when nothing is allotted (see `allotted`), and true when no warehouse
+    was named at all — deciding what an unscoped request may see is a separate
+    question, answered in security.auth_middleware, because the answer depends
+    on which screen is being asked for.
+    """
+    ids = allotted(perms)
+    if not ids or not warehouse_id:
+        return True
+    return int(warehouse_id) in ids
 
 
 def has_map(perms):

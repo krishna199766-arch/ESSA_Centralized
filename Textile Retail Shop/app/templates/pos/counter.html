@@ -89,23 +89,33 @@
 <div class="row g-3">
   <div class="col-lg-7">
     <div class="card p-3">
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <h5 class="mb-0"><i class="bi bi-grid"></i> Products</h5>
-        <input id="productSearch" class="form-control form-control-sm" style="max-width:250px" placeholder="Search or scan SKU / QR...">
+      <h5 class="mb-2"><i class="bi bi-upc-scan"></i> Scan to bill</h5>
+      {# No product grid. Five tiles reading PILLOW COVER tell a cashier nothing
+         about which one is in their hand; the tag on the garment does. #}
+      <div class="input-group input-group-lg mb-2">
+        <span class="input-group-text"><i class="bi bi-upc-scan"></i></span>
+        <input id="productSearch" class="form-control form-control-lg"
+               autocomplete="off" autofocus
+               placeholder="Scan the tag — or type a SKU / QR and press Enter">
+        <button id="prodScanBtn" class="btn btn-outline-primary" type="button"
+                title="Scan with the camera"><i class="bi bi-camera"></i></button>
       </div>
-      <div id="productGrid" class="pos-product-grid">
-        {% for p in products %}
-        <div class="pos-product" data-id="{{ p.id }}" data-sku="{{ p.sku }}" data-name="{{ p.name }}" data-price="{{ p.selling_price }}" data-gst="{{ p.gst_rate }}" data-stock="{{ p.stock_qty }}">
-          <div class="name">{{ p.name }}</div>
-          {# Two items can share a category name — the attributes are what tell
-             a cashier which tile is the one in their hand. #}
-          <div class="text-muted small">
-            {{ [p.size, p.color, p.fabric] | select | join(' · ') }}
-          </div>
-          <div class="price">{{ p.selling_price|inr }}</div>
-          <div class="stock">Stock: {{ p.stock_qty }} {{ p.unit }}</div>
+      <div id="prodScannerBox" style="display:none">
+        <div id="prodReader" style="width:100%;max-width:340px;"></div>
+        <button id="prodStopScan" class="btn btn-outline-secondary btn-sm mt-1">Stop</button>
+      </div>
+
+      {# The last few scans, newest first. A scanner fires faster than anyone can
+         watch the cart, and this is how a cashier sees that the thing they just
+         beeped is the thing that went on the bill. #}
+      <div class="small text-muted mt-2 mb-1">Recently scanned</div>
+      <div id="scanLog" class="list-group list-group-flush"
+           style="max-height:44vh; overflow:auto;">
+        <div class="list-group-item text-muted text-center py-4" id="scanEmpty">
+          <i class="bi bi-upc-scan" style="font-size:2rem;opacity:.35"></i>
+          <div class="mt-2">Nothing scanned yet.</div>
+          <div class="small">Scan a garment tag, a printed barcode or a warehouse QR.</div>
         </div>
-        {% endfor %}
       </div>
     </div>
   </div>
@@ -192,22 +202,82 @@
         </div>
         <div class="d-flex justify-content-between mt-2"><strong>Total</strong><strong id="grandTotal" style="color:var(--brand-dark)">₹0.00</strong></div>
 
-        <div class="mt-3">
-          <label class="form-label small">Payment</label>
-          <div class="btn-group w-100" role="group">
-            <input type="radio" class="btn-check" name="pay" id="payCash" value="cash" checked>
-            <label class="btn btn-outline-primary btn-sm" for="payCash">Cash</label>
-            <input type="radio" class="btn-check" name="pay" id="payCard" value="card">
-            <label class="btn btn-outline-primary btn-sm" for="payCard">Card</label>
-            <input type="radio" class="btn-check" name="pay" id="payUpi" value="upi">
-            <label class="btn btn-outline-primary btn-sm" for="payUpi">UPI</label>
-          </div>
-        </div>
-
-        <button id="checkoutBtn" class="btn btn-brand w-100 mt-3"><i class="bi bi-check-circle"></i> Checkout</button>
+        <button id="checkoutBtn" class="btn btn-brand w-100 mt-3">
+          <i class="bi bi-cash-coin"></i> Settle &amp; bill</button>
       </div>
     </div>
   </div>
+</div>
+
+<!-- ==================================================================
+     Settlement — how this bill is actually being paid.
+     A separate step from the cart on purpose: it is the moment money
+     changes hands, and it is the one thing at a till that must balance
+     to the paisa before anything is committed. Any mix of the three
+     tenders is allowed; the Bill button stays dead until they add up.
+     ================================================================== -->
+<div class="modal fade" id="settleModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title"><i class="bi bi-cash-coin"></i> Settlement</h5>
+      <button class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body">
+      <div class="d-flex justify-content-between align-items-baseline mb-3">
+        <span class="text-muted">Amount due</span>
+        <span class="fs-3 fw-bold" id="stDue" style="color:var(--brand-dark)">₹0.00</span>
+      </div>
+
+      <div class="row g-2 mb-2 small text-muted d-none d-md-flex">
+        <div class="col-3">Method</div>
+        <div class="col-3">Amount ₹</div>
+        <div class="col-3">Tendered ₹</div>
+        <div class="col-3">Reference</div>
+      </div>
+
+      {% for m, label, hint in [('cash','Cash','Notes handed over — over-tender is fine, the change is worked out'),
+                                ('card','Card','Card / approval reference'),
+                                ('upi','UPI','UPI transaction reference')] %}
+      <div class="row g-2 align-items-center mb-2 settle-row" data-method="{{ m }}">
+        <div class="col-12 col-md-3">
+          <button type="button" class="btn btn-outline-primary btn-sm w-100 st-rest"
+                  data-method="{{ m }}" title="Put the whole remaining balance on {{ label }}">
+            {{ label }} <span class="d-md-none text-muted">— pay rest</span>
+          </button>
+        </div>
+        <div class="col-4 col-md-3">
+          <input class="form-control form-control-sm st-amt" data-method="{{ m }}"
+                 type="number" min="0" step="0.01" placeholder="0.00">
+        </div>
+        <div class="col-4 col-md-3">
+          <input class="form-control form-control-sm st-tender" data-method="{{ m }}"
+                 type="number" min="0" step="0.01" placeholder="0.00"
+                 {% if m != 'cash' %}disabled title="Only cash is over-tendered"{% endif %}>
+        </div>
+        <div class="col-4 col-md-3">
+          <input class="form-control form-control-sm st-ref" data-method="{{ m }}"
+                 maxlength="64" placeholder="{{ hint }}" title="{{ hint }}">
+        </div>
+      </div>
+      {% endfor %}
+
+      <div class="border-top pt-2 mt-3">
+        <div class="d-flex justify-content-between"><span>Entered</span>
+          <span id="stEntered" class="fw-bold">₹0.00</span></div>
+        <div class="d-flex justify-content-between"><span id="stBalLabel">Balance</span>
+          <span id="stBalance" class="fw-bold">₹0.00</span></div>
+        <div class="d-flex justify-content-between" id="stChangeRow" style="display:none !important">
+          <span>Change to return</span>
+          <span id="stChange" class="fw-bold" style="color:var(--brand-dark)">₹0.00</span></div>
+      </div>
+      <div id="stWarn" class="alert alert-warning py-2 mt-2 mb-0 small d-none"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Back to cart</button>
+      <button id="stConfirm" class="btn btn-brand" disabled>
+        <i class="bi bi-check-circle"></i> Bill &amp; print</button>
+    </div>
+  </div></div>
 </div>
 {% endblock %}
 {% block scripts %}
@@ -245,7 +315,11 @@ function renderCart(){
   const redeem = Math.min(requested, available, preLoyalty);
   document.getElementById('subtotal').innerText = fmt(subtotal);
   document.getElementById('tax').innerText = fmt(tax);
-  document.getElementById('grandTotal').innerText = fmt(preLoyalty - redeem);
+  // The figure the settlement has to balance to. Kept here because this is the
+  // one place it is worked out — the modal reading its own copy of the sum is
+  // how a till comes to disagree with its own bill.
+  window._billTotal = Math.round(Math.max(0, preLoyalty - redeem) * 100) / 100;
+  document.getElementById('grandTotal').innerText = fmt(window._billTotal);
 
   // loyalty helper
   const help = document.getElementById('ptsHelp');
@@ -285,38 +359,58 @@ function addProduct(p){
   renderCart();
 }
 
-function addToCart(el){
-  addProduct({
-    id: el.dataset.id, name: el.dataset.name, price: el.dataset.price,
-    gst: el.dataset.gst, stock: el.dataset.stock
-  });
-}
-
-document.querySelectorAll('.pos-product').forEach(p => p.onclick = () => addToCart(p));
+// addToCart(el) is gone with the grid it read its dataset off. Everything now
+// arrives through addProduct() from a server lookup, which is the only path that
+// can resolve a warehouse QR anyway.
 
 let scanTimer = null;
 let lastServerLookup = null;   // avoid firing the same server lookup twice
 
+// The last few scans, newest first — the cashier's confirmation that the thing
+// they beeped is the thing that went on the bill. A scanner fires faster than
+// anyone can follow the cart.
+function logScan(p, ok){
+  const box = document.getElementById('scanLog');
+  const empty = document.getElementById('scanEmpty');
+  if (empty) empty.remove();
+  const when = new Date().toLocaleTimeString();
+  box.insertAdjacentHTML('afterbegin', ok ? `
+    <div class="list-group-item d-flex justify-content-between align-items-start py-2">
+      <div>
+        <div class="fw-semibold">${p.name}</div>
+        <div class="small text-muted">${[p.sku, p.unit ? ('stock ' + p.stock + ' ' + p.unit) : ''].filter(Boolean).join(' · ')}</div>
+      </div>
+      <div class="text-end">
+        <div>${fmt(p.price || 0)}</div>
+        <div class="small text-muted">${when}</div>
+      </div>
+    </div>` : `
+    <div class="list-group-item py-2 text-danger">
+      <i class="bi bi-exclamation-triangle"></i> No product for “${p}”
+      <span class="small text-muted float-end">${when}</span>
+    </div>`);
+  while (box.children.length > 12) box.removeChild(box.lastChild);
+}
+
 // Resolve a scanned/typed code to a product and add it to the cart.
-// Fast path: an item already on the grid (in-stock products at page load).
-// Fallback: ask the server so ANY active product resolves — including ones
-// saved after this page loaded, or not shown in the grid (e.g. out of stock).
+// There is no grid to check first any more: the server resolves a SKU, a printed
+// barcode or a warehouse QR against the whole catalogue, and pulls the item in
+// from the warehouse if the shop has not seen it yet. That is strictly more than
+// the grid could ever match, which is why dropping the grid costs nothing.
 // `alertOnMiss` is true for deliberate actions (Enter); the silent auto-add
 // path passes false so partial typing doesn't pop alerts.
 async function resolveAndAdd(code, alertOnMiss){
   code = (code || '').trim();
   if (!code) return false;
-
-  const el = document.querySelector(`.pos-product[data-sku="${code}"]`)
-;
-  if (el){ addToCart(el); resetScan(); return true; }
-
   try {
     // ?code= rather than a path segment: a warehouse QR payload can contain '/'
     // and '|', which a path segment mangles before the route ever sees it.
     const r = await fetch(`${SHOP_ROOT}/pos/api/product?code=${encodeURIComponent(code)}`);
-    if (r.ok){ addProduct(await r.json()); resetScan(); return true; }
-    if (alertOnMiss){ alert('No product found for "' + code + '"'); }
+    if (r.ok){
+      const p = await r.json();
+      addProduct(p); logScan(p, true); resetScan(); return true;
+    }
+    if (alertOnMiss){ logScan(code, false); }
   } catch (err){
     if (alertOnMiss){ alert('Lookup failed: ' + err); }
   }
@@ -325,26 +419,16 @@ async function resolveAndAdd(code, alertOnMiss){
 
 document.getElementById('productSearch').oninput = e => {
   const box = e.target;
-  const q = box.value.trim().toLowerCase();
-  document.querySelectorAll('.pos-product').forEach(el => {
-    const match = el.dataset.name.toLowerCase().includes(q) || el.dataset.sku.toLowerCase().includes(q)
-;
-    el.style.display = match ? '' : 'none';
-  });
-  // Auto-add: when scanning/typing settles on an EXACT sku, add
-  // it to the cart automatically — no Enter, no click.
+  // Auto-add: when a scan settles, add it without waiting for Enter — most
+  // scanners send no Enter keystroke, and making the cashier press it for every
+  // garment is how a queue forms.
   clearTimeout(scanTimer);
   scanTimer = setTimeout(() => {
     const code = box.value.trim();
     if (!code) return;
-    // Grid hit? add immediately.
-    const el = document.querySelector(`.pos-product[data-sku="${code}"]`);
-    if (el){ addToCart(el); resetScan(); return; }
-    // No grid hit. If the value looks like a scanned code, silently ask the
-    // server so just-saved products still resolve even when the scanner doesn't
-    // send an Enter keystroke. A warehouse QR is a scan however it looks — its
-    // payload carries the description, so it fails the "no spaces" test that
-    // tells typing from scanning everywhere else.
+    // A warehouse QR is a scan however it looks — its payload carries the
+    // description, so it fails the "no spaces" test that tells typing from
+    // scanning everywhere else.
     const isWarehouseQr = /^EU?1\|/.test(code);
     if ((isWarehouseQr || (code.length >= 4 && !/\s/.test(code))) && code !== lastServerLookup){
       lastServerLookup = code;
@@ -357,7 +441,6 @@ function resetScan(){
   const box = document.getElementById('productSearch');
   box.value = '';
   lastServerLookup = null;
-  document.querySelectorAll('.pos-product').forEach(el => el.style.display = '');
   box.focus();
 }
 
@@ -474,7 +557,7 @@ const scanBox = document.getElementById('productSearch');
 function focusScan(){ scanBox.focus(); }
 focusScan();
 document.addEventListener('click', (e) => {
-  if (e.target.closest('input, textarea, select, button, a, .modal, .pos-product')) return;
+  if (e.target.closest('input, textarea, select, button, a, .modal')) return;
   focusScan();
 });
 
@@ -555,28 +638,169 @@ document.getElementById('staffStopScan').onclick = stopStaffScan;
 
 updateCheckoutGate();
 
-document.getElementById('checkoutBtn').onclick = async () => {
+// ---- Camera scan for a garment tag ----------------------------------------
+// The same library the customer card and the staff ID already use. A handheld
+// scanner types into the box above; this is for a phone or a webcam.
+let prodQr = null;
+document.getElementById('prodScanBtn').onclick = async () => {
+  document.getElementById('prodScannerBox').style.display = 'block';
+  if (prodQr) return;
+  prodQr = new Html5Qrcode('prodReader');
+  try {
+    await prodQr.start({ facingMode: 'environment' },
+      { fps: 12, qrbox: { width: 260, height: 160 } },
+      async (decoded) => {
+        // Kept RUNNING between garments — a counter bills several items at once,
+        // and stopping the camera after each one means reopening it every time.
+        await resolveAndAdd(decoded, true);
+      }, () => {});
+  } catch (err){ alert('Camera error: ' + err); }
+};
+document.getElementById('prodStopScan').onclick = async () => {
+  if (prodQr){ try { await prodQr.stop(); prodQr.clear(); } catch(e){} prodQr = null; }
+  document.getElementById('prodScannerBox').style.display = 'none';
+};
+
+// ---- Settlement ------------------------------------------------------------
+// The bill is not committed until the tenders add up to it, to the paisa. The
+// server checks the same thing again against ITS total (see pos.checkout) —
+// this is so the cashier sees the balance while they are still taking money,
+// not as an error after the customer has walked away.
+const settleModal = new bootstrap.Modal(document.getElementById('settleModal'));
+const METHODS = ['cash', 'card', 'upi'];
+const stAmt = (m) => document.querySelector(`.st-amt[data-method="${m}"]`);
+const stTender = (m) => document.querySelector(`.st-tender[data-method="${m}"]`);
+const stRef = (m) => document.querySelector(`.st-ref[data-method="${m}"]`);
+const num = (el) => parseFloat(el && el.value) || 0;
+
+function settleRows(){
+  return METHODS.map((m) => ({
+    method: m, amount: Math.round(num(stAmt(m)) * 100) / 100,
+    tendered: m === 'cash' ? Math.round(num(stTender(m)) * 100) / 100 : 0,
+    reference: (stRef(m).value || '').trim(),
+  })).filter((r) => r.amount > 0);
+}
+
+function paintSettle(){
+  const due = Number(window._billTotal || 0);
+  const rows = settleRows();
+  const entered = Math.round(rows.reduce((a, r) => a + r.amount, 0) * 100) / 100;
+  const balance = Math.round((due - entered) * 100) / 100;
+  // Only cash is ever over-tendered; a card is settled for an exact amount.
+  const cash = rows.find((r) => r.method === 'cash');
+  const change = cash ? Math.max(0, Math.round((cash.tendered - cash.amount) * 100) / 100) : 0;
+
+  document.getElementById('stDue').innerText = fmt(due);
+  document.getElementById('stEntered').innerText = fmt(entered);
+  document.getElementById('stBalance').innerText = fmt(Math.abs(balance));
+  document.getElementById('stBalLabel').innerText =
+    balance > 0 ? 'Still to pay' : balance < 0 ? 'Over by' : 'Balance';
+  document.getElementById('stBalance').style.color =
+    balance === 0 ? 'var(--brand-dark)' : '#b23b3b';
+  const changeRow = document.getElementById('stChangeRow');
+  changeRow.style.setProperty('display', change > 0 ? 'flex' : 'none', 'important');
+  document.getElementById('stChange').innerText = fmt(change);
+
+  const warn = document.getElementById('stWarn');
+  let msg = '';
+  if (due <= 0) msg = 'Nothing to settle — the cart is empty.';
+  else if (rows.length === 0) msg = 'Enter how the customer is paying.';
+  else if (balance > 0) msg = `${fmt(balance)} still to be paid.`;
+  else if (balance < 0) msg = `${fmt(-balance)} more entered than the bill comes to. `
+    + `To take extra cash and give change, put the extra in Tendered, not Amount.`;
+  for (const r of rows){
+    if (r.method === 'cash' && r.tendered < r.amount) {
+      msg = 'Cash tendered is less than the cash being settled.';
+    }
+  }
+  warn.className = msg ? 'alert alert-warning py-2 mt-2 mb-0 small' : 'd-none';
+  warn.innerText = msg;
+  document.getElementById('stConfirm').disabled = !!msg;
+}
+
+document.querySelectorAll('.st-amt, .st-tender, .st-ref').forEach((el) => {
+  el.oninput = () => {
+    // Cash tendered follows the amount until somebody types over it — the common
+    // case is exact cash, and making them type the same number twice is friction
+    // on the busiest path at the till.
+    if (el.classList.contains('st-amt') && el.dataset.method === 'cash'){
+      const t = stTender('cash');
+      if (!t.dataset.touched) t.value = el.value;
+    }
+    if (el.classList.contains('st-tender')) el.dataset.touched = '1';
+    paintSettle();
+  };
+});
+
+// "pay the rest on this method" — the fast path for both a plain sale and a split
+document.querySelectorAll('.st-rest').forEach((b) => {
+  b.onclick = () => {
+    const m = b.dataset.method;
+    const due = Number(window._billTotal || 0);
+    const others = settleRows().filter((r) => r.method !== m)
+      .reduce((a, r) => a + r.amount, 0);
+    const rest = Math.round(Math.max(0, due - others) * 100) / 100;
+    stAmt(m).value = rest ? rest.toFixed(2) : '';
+    if (m === 'cash'){ const t = stTender('cash'); t.value = stAmt(m).value; delete t.dataset.touched; }
+    paintSettle();
+    stAmt(m).focus();
+  };
+});
+
+document.getElementById('checkoutBtn').onclick = () => {
   if (!servingStaffId){
     alert('Identify the staff member serving this customer first.');
     document.getElementById('staffCode').focus();
     return;
   }
   if (cart.size === 0){ alert('Cart is empty'); return; }
+  METHODS.forEach((m) => {
+    stAmt(m).value = ''; stRef(m).value = '';
+    const t = stTender(m); t.value = ''; delete t.dataset.touched;
+  });
+  // Cash pre-filled with the whole bill: it is what most sales are, and it makes
+  // the common case one click rather than a number to type.
+  stAmt('cash').value = Number(window._billTotal || 0).toFixed(2);
+  stTender('cash').value = stAmt('cash').value;
+  paintSettle();
+  settleModal.show();
+  setTimeout(() => stAmt('cash').select(), 300);
+};
+
+document.getElementById('stConfirm').onclick = async () => {
+  const btn = document.getElementById('stConfirm');
+  btn.disabled = true;
   const payload = {
     staff_id: servingStaffId,
     customer_id: currentCustomerId,
-    payment_method: document.querySelector('input[name=pay]:checked').value,
     discount: parseFloat(document.getElementById('discount').value) || 0,
     redeem_points: parseFloat(document.getElementById('redeemPoints').value) || 0,
+    payments: settleRows().map((r) => ({
+      method: r.method, amount: r.amount,
+      tendered: r.method === 'cash' ? r.tendered : r.amount,
+      reference: r.reference || null,
+    })),
     items: [...cart.entries()].map(([id, it]) => ({product_id: id, quantity: it.qty, unit_price: it.price}))
   };
-  const r = await fetch("{{ url_for('pos.checkout') }}", {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
-  });
-  const j = await r.json();
-  if (j.error){ alert('Error: ' + j.error); return; }
-  window.location = `${SHOP_ROOT}/pos/invoice/${j.invoice_id}/print`;
+  try {
+    const r = await fetch("{{ url_for('pos.checkout') }}", {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json();
+    if (j.error){
+      alert('Error: ' + j.error);
+      btn.disabled = false;
+      return;
+    }
+    // Said before the print view takes over the screen, because the change is
+    // the last thing that has to happen at the counter.
+    if (j.change > 0) alert('Return ' + fmt(j.change) + ' change to the customer.');
+    window.location = `${SHOP_ROOT}/pos/invoice/${j.invoice_id}/print`;
+  } catch (err){
+    alert('Billing failed: ' + err);
+    btn.disabled = false;
+  }
 };
 
 // ---- Company / Location / Counter -----------------------------------------

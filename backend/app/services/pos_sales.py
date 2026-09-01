@@ -28,13 +28,39 @@ import sqlite3
 import datetime as dt
 from pathlib import Path
 
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
 # …/backend/app/services/pos_sales.py → …/essa-intake/Textile Retail Shop
 _SHOP_DIR = Path(__file__).resolve().parents[3] / "Textile Retail Shop"
 _DB_NAME = "textile_shop.db"
 
+# ---------------------------------------------------------------------------
+#  WHERE THE SHOP'S TABLES ACTUALLY ARE
+# ---------------------------------------------------------------------------
+#  This used to be a file path and nothing else: sqlite3 opened
+#  "Textile Retail Shop/textile_shop.db" read-only, because both halves lived in
+#  one folder on one PC. Deployed, they do not. The shop is mounted INTO this
+#  process and put in the `shop` SCHEMA of the same Postgres database (see
+#  app/pos_mount._isolate_shop_schema) — there is no file at all. So `available()`
+#  answered False, and Dead Stock and the Item Locator reported "the shop is not
+#  installed" while the till was billing in the same process.
+#
+#  Worse than blind: WRONG. A machine pointed at Postgres through DATABASE_URL
+#  usually still has the old local textile_shop.db lying beside the code, so this
+#  module read it and presented months-old local sales as live figures. A screen
+#  that says nothing is recoverable; a screen that says the wrong number is not.
+#
+#  So the target is chosen the way the shop chooses ITS target when reading back
+#  the other way (Textile Retail Shop/app/warehouse_items.warehouse_url): ask the
+#  configured database first, and fall back to the file only when this really is
+#  a SQLite install.
+# ---------------------------------------------------------------------------
+_sqlite_engine = None
+
 
 def db_path():
-    """The shop's database file, or None if the shop isn't installed here."""
+    """The shop's SQLite file, or None. Only meaningful on a SQLite install."""
     env = os.environ.get("ESSA_POS_DB")
     if env:
         return Path(env) if os.path.exists(env) else None
@@ -42,11 +68,45 @@ def db_path():
     return p if p.exists() else None
 
 
+def _target():
+    """(engine, table_prefix, description) for the shop's tables, or None.
+
+    On Postgres the warehouse's OWN engine is reused — same database, different
+    schema — rather than opening a second pool. That matters under NullPool
+    (see database.py): a second engine per request would be a second connection
+    per request to the same server.
+    """
+    from ..database import IS_SQLITE, engine as wh_engine
+
+    if not IS_SQLITE:
+        from ..pos_mount import POS_SCHEMA
+        return wh_engine, f'"{POS_SCHEMA}".', f"postgres:{POS_SCHEMA}"
+
+    global _sqlite_engine
+    p = db_path()
+    if not p:
+        return None
+    url = f"sqlite:///{p.as_posix()}"
+    if _sqlite_engine is None or str(_sqlite_engine.url) != url:
+        try:
+            _sqlite_engine = create_engine(url)
+        except SQLAlchemyError:
+            return None
+    return _sqlite_engine, "", str(p)
+
+
 def available() -> bool:
-    return db_path() is not None
+    return _target() is not None
+
+
+def source() -> str:
+    """Where the figures are being read from, for a screen to say out loud."""
+    t = _target()
+    return t[2] if t else ""
 
 
 def _connect():
+    """Kept for callers that still want a raw SQLite handle. SQLite only."""
     p = db_path()
     if not p:
         return None
@@ -68,18 +128,37 @@ def _day_end(d):
     return f"{d} 23:59:59.999999"
 
 
+def q(table: str) -> str:
+    """A shop table named so it resolves on whichever engine is connected."""
+    t = _target()
+    return f"{t[1]}{table}" if t else table
+
+
 def _rows(sql, params):
-    con = _connect()
-    if not con:
+    """Run one read against the shop. [] when it cannot be read at all.
+
+    The queries here were written with sqlite3's positional `?`; those are
+    translated to named parameters so the same SQL runs on Postgres. Table names
+    are NOT translated here — callers wrap them in q() — because only the caller
+    knows which identifiers in its SQL are tables.
+    """
+    t = _target()
+    if not t:
         return []
+    engine, _, _ = t
+    named = {}
+    if params:
+        for i, v in enumerate(params):
+            named[f"p{i}"] = v
+            sql = sql.replace("?", f":p{i}", 1)
     try:
-        return con.execute(sql, params).fetchall()
-    except sqlite3.Error:
-        # a shop database older than the columns asked for here, or locked. Both
-        # mean "nothing known", not "the warehouse cannot show dead stock"
+        with engine.connect() as con:
+            return [tuple(r) for r in con.execute(text(sql), named)]
+    except SQLAlchemyError:
+        # a shop database older than the columns asked for here, or locked, or
+        # a schema that does not exist yet. All mean "nothing known", not "the
+        # warehouse cannot show dead stock"
         return []
-    finally:
-        con.close()
 
 
 def _window(start, end, col):
@@ -109,18 +188,18 @@ def sales_by_product(start=None, end=None):
     sold = _rows(
         "SELECT p.warehouse_id, SUM(ii.quantity), SUM(ii.line_total),"
         "       COUNT(DISTINCT i.id), MAX(i.invoice_date) "
-        "FROM invoice_items ii "
-        "JOIN invoices i ON i.id = ii.invoice_id "
-        "JOIN products p ON p.id = ii.product_id "
+        "FROM " + q("invoice_items") + " ii "
+        "JOIN " + q("invoices") + " i ON i.id = ii.invoice_id "
+        "JOIN " + q("products") + " p ON p.id = ii.product_id "
         "WHERE p.warehouse_id IS NOT NULL" + sold_where +
         " GROUP BY p.warehouse_id", sold_params)
 
     ret_where, ret_params = _window(start, end, "cn.created_at")
     returned = _rows(
         "SELECT p.warehouse_id, SUM(ci.quantity), SUM(ci.line_total) "
-        "FROM credit_note_items ci "
-        "JOIN credit_notes cn ON cn.id = ci.credit_note_id "
-        "JOIN products p ON p.id = ci.product_id "
+        "FROM " + q("credit_note_items") + " ci "
+        "JOIN " + q("credit_notes") + " cn ON cn.id = ci.credit_note_id "
+        "JOIN " + q("products") + " p ON p.id = ci.product_id "
         "WHERE p.warehouse_id IS NOT NULL" + ret_where +
         " GROUP BY p.warehouse_id", ret_params)
 
@@ -159,9 +238,9 @@ def bills_for_product(product_id, limit=50):
     sold = _rows(
         "SELECT i.invoice_number, i.invoice_date, ii.quantity, ii.unit_price, "
         "       ii.gst_rate, ii.tax_amount, ii.line_total, c.name, c.phone "
-        "FROM invoice_items ii "
-        "JOIN invoices i ON i.id = ii.invoice_id "
-        "JOIN products p ON p.id = ii.product_id "
+        "FROM " + q("invoice_items") + " ii "
+        "JOIN " + q("invoices") + " i ON i.id = ii.invoice_id "
+        "JOIN " + q("products") + " p ON p.id = ii.product_id "
         "LEFT JOIN customers c ON c.id = i.customer_id "
         "WHERE p.warehouse_id = ? "
         "ORDER BY i.invoice_date DESC, i.id DESC LIMIT ?", (int(product_id), int(limit)))
@@ -175,9 +254,9 @@ def bills_for_product(product_id, limit=50):
     returned = _rows(
         "SELECT cn.number, cn.created_at, ci.quantity, ci.unit_price, "
         "       ci.gst_rate, ci.tax_amount, ci.line_total, ci.condition "
-        "FROM credit_note_items ci "
-        "JOIN credit_notes cn ON cn.id = ci.credit_note_id "
-        "JOIN products p ON p.id = ci.product_id "
+        "FROM " + q("credit_note_items") + " ci "
+        "JOIN " + q("credit_notes") + " cn ON cn.id = ci.credit_note_id "
+        "JOIN " + q("products") + " p ON p.id = ci.product_id "
         "WHERE p.warehouse_id = ? "
         "ORDER BY cn.created_at DESC LIMIT ?", (int(product_id), int(limit)))
     rows += [{
@@ -209,17 +288,19 @@ def last_sold_index():
 
 def status():
     """What the register should say about where its sales figures came from."""
-    p = db_path()
-    if not p:
+    t = _target()
+    if not t:
         return {"available": False, "reason": "The shop (POS) module is not installed here",
-                "path": None, "last_sale": None, "linked_products": 0}
+                "path": None, "source": None, "last_sale": None,
+                "linked_products": 0}
+    p = t[2]
     rows = _rows("SELECT MAX(i.invoice_date), COUNT(DISTINCT p.warehouse_id) "
-                 "FROM invoices i "
-                 "JOIN invoice_items ii ON ii.invoice_id = i.id "
-                 "JOIN products p ON p.id = ii.product_id "
+                 "FROM " + q("invoices") + " i "
+                 "JOIN " + q("invoice_items") + " ii ON ii.invoice_id = i.id "
+                 "JOIN " + q("products") + " p ON p.id = ii.product_id "
                  "WHERE p.warehouse_id IS NOT NULL", [])
     last, linked = (rows[0] if rows else (None, 0))
-    return {"available": True, "reason": None, "path": str(p),
+    return {"available": True, "reason": None, "path": str(p), "source": str(p),
             "last_sale": (last or "")[:10] or None,
             "linked_products": int(linked or 0)}
 

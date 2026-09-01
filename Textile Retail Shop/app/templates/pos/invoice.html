@@ -51,6 +51,19 @@
     </div>
     <div class="col-6 text-end">
       <strong>Payment:</strong> {{ inv.payment_method|upper }}<br>
+      {# A split bill has to print its split — "MIXED" alone tells the customer
+         nothing about what came off their card, and tells a query nothing at
+         all. Invoices raised before settlements were recorded have no rows and
+         simply show the single method above. #}
+      {% if inv.payments %}
+        {% for p in inv.payments %}
+          <span class="small">{{ p.method|upper }} {{ p.amount|inr }}{% if p.reference %}
+            · {{ p.reference }}{% endif %}</span><br>
+        {% endfor %}
+        {% if inv.change_given %}
+          <span class="small">Change {{ inv.change_given|inr }}</span><br>
+        {% endif %}
+      {% endif %}
       <strong>Status:</strong> <span class="badge bg-success">{{ inv.payment_status }}</span>
     </div>
   </div>

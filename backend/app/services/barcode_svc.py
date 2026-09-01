@@ -65,11 +65,10 @@ def internal_ean13(product_id: int) -> str:
 
 
 def _next_sku(db) -> str:
-    n = db.query(models.Product).count() + 1
-    # ensure uniqueness even if ids were deleted
-    while db.query(models.Product).filter(models.Product.sku == f"ESSA-{n:05d}").first():
-        n += 1
-    return f"ESSA-{n:05d}"
+    """One SKU rule, not two. This used to be a second copy of the format string
+    in services/inventory — the kind of duplication that drifts silently."""
+    from . import inventory
+    return inventory._next_sku(db)
 
 
 def assign_identifiers(db, product) -> dict:

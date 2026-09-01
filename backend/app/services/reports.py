@@ -37,6 +37,7 @@ from .. import models
 from . import payments as pay
 from . import shortages as short
 from . import dates as date_svc
+from . import stock_locations as stock_loc
 
 
 def _rep(columns, rows, totals=None, note=None):
@@ -487,39 +488,212 @@ def stock_transactions(db, date_from=None, date_to=None):
 
 
 def stock_by_location(db):
-    """Where stock has moved between, and what each side holds.
+    """What each warehouse actually HOLDS, and what has been sent to each store.
 
-    This system keeps one stock figure, at the warehouse. A location is therefore
-    a *movement* fact, not a balance: goods come in at the warehouse and leave for
-    a destination, and what that destination holds afterwards is its own books,
-    not ours. The report says exactly that much and no more."""
-    cols = ["location", "direction", "documents", "products", "qty", "value"]
+    REWRITTEN. This report used to open "This system keeps one stock figure, at
+    the warehouse" and report every warehouse as a single row called WAREHOUSE.
+    That stopped being true when stock was split per building
+    (services/stock_locations, StockBalance): there are now real balances per
+    warehouse, and a report collapsing them into one line was not merely
+    incomplete — it was the wrong number under a heading that named a place.
+
+    Two kinds of row, and the difference is the whole point:
+
+      * a WAREHOUSE row is a BALANCE — what is standing there right now,
+        valued at that building's own weighted-average cost;
+      * a STORE row is a MOVEMENT — what has been dispatched to it. A store's
+        own stock lives in the till's database, not this one, so what it holds
+        today is its book and not ours. Saying otherwise would invent a figure.
+    """
+    cols = ["location", "kind", "direction", "documents", "products", "qty", "value"]
     rows = []
-    inward = db.query(models.StockMovement).filter(
-        models.StockMovement.qty_delta > 0).all()
-    wh_qty = sum(_f(m.qty_delta) for m in inward)
-    wh_val = sum(_f(m.qty_delta) * _f(m.rate) for m in inward)
-    rows.append({"location": "WAREHOUSE", "direction": "received",
-                 "documents": len({(m.ref_type, m.ref_id) for m in inward}),
-                 "products": len({m.product_id for m in inward}),
-                 "qty": round(wh_qty, 2), "value": _r2(wh_val)})
+
+    for w in stock_loc.warehouse_totals(db):
+        rows.append({
+            "location": w["name"], "kind": "warehouse", "direction": "holds",
+            "documents": "", "products": w["items"],
+            "qty": round(w["qty"], 2), "value": w["value"],
+        })
+
     agg = defaultdict(lambda: {"documents": set(), "products": set(),
                                "qty": 0.0, "value": 0.0})
     for o in db.query(models.StockOutward).filter(
             models.StockOutward.status.in_(("posted", "received"))).all():
-        a = agg[o.to_destination or "(unnamed)"]
+        # A warehouse-to-warehouse transfer is NOT a destination row: both ends
+        # are warehouses and both already appear above as balances. Counting it
+        # here as well would report the same goods twice, once as stock held and
+        # once as stock sent away.
+        if o.to_warehouse_id:
+            continue
+        a = agg[o.to_store.name if o.to_store else (o.to_destination or "(unnamed)")]
         a["documents"].add(o.id)
         for l in o.lines:
             a["products"].add(l.product_id)
             a["qty"] += _f(l.qty)
             a["value"] += _f(l.qty) * _f(l.rate)
     for loc, a in sorted(agg.items()):
-        rows.append({"location": loc, "direction": "dispatched to",
+        rows.append({"location": loc, "kind": "store", "direction": "dispatched to",
                      "documents": len(a["documents"]), "products": len(a["products"]),
                      "qty": round(a["qty"], 2), "value": _r2(a["value"])})
-    return _rep(cols, rows, {"locations": len(rows)},
-                note="Stock is held at one warehouse. Destinations show what was sent "
-                     "to them, not what they currently hold — that is their own book.")
+
+    held = sum(r["qty"] for r in rows if r["kind"] == "warehouse")
+    sent = sum(r["qty"] for r in rows if r["kind"] == "store")
+    return _rep(cols, rows,
+                {"locations": len(rows), "held_in_warehouses": round(held, 2),
+                 "dispatched_to_stores": round(sent, 2)},
+                note="Warehouse rows are BALANCES — what is standing there now. "
+                     "Store rows are what has been SENT to them; a store's own "
+                     "stock lives in the till's database, not this one. "
+                     "Warehouse-to-warehouse transfers are not listed as "
+                     "destinations — both ends are already counted as balances.")
+
+
+def pos_sales_by_store(db, date_from=None, date_to=None, warehouse_id=None):
+    """What each shop sold, and which warehouse supplies it.
+
+    Read from the till's own database (services/pos_store_sales). When that
+    cannot be reached the report says so in its note and returns no rows —
+    "nothing sold" and "cannot ask" are different answers and must not look the
+    same on a register somebody is reconciling against.
+    """
+    from . import pos_store_sales
+    res = pos_store_sales.by_store(db, days=None if date_from else 30,
+                                   date_from=date_from, date_to=date_to,
+                                   warehouse_id=warehouse_id)
+    cols = ["store", "code", "warehouse", "bills", "units", "gross",
+            "discount", "tax", "returns", "net", "last_sale"]
+    if not res.get("available"):
+        return _rep(cols, [], {}, note=res.get("reason") or
+                    "The shop (POS) module could not be read from here.")
+    rows = [{"store": s["store"], "code": s.get("store_code") or "",
+             "warehouse": s.get("warehouse") or "", "bills": s["bills"],
+             "units": s["units"], "gross": s["gross"], "discount": s["discount"],
+             "tax": s["tax"], "returns": s["returns"], "net": s["net"],
+             "last_sale": s["last_sale"] or ""} for s in res["stores"]]
+    # A branch the two systems spell differently is listed, with its money, but
+    # marked — never dropped and never quietly folded into another warehouse.
+    for u in res.get("unmatched", []):
+        rows.append({"store": u["store"], "code": "", "warehouse": "(not matched)",
+                     "bills": u["bills"], "units": u["units"], "gross": u["gross"],
+                     "discount": u["discount"], "tax": u["tax"],
+                     "returns": u["returns"], "net": u["net"],
+                     "last_sale": u["last_sale"] or ""})
+    return _rep(cols, rows, {**res["totals"], "window": res["window"]["from"] +
+                             " to " + res["window"]["to"]},
+                note=res.get("note"))
+
+
+def pos_sales_by_day(db, date_from=None, date_to=None, warehouse_id=None):
+    """Net shop takings per day. Every day appears, including the quiet ones."""
+    from . import pos_store_sales
+    d = pos_store_sales.daily(db, days=30, warehouse_id=warehouse_id)
+    cols = ["day", "bills", "net"]
+    if not d.get("available"):
+        return _rep(cols, [], {},
+                    note="The shop (POS) module could not be read from here.")
+    rows = [{"day": lbl, "bills": d["bills"][i], "net": d["net"][i]}
+            for i, lbl in enumerate(d["labels"])]
+    return _rep(cols, rows,
+                {"days": len(rows), "bills": sum(r["bills"] for r in rows),
+                 "net": _r2(sum(r["net"] for r in rows))},
+                note="Bills raised AT A BRANCH. Takings from before the till "
+                     "recorded a branch belong to no shop and are not here.")
+
+
+def warehouse_wise_stock(db, warehouse_id=None):
+    """Stock and its value, one row per warehouse — the consolidated valuation.
+
+    The figure the Central Dashboard's bar chart is drawn from, available as a
+    report so it can be filtered, exported and printed like any other."""
+    cols = ["warehouse", "code", "location", "trades_in", "stores", "items",
+            "qty", "value", "status"]
+    rows = []
+    for w in stock_loc.warehouse_totals(db):
+        if warehouse_id and w["warehouse_id"] != int(warehouse_id):
+            continue
+        wh = db.get(models.Warehouse, w["warehouse_id"])
+        rows.append({
+            "warehouse": w["name"], "code": w["code"] or "",
+            "location": w["address"] or "", "stores": w["store_count"],
+            "trades_in": (wh.catalogue.name if (wh and wh.catalogue) else ""),
+            "items": w["items"], "qty": round(w["qty"], 2), "value": w["value"],
+            "status": "Active" if w["active"] else "Closed",
+        })
+    return _rep(cols, rows,
+                {"warehouses": len(rows),
+                 "qty": round(sum(r["qty"] for r in rows), 2),
+                 "value": _r2(sum(r["value"] for r in rows))},
+                note="Quantity is counted in each product's own unit; value is at "
+                     "that warehouse's own weighted-average cost.")
+
+
+def stores_by_warehouse(db, warehouse_id=None):
+    """Every store and till, under the warehouse that supplies it."""
+    from . import locations as loc_svc
+    cols = ["store", "code", "warehouse", "trades_in", "type", "tills",
+            "till_names", "address", "status"]
+    rows = [{
+        "store": s["name"], "code": s["code"] or "",
+        "warehouse": s["warehouse"] or "(not assigned)",
+        "trades_in": s["catalogue"] or "", "type": s["type"],
+        "tills": s["terminals"], "till_names": ", ".join(s["terminal_names"]),
+        "address": s["address"] or "",
+        "status": "Active" if s["active"] else "Closed",
+    } for s in loc_svc.store_rows(db, warehouse_id)]
+    return _rep(cols, rows,
+                {"stores": len(rows),
+                 "tills": sum(r["tills"] for r in rows)},
+                note="A store with no till cannot bill. Stock at a store lives in "
+                     "the till's own database — this lists the places, not their "
+                     "balances.")
+
+
+def transfer_register(db, date_from=None, date_to=None, warehouse_id=None):
+    """Every movement between this company's own places, as a register.
+
+    Warehouse-to-warehouse transfers, dispatches to stores, and anything sent
+    elsewhere — with what was sent, what was accepted, and what is still in
+    transit. In-transit is the column worth reading: those goods are standing in
+    neither building."""
+    cols = ["code", "date", "kind", "from", "to", "status", "lines",
+            "sent_qty", "accepted_qty", "short_qty", "value"]
+    q = db.query(models.StockOutward)
+    rows = []
+    for o in q.order_by(models.StockOutward.id.desc()).all():
+        if date_from and (o.date or "") < date_from:
+            continue
+        if date_to and (o.date or "") > date_to:
+            continue
+        if warehouse_id and int(warehouse_id) not in (
+                o.from_warehouse_id, o.to_warehouse_id):
+            continue
+        sent = float(o.total_qty or 0)
+        rows.append({
+            "code": o.code or "", "date": o.date or "",
+            "kind": ("Warehouse transfer" if o.to_warehouse_id
+                     else "To store" if o.to_store_id else "Dispatch"),
+            "from": (o.from_warehouse.name if o.from_warehouse
+                     else o.from_location or ""),
+            "to": (o.to_warehouse.name if o.to_warehouse
+                   else o.to_store.name if o.to_store
+                   else o.to_destination or ""),
+            "status": o.status, "lines": len(o.lines),
+            "sent_qty": round(sent, 2),
+            "accepted_qty": round(float(o.total_accepted or 0), 2),
+            # Sent but not yet accepted reads as short only once it HAS been
+            # received; before that it is in transit, not missing.
+            "short_qty": round(o.shortfall, 2) if o.status == "received" else 0,
+            "value": _r2(sum(_f(l.qty) * _f(l.rate) for l in o.lines)),
+        })
+    transit = sum(r["sent_qty"] for r in rows if r["status"] == "posted"
+                  and r["kind"] == "Warehouse transfer")
+    return _rep(cols, rows,
+                {"documents": len(rows),
+                 "sent_qty": round(sum(r["sent_qty"] for r in rows), 2),
+                 "in_transit": round(transit, 2),
+                 "value": _r2(sum(r["value"] for r in rows))},
+                note="In transit = dispatched between warehouses and not yet "
+                     "counted in at the far end, so standing in neither.")
 
 
 def warehouse_stock_analysis(db):
@@ -938,6 +1112,19 @@ REPORTS = {
     "stock_movement": ("Stock Movement", "stock", stock_movement),
     "stock_by_location": ("Stock Movement - Locationwise", "stock", stock_by_location),
     "warehouse_stock_analysis": ("Warehouse Stock Analysis", "stock", warehouse_stock_analysis),
+    # The consolidated set — one row per place rather than one figure for the
+    # company. These are what the Central Dashboard draws, offered as reports so
+    # the same numbers can be filtered, exported and printed.
+    "warehouse_wise_stock": ("Warehouse-wise Stock & Value", "stock",
+                             warehouse_wise_stock),
+    "stores_by_warehouse": ("Stores / POS by Warehouse", "stock",
+                            stores_by_warehouse),
+    "transfer_register": ("Stock Transfer Register", "outward", transfer_register),
+    # What the shops sold. Their own group: these come from the till's database,
+    # not the warehouse ledger, and a reader should be able to see at a glance
+    # which side of the wall a figure came from.
+    "pos_sales_by_store": ("Sales by Store", "sales", pos_sales_by_store),
+    "pos_sales_by_day": ("Store Sales - Daily", "sales", pos_sales_by_day),
     "stock_audit_report": ("Stock Audit Report", "stock", stock_audit_report),
     # --- purchase ---
     "purchase_register": ("Purchase Report", "purchase", purchase_register),
@@ -974,6 +1161,7 @@ GROUPS = [
     ("purchase", "Purchase Reports"),
     ("purchase_return", "Purchase Return Reports"),
     ("outward", "Outward Reports"),
+    ("sales", "Shop Sales Reports"),
     ("master", "Other Reports"),
 ]
 

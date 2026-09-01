@@ -20,6 +20,19 @@ import datetime as dt
 from rapidfuzz import fuzz
 from .. import models
 from . import shortages as shortage_svc
+from . import stock_locations as stock_loc
+from . import catalogues as cat_svc
+
+
+def purchase_catalogue_id(db, purchase):
+    """The business line a receipt belongs to — its warehouse's.
+
+    A GRN does not choose a catalogue of its own. The building it is unloaded at
+    decides, because that is what a catalogue IS: the goods that warehouse
+    trades in. Two answers for one receipt would be one answer too many.
+    """
+    cat = cat_svc.for_warehouse(db, getattr(purchase, "warehouse_id", None))
+    return cat.id if cat else None
 
 
 def _norm(s):
@@ -76,7 +89,8 @@ def line_named_attrs(line):
                        getattr(line, "design_no", None))
 
 
-def match_product(db, barcode, description, hsn, supplier_id, attrs=None):
+def match_product(db, barcode, description, hsn, supplier_id, attrs=None,
+                  catalogue_id=None):
     """Find an existing product for a purchase line. Returns Product or None.
 
     `attrs` is passed when matching a variant row from an attribute breakdown.
@@ -84,7 +98,16 @@ def match_product(db, barcode, description, hsn, supplier_id, attrs=None):
     the same description in a different colour or material is a different stock
     item, so an exact re-buy merges and anything new is created. Matching on only
     the attributes that happen to be filled in would quietly fold "L" into
-    "L / Red" for whichever arrived first."""
+    "L / Red" for whichever arrived first.
+
+    `catalogue_id` confines the search to one business line, and it matters more
+    than it looks. Descriptions across trades collide — a silk "PLAIN COTTON" and
+    a garment "PLAIN COTTON" score 100 against each other — and a match across
+    the two would file a saree against a t-shirt's stock record, merge their
+    costs into one weighted average, and put a garment's category and attributes
+    on it. A barcode still wins outright: the supplier printed it against one
+    specific article, which is a stronger statement than any similarity score.
+    """
     if barcode:
         p = db.query(models.Product).filter(models.Product.barcode == barcode).first()
         if p:
@@ -93,6 +116,16 @@ def match_product(db, barcode, description, hsn, supplier_id, attrs=None):
     q = db.query(models.Product)
     if hsn:
         q = q.filter(models.Product.hsn == hsn)
+    if catalogue_id:
+        # A product that predates catalogues carries none, and belongs to the
+        # default line — it is still a candidate for that line and for no other.
+        from . import catalogues as cat_svc
+        default = cat_svc.default_catalogue(db)
+        if default and default.id == catalogue_id:
+            q = q.filter((models.Product.catalogue_id == catalogue_id)
+                         | (models.Product.catalogue_id.is_(None)))
+        else:
+            q = q.filter(models.Product.catalogue_id == catalogue_id)
     candidates = q.all()
     best, best_score = None, 0
     for c in candidates:
@@ -107,15 +140,22 @@ def match_product(db, barcode, description, hsn, supplier_id, attrs=None):
     return best if best_score >= 90 else None
 
 
-def _next_sku(db):
-    n = db.query(models.Product).count() + 1
-    # skip numbers already taken, so deleted rows can't cause a collision
-    while db.query(models.Product).filter(models.Product.sku == f"ESSA-{n:05d}").first():
-        n += 1
-    return f"ESSA-{n:05d}"
+def _next_sku(db, warehouse_id=None):
+    """The next product SKU, in whatever format this business has configured.
+
+    Delegates to services/numbering, which keeps the property this function
+    always had: it steps over any code already issued rather than trusting a
+    counter. See barcode_svc._next_sku — the same rule was written twice, and
+    now both call one place.
+    """
+    from . import numbering
+    return numbering.next_number(
+        db, "sku", warehouse_id=warehouse_id,
+        is_taken=lambda code: db.query(models.Product).filter(
+            models.Product.sku == code).first() is not None)
 
 
-def next_grn_no(db, when=None):
+def next_grn_no(db, when=None, warehouse_id=None):
     """The next GRN number: GRN-2026-00001, GRN-2026-00002, …
 
     Numbered per calendar year, so the year in the number says when the goods
@@ -128,17 +168,11 @@ def next_grn_no(db, when=None):
     disagreed it would hand out a number that already existed — on the one field
     people quote to each other when a delivery is queried.
     """
-    year = (when or dt.datetime.utcnow()).year
-    prefix = f"GRN-{year}-"
-    taken = {
-        (row[0] or "") for row in
-        db.query(models.Purchase.grn_no)
-          .filter(models.Purchase.grn_no.like(f"{prefix}%")).all()
-    }
-    n = 1
-    while f"{prefix}{n:05d}" in taken:
-        n += 1
-    return f"{prefix}{n:05d}"
+    from . import numbering
+    return numbering.next_number(
+        db, "grn", warehouse_id=warehouse_id, when=(when or dt.datetime.utcnow()),
+        is_taken=lambda code: db.query(models.Purchase).filter(
+            models.Purchase.grn_no == code).first() is not None)
 
 
 def build_grn_from_document(db, doc):
@@ -159,7 +193,8 @@ def build_grn_from_document(db, doc):
     # Otherwise one is allocated HERE, at the moment a receipt actually exists.
     # Allocating earlier, on the review screen, would spend numbers on invoices
     # that are never received and leave gaps nobody can account for.
-    grn_no = (meta.get("grn_no") or "").strip() or next_grn_no(db)
+    grn_no = ((meta.get("grn_no") or "").strip()
+              or next_grn_no(db, warehouse_id=purchase.warehouse_id))
 
     purchase = models.Purchase(
         document_id=doc.id, supplier_id=doc.supplier_id,
@@ -173,13 +208,15 @@ def build_grn_from_document(db, doc):
     db.add(purchase)
     db.flush()
 
+    cat_id = purchase_catalogue_id(db, purchase)
     for it in data.get("line_items", []):
         # a line that names a size, a brand or a design is matched on that tuple,
         # the way a breakdown row is — see named_attrs
         match = match_product(db, it.get("barcode"), it.get("description"),
                               it.get("hsn"), doc.supplier_id,
                               attrs=named_attrs(it.get("size"), it.get("brand"),
-                                                it.get("design")))
+                                                it.get("design")),
+                              catalogue_id=cat_id)
         db.add(models.PurchaseLine(
             purchase_id=purchase.id,
             product_id=match.id if match else None,
@@ -224,7 +261,8 @@ def backfill_grn_numbers(db):
                     .order_by(models.Purchase.posted_at.asc().nullslast(),
                               models.Purchase.id.asc()).all())
     for p in unnumbered:
-        p.grn_no = next_grn_no(db, p.posted_at or p.created_at)
+        p.grn_no = next_grn_no(db, p.posted_at or p.created_at,
+                               warehouse_id=p.warehouse_id)
         db.flush()                       # so the next call sees this one taken
         filled += 1
 
@@ -353,7 +391,8 @@ def set_line_splits(db, line, rows):
     else:
         # breakup removed: fall back to matching the bundle line as a whole
         match = match_product(db, line.barcode, line.description, line.hsn,
-                              line.purchase.supplier_id, attrs=line_named_attrs(line))
+                              line.purchase.supplier_id, attrs=line_named_attrs(line),
+                              catalogue_id=purchase_catalogue_id(db, line.purchase))
         line.product_id = match.id if match else None
         line.is_new_product = match is None
     db.flush()
@@ -361,22 +400,18 @@ def set_line_splits(db, line, rows):
 
 
 def _receive_into_stock(db, product, qty, rate, purchase, note=None):
-    """Append one inward movement and roll the product's weighted-average cost."""
-    qty = float(qty or 0)
-    rate = float(rate or 0)
-    old_qty = float(product.stock_qty or 0)
-    old_avg = float(product.avg_cost or 0)
-    new_qty = old_qty + qty
-    product.avg_cost = round(((old_qty * old_avg) + (qty * rate)) / new_qty, 4) if new_qty else rate
-    product.stock_qty = new_qty
-    product.last_rate = rate
+    """Append one inward movement at the receiving warehouse.
+
+    The weighted-average cost rolls at THAT warehouse and the company figures are
+    rolled up from the buildings beneath them — see services/stock_locations. The
+    warehouse comes off the GRN, which `post_grn` has already resolved, so a
+    receipt can never land nowhere.
+    """
     ref = f"GRN {purchase.grn_no or ''} / Inv {purchase.invoice_number or ''}".strip()
-    db.add(models.StockMovement(
-        product_id=product.id, qty_delta=qty, kind="inward",
-        ref_type="purchase", ref_id=purchase.id, rate=rate,
-        balance_after=product.stock_qty,
-        note=f"{ref} · {note}" if note else ref,
-    ))
+    product.last_rate = float(rate or 0)
+    stock_loc.apply(db, product, purchase.warehouse_id, float(qty or 0),
+                    kind="inward", ref_type="purchase", ref_id=purchase.id,
+                    rate=rate, note=f"{ref} · {note}" if note else ref)
 
 
 def apply_category(db, product, name):
@@ -386,11 +421,18 @@ def apply_category(db, product, name):
     The master lists most names twice — once under their gender section and once
     under OVERALL — so the specific section is the one worth keeping: a
     LADIES-T-SHIRT belongs to LADIES, and reporting it as OVERALL would lose the
-    only thing the section column is for."""
+    only thing the section column is for.
+
+    Looked up inside the item's own business line, so a name that exists in two
+    catalogues resolves to the section its own line gives it."""
     if not name:
         return False
     product.category = name
-    rows = db.query(models.Category).filter(models.Category.name == name).all()
+    q = db.query(models.Category).filter(models.Category.name == name)
+    if getattr(product, "catalogue_id", None):
+        q = q.filter((models.Category.catalogue_id == product.catalogue_id)
+                     | (models.Category.catalogue_id.is_(None)))
+    rows = q.all()
     chosen = next((c for c in rows if c.section and c.section != "OVERALL"),
                   rows[0] if rows else None)
     product.category_section = chosen.section if chosen else None
@@ -413,11 +455,15 @@ def _create_product(db, purchase, line, split=None, mint_codes=False, unit=None)
     product = models.Product(
         # a variant carries no supplier barcode — the bundle's code covered the
         # whole bundle — so it gets one of ours below instead
-        sku=None if mint_codes else _next_sku(db),
+        sku=None if mint_codes else _next_sku(db, purchase.warehouse_id),
         barcode=None if split else line.barcode,
         description=line.description or "(unnamed)", hsn=line.hsn,
         uom=code, unit_type=code, pieces_per_unit=per,
         primary_supplier_id=purchase.supplier_id,
+        # The business line this item belongs to, from the warehouse receiving
+        # it. Set at birth because it decides which categories classify it, which
+        # attributes it carries, and which stock records it may ever merge with.
+        catalogue_id=purchase_catalogue_id(db, purchase),
         stock_qty=0.0, avg_cost=0.0,
     )
     if split is not None:
@@ -498,6 +544,19 @@ def post_grn(db, purchase):
     if purchase.status == "posted":
         return {"ok": False, "error": "already posted", "purchase_id": purchase.id}
 
+    # WHERE the goods land, settled once, here, before a single movement is
+    # written. A draft may be raised before anybody has said which building took
+    # the delivery — but stock cannot stand nowhere, so a blank resolves to the
+    # default warehouse and is WRITTEN BACK to the GRN. Leaving it blank on the
+    # row while posting its stock somewhere would make the receipt unable to say
+    # where its own goods went, and would make an unpost guess a second time.
+    purchase.warehouse_id = stock_loc.resolve_warehouse_id(db, purchase.warehouse_id)
+    db.flush()
+    # And therefore WHAT KIND of goods these are: the receiving warehouse's
+    # business line. Everything this GRN creates is stamped with it, and nothing
+    # it matches against comes from outside it.
+    cat_id = purchase_catalogue_id(db, purchase)
+
     # A half-finished breakdown must never reach stock: if the rows don't add up
     # to what actually arrived, posting would quietly lose or invent units. The
     # target is the RECEIVED quantity — billed less any shortage recorded at the
@@ -561,7 +620,8 @@ def post_grn(db, purchase):
                 if not product:
                     attrs = {a: getattr(sp, a, None) for a in SPLIT_ATTRS}
                     product = match_product(db, None, line.description, line.hsn,
-                                            purchase.supplier_id, attrs=attrs)
+                                            purchase.supplier_id, attrs=attrs,
+                                            catalogue_id=cat_id)
                 if not product:
                     product = _create_product(db, purchase, line, split=sp,
                                               mint_codes=True,
@@ -651,6 +711,8 @@ def post_grn(db, purchase):
     from . import bundles as bundle_svc
     made = bundle_svc.create_for_purchase(db, purchase)
     return {"ok": True, "purchase_id": purchase.id,
+            "warehouse_id": purchase.warehouse_id,
+            "warehouse": purchase.warehouse.name if purchase.warehouse else None,
             "products_created": created, "products_updated": updated,
             "lines": len(purchase.lines), "size_rows": split_rows,
             "bundles": [b.code for b in made], "pieces": pieces,
@@ -685,29 +747,9 @@ def _grn_movements(db, purchase):
         models.StockMovement.ref_id == purchase.id).order_by(models.StockMovement.id).all()
 
 
-def _replay_stock(product, exclude_ids):
-    """Recompute (qty, avg_cost) from a product's ledger, ignoring `exclude_ids`.
-
-    A weighted average can't be un-mixed arithmetically — it depends on the order
-    things arrived — so subtracting one purchase back out of `avg_cost` would only
-    be right when nothing else happened since. Replaying the append-only ledger
-    without those rows gives the exact figures the product would carry if the GRN
-    had never posted, which is what the ledger is for."""
-    qty, avg = 0.0, 0.0
-    for mv in sorted(product.movements, key=lambda m: m.id):
-        if mv.id in exclude_ids:
-            continue
-        delta = float(mv.qty_delta or 0)
-        if delta > 0 and mv.kind == "inward":
-            new_qty = qty + delta
-            rate = float(mv.rate or 0)
-            avg = round(((qty * avg) + (delta * rate)) / new_qty, 4) if new_qty else rate
-            qty = new_qty
-        else:
-            # outward / return / adjustment / earlier reversal: quantity moves,
-            # the valuation of what remains does not
-            qty = round(qty + delta, 3)
-    return qty, avg
+# Replaying the ledger to recompute stock and weighted-average cost lives in
+# services/stock_locations (`replay` / `rebuild`) — it is per warehouse now,
+# which is where an average is actually kept. Unposting reads it through there.
 
 
 def unpost_blockers(db, purchase):
@@ -724,21 +766,39 @@ def unpost_blockers(db, purchase):
     # stock that has already left the warehouse cannot be un-received
     rows = _grn_movements(db, purchase)
     exclude = {m.id for m in rows}
-    for pid in _movements_by_product(rows):
+    seen = set()
+    for pid, _wid in _movements_by_location(rows):
+        if pid in seen:
+            continue
+        seen.add(pid)
         product = db.get(models.Product, pid)
         if not product:
             continue
-        qty, _ = _replay_stock(product, exclude)
-        if qty < -SPLIT_TOLERANCE:
-            out.append(f"“{product.description}” ({product.sku}) would go to {qty:g} — "
-                       f"{-qty:g} of it has already been dispatched or returned")
+        # Checked per WAREHOUSE, not on the company total. A shirt received into
+        # Erode and since transferred to Karur nets to zero across the company,
+        # so a company-level check would happily unpost it — and leave Erode
+        # holding minus twenty of something that is standing in Karur.
+        for wid, (qty, _avg) in stock_loc.replay(db, product, exclude).items():
+            if qty < -SPLIT_TOLERANCE:
+                wh = db.get(models.Warehouse, wid)
+                where = f" at {wh.name}" if wh else ""
+                out.append(f"“{product.description}” ({product.sku}) would go to "
+                           f"{qty:g}{where} — {-qty:g} of it has already been "
+                           f"dispatched or returned")
     return out
 
 
-def _movements_by_product(movements):
+def _movements_by_location(movements):
+    """{(product_id, warehouse_id): [movements]} — the grain a reversal works at.
+
+    Grouped by warehouse as well as product because the compensating row has to
+    be written where the original one landed. A GRN receives into one building,
+    but a GRN posted, unposted and re-posted after the default warehouse changed
+    has rows in two, and pooling them would reverse both out of whichever one was
+    read first."""
     out = {}
     for mv in movements:
-        out.setdefault(mv.product_id, []).append(mv)
+        out.setdefault((mv.product_id, mv.warehouse_id), []).append(mv)
     return out
 
 
@@ -804,26 +864,32 @@ def unpost_grn(db, purchase):
                 "error": "can't unpost — " + "; ".join(blockers)}
 
     rows = _grn_movements(db, purchase)
-    exclude = {m.id for m in rows}
     qty_reversed, n_reversed = 0.0, 0
-    for pid, mvs in _movements_by_product(rows).items():
+    touched = set()
+    for (pid, wid), mvs in _movements_by_location(rows).items():
         product = db.get(models.Product, pid)
         if not product:
             continue
         net, rate = _net_and_rate(mvs)
         if net == 0:                       # an earlier unpost already undid this
             continue
-        final_qty, final_avg = _replay_stock(product, exclude)
-        db.add(models.StockMovement(
-            product_id=product.id, qty_delta=-net, kind="reversal",
-            ref_type="purchase_unpost", ref_id=purchase.id, rate=rate,
-            balance_after=final_qty,
-            note=f"Unposted GRN {purchase.grn_no or ''} / "
-                 f"Inv {purchase.invoice_number or ''}".strip()))
+        # Written at the warehouse the goods were received into, so that building
+        # gives them back rather than the company losing them from nowhere.
+        stock_loc.apply(db, product, wid, -net, kind="reversal",
+                        ref_type="purchase_unpost", ref_id=purchase.id, rate=rate,
+                        note=f"Unposted GRN {purchase.grn_no or ''} / "
+                             f"Inv {purchase.invoice_number or ''}".strip())
         qty_reversed += net
         n_reversed += 1
-        product.stock_qty = final_qty
-        product.avg_cost = final_avg
+        touched.add(product.id)
+    # `apply` moved the quantity; only a replay can restate the weighted-average
+    # cost, which cannot be un-mixed arithmetically. Done once per product after
+    # every reversal it takes, so a GRN that received twice into one warehouse is
+    # replayed once rather than mid-way through its own undoing.
+    for pid in touched:
+        product = db.get(models.Product, pid)
+        if product:
+            stock_loc.rebuild(db, product)
     db.flush()
 
     removed, kept = [], []
@@ -861,21 +927,26 @@ def unpost_grn(db, purchase):
             "bundles_removed": dropped, "pieces_removed": pieces_dropped}
 
 
-def adjust_stock(db, product, new_qty, note="manual adjustment"):
+def adjust_stock(db, product, new_qty, note="manual adjustment", warehouse_id=None):
     """Set a product's stock to an exact figure via an adjustment movement
-    (never edit stock_qty directly — the ledger stays the source of truth)."""
-    delta = round(float(new_qty) - float(product.stock_qty or 0), 3)
+    (never edit stock_qty directly — the ledger stays the source of truth).
+
+    `new_qty` is what was COUNTED AT ONE WAREHOUSE, because that is the only
+    thing anybody can count: somebody walked a building and found eleven. With no
+    warehouse named the count is taken against the default one, which is what a
+    single-warehouse install has always meant by it.
+
+    Reading `new_qty` as a company total would be the dangerous alternative — a
+    count of eleven in Erode would wipe out everything standing in Karur.
+    """
+    warehouse_id = stock_loc.resolve_warehouse_id(db, warehouse_id)
+    on_hand = stock_loc.qty_at(db, product.id, warehouse_id)
+    delta = round(float(new_qty) - on_hand, 3)
     if delta == 0:
         return None
-    product.stock_qty = float(new_qty)
-    mv = models.StockMovement(
-        product_id=product.id, qty_delta=delta, kind="adjustment",
-        ref_type="adjustment", ref_id=None, rate=product.avg_cost or 0,
-        balance_after=product.stock_qty, note=note,
-    )
-    db.add(mv)
-    db.flush()
-    return mv
+    return stock_loc.apply(db, product, warehouse_id, delta, kind="adjustment",
+                           ref_type="adjustment", rate=product.avg_cost or 0,
+                           note=note)
 
 
 # There is no update_product() any more, on purpose. A product is whatever its GRN

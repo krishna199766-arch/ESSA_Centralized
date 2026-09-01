@@ -28,8 +28,10 @@ import re
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from . import models
 from .database import SessionLocal
 from .services import permissions
+from .services import scope
 from .services.users import ROLE_RANK, resolve_token
 
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -43,6 +45,17 @@ READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 # key is a permission that silently stops applying. `None` means no screen claims
 # the path — the notification poll, the voice endpoint — and those are decided by
 # the role alone. See services/permissions.
+#: Screens that show ONE BUILDING'S work. A request for one of these from an
+#: account that is allotted warehouses must say which — otherwise the scope
+#: filters in services/scope have nothing to narrow on and hand back the whole
+#: company. Screens absent from this set are company-wide by nature (suppliers,
+#: masters, catalogues, users, the label designer) or are the very screens used
+#: to choose a warehouse, and must stay reachable without one.
+WAREHOUSE_SCOPED = {
+    "dashboard", "lr", "documents", "purchases", "inventory",
+    "labelprint", "outward", "inward", "returns", "deadstock", "reports",
+}
+
 POLICY = [
     # --- accounts and the server's own configuration ---
     (r"^/api/users", "superadmin", "superadmin", "users"),
@@ -55,7 +68,19 @@ POLICY = [
     # dispatch has to name the branch it is going to — and only admin adds a
     # warehouse or closes a store, which is the same shape as the masters
     # above it.
+    # The central dashboard's own read, matched off before the locations prefix
+    # it sits inside: it is a company-wide stock VALUATION, which is admin, while
+    # the location lists beneath it are read by the floor all day.
+    (r"^/api/locations/overview", "admin", "admin", "central"),
+    # Shop takings per branch. Admin for the same reason the overview is:
+    # it is company revenue on one screen. Matched off ABOVE the general
+    # locations row, or the floor would read it at `user` rank.
+    (r"^/api/locations/sales", "admin", "admin", "central"),
     (r"^/api/locations", "user", "admin", "locations"),
+    # What each warehouse trades in — its categories, its attributes, its option
+    # lists. Read by the floor because the GRN screen has to know which
+    # categories to offer; edited by admin, like every other master.
+    (r"^/api/catalogues", "user", "admin", "catalogues"),
     (r"^/api/suppliers", "user", "admin", "suppliers"),
     # Label templates: the floor prints from them all day, admin lays them out.
     # /print and /templates/{id}/preview are GETs, so they fall to the read rank.
@@ -207,12 +232,47 @@ async def auth_middleware(request: Request, call_next):
                 {"detail": f"You do not have {verb} access to {label}. "
                            "Ask a super admin to grant it in Users & Access."},
                 status_code=403)
+        # …and finally WHICH BUILDING. An account may be allotted a set of
+        # warehouses; one that is confined to Erode must not read Karur's work,
+        # however it asks.
+        #
+        # Two cases, and the second is the one that matters. Rejecting a wrong
+        # explicit id is the obvious half. The dangerous half is the request that
+        # names NO warehouse at all: services/scope returns every row unfiltered
+        # when it has no id to filter on, so a restricted manager who simply
+        # dropped the header would see the whole company. That is closed here,
+        # in the one place every call passes through, rather than in each of the
+        # dozen list endpoints — a leak that has to be plugged twelve times is a
+        # leak that comes back.
+        mine = permissions.allotted(perms)
+        if mine:
+            wid = scope.from_request(request)
+            if wid and int(wid) not in mine:
+                wh = db.get(models.Warehouse, int(wid))
+                where = f"“{wh.name}”" if wh else f"warehouse #{wid}"
+                return JSONResponse(
+                    {"detail": f"You are not allotted {where}. Ask a super admin "
+                               f"to add it in Users & Access."}, status_code=403)
+            if wid is None and screen in WAREHOUSE_SCOPED:
+                if len(mine) == 1:
+                    # Exactly one building: adopt it rather than refuse. Asking a
+                    # manager with a single warehouse to say which one on every
+                    # request is asking a question with one answer.
+                    request.scope["headers"] = list(request.scope["headers"]) + [
+                        (scope.HEADER.encode(), str(mine[0]).encode())]
+                else:
+                    return JSONResponse(
+                        {"detail": "Open one of your warehouses first — this "
+                                   "screen shows one building's work."},
+                        status_code=403)
         # Carried on the request so a route can attribute what it writes to the
-        # person who did it without resolving the token a second time, and so a
-        # serialiser can withhold a figure this account is not shown.
+        # person who did it without resolving the token a second time, so a
+        # serialiser can withhold a figure this account is not shown, and so the
+        # location reads can narrow themselves to the allotted buildings.
         request.state.user = {"username": user.username, "role": user.role,
                               "full_name": user.full_name or "", "id": user.id,
                               "permissions": perms}
+        request.state.warehouses = mine
     finally:
         db.close()
 

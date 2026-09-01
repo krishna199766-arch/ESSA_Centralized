@@ -11,6 +11,7 @@ Extraction       an engine run over a Document -> canonical JSON + confidence.
 LineItem         denormalised line rows for querying/reporting once confirmed.
 """
 import datetime as dt
+import uuid as _uuid
 from sqlalchemy import (Column, Integer, String, Float, Text, DateTime,
                         ForeignKey, JSON, Boolean, UniqueConstraint)
 from sqlalchemy.orm import relationship, backref
@@ -97,6 +98,15 @@ class Document(Base):
     mime = Column(String)
     document_type = Column(String, default="invoice")   # invoice | lr_register | purchase_order
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
+    # Which warehouse's desk this bill belongs to. Stamped from whichever
+    # warehouse the person keying it is working inside, so Erode's invoice queue
+    # is Erode's and Karur's clerk never has to scroll past it.
+    #
+    # NULL on every row that predates warehouse workspaces, and those stay
+    # visible everywhere on purpose — an invoice nobody has assigned is still
+    # somebody's to deal with, and hiding it until it is claimed is how it goes
+    # unpaid. See services/scope.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
     # uploaded -> extracted -> needs_review -> confirmed -> posted
     status = Column(String, default="uploaded", index=True)
     uploaded_at = Column(DateTime, default=now)
@@ -154,6 +164,12 @@ class Product(Base):
     stock-movement ledger — never edited directly."""
     __tablename__ = "products"
     id = Column(Integer, primary_key=True)
+    # Which business line this item belongs to, stamped from the warehouse that
+    # received it. A saree and a t-shirt are not two rows of one catalogue that
+    # happen to differ; they are different trades, and this is what lets the
+    # inventory screen, the label designer and the phone form show one warehouse's
+    # goods without the other's.
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True)
     sku = Column(String, unique=True, index=True)      # internal code we assign
     barcode = Column(String, index=True)               # supplier barcode if any
     description = Column(String, nullable=False)
@@ -208,6 +224,16 @@ class Product(Base):
     # supplier's trade discount on what we PAID; the two must never be confused.
     # Replaced `margin_pct` (markup over cost), which nobody was filling in.
     sale_discount_pct = Column(Float)
+    # Attributes this item's CATALOGUE defines that Product has no column for —
+    # a saree's weave, its zari, its border, its pallu. {key: value}.
+    #
+    # A JSON column rather than ten more columns, because the alternative is a
+    # migration every time a business line is added, and the columns would be
+    # NULL for every item outside that line. The ten above keep their columns:
+    # they are what matching, size splits, labels and every existing screen read,
+    # and moving them in here to be tidy would rewrite all of it for no gain.
+    # See models.CatalogueAttribute.
+    attrs = Column(JSON)
     detailed = Column(Boolean, default=False, index=True)
     detailed_at = Column(DateTime)
     detailed_by = Column(String)
@@ -215,6 +241,12 @@ class Product(Base):
     primary_supplier = relationship("Supplier")
     movements = relationship("StockMovement", back_populates="product",
                              cascade="all, delete-orphan", order_by="StockMovement.id")
+    # Cascaded for the same reason the movements are: unposting a GRN deletes the
+    # products it created outright (see inventory._product_is_orphan), and a
+    # balance row left pointing at a deleted product is a foreign key violation
+    # that fails the whole unpost — on SQLite as well, which enforces them here.
+    balances = relationship("StockBalance", back_populates="product",
+                            cascade="all, delete-orphan")
 
     @property
     def stock_value(self):
@@ -228,6 +260,10 @@ class Purchase(Base):
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
+    # Which building the goods were unloaded at. Chosen on the GRN screen and
+    # settled at post — a draft may be raised before anybody knows, but stock
+    # cannot land nowhere, so posting resolves a blank to the default warehouse.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
     grn_no = Column(String)
     invoice_number = Column(String)
     invoice_date = Column(String)
@@ -240,6 +276,7 @@ class Purchase(Base):
 
     document = relationship("Document")
     supplier = relationship("Supplier")
+    warehouse = relationship("Warehouse")
     lines = relationship("PurchaseLine", back_populates="purchase",
                          cascade="all, delete-orphan", order_by="PurchaseLine.id")
 
@@ -592,10 +629,21 @@ class GrnShortage(Base):
 
 class StockMovement(Base):
     """Append-only ledger. Every stock change is a row with the running balance,
-    so inventory is always reconstructable and auditable."""
+    so inventory is always reconstructable and auditable.
+
+    `warehouse_id` says WHERE the change happened. It is nullable because every
+    row written before warehouses held stock has no answer of its own — those are
+    backfilled to the one warehouse that existed (services/stock_locations.
+    backfill), which is not a guess: the whole app was built on there being one.
+
+    `balance_after` is the balance AT THAT WAREHOUSE, not the company total. The
+    backfill leaves the historic figures correct precisely because a single
+    warehouse's balance and the company's were the same number.
+    """
     __tablename__ = "stock_movements"
     id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey("products.id"))
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
     qty_delta = Column(Float)                 # +inward / -outward
     kind = Column(String)                     # inward | outward | adjustment
     ref_type = Column(String)                 # purchase | ...
@@ -606,6 +654,48 @@ class StockMovement(Base):
     created_at = Column(DateTime, default=now)
 
     product = relationship("Product", back_populates="movements")
+
+
+class StockBalance(Base):
+    """How much of one product stands in one warehouse, and what it cost.
+
+    Derivable from the ledger by summing it, and kept anyway — the alternative is
+    a GROUP BY over every movement ever written each time a screen asks what is
+    on a shelf, and the screens ask constantly (the picker checks before every
+    dispatch line). The ledger stays the source of truth: this row is only ever
+    written by services/stock_locations, alongside the movement that changed it,
+    and `rebuild` recomputes the whole table from the ledger when the two are
+    ever doubted.
+
+    `avg_cost` is per warehouse because valuation is per warehouse. The same
+    shirt bought at ₹180 into Erode and ₹200 into Karur is worth different money
+    in each building, and a warehouse-wise stock valuation that used one blended
+    figure would report a value neither warehouse holds.
+
+    Product.stock_qty and Product.avg_cost remain the COMPANY totals, rolled up
+    from these rows. That is what keeps every screen written before this table
+    existed reading the same numbers it always did.
+    """
+    __tablename__ = "stock_balances"
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True, nullable=False)
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True, nullable=False)
+    qty = Column(Float, default=0.0)
+    avg_cost = Column(Float, default=0.0)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    product = relationship("Product", back_populates="balances")
+    warehouse = relationship("Warehouse")
+
+    # One row per product per building. Without this, two concurrent receipts
+    # into the same warehouse each insert their own row and the stock figure
+    # becomes whichever of them a later query happens to read first.
+    __table_args__ = (UniqueConstraint("product_id", "warehouse_id",
+                                       name="uq_balance_product_warehouse"),)
+
+    @property
+    def value(self):
+        return round((self.qty or 0) * (self.avg_cost or 0), 2)
 
 
 # ============================================================================
@@ -622,14 +712,36 @@ class StockOutward(Base):
     would mean reconciling the pair; keeping the sent qty and the accepted qty on
     the same line makes a short delivery visible by subtraction.
 
-    draft → posted (dispatched, stock out) → received (counted and accepted)."""
+    draft → posted (dispatched, stock out) → received (counted and accepted).
+
+    WHERE FROM AND WHERE TO used to be two strings. They are now rows, and which
+    of the two "to" columns is set decides what KIND of movement this is:
+
+      * `to_warehouse_id` — a warehouse-to-warehouse TRANSFER. Stock leaves the
+        source at post and ARRIVES at the destination when it is received, so the
+        goods exist in exactly one building at a time and are visibly in transit
+        in between. This is what the transfer screen raises.
+      * `to_store_id` — a dispatch to a shop. Stock leaves the warehouse and does
+        not come back into this ledger: the till's own database owns a store's
+        stock and reads these dispatches to build it (see pos_mount and the
+        shop's app/transfers). Recording an arrival here as well would put the
+        same garment on two systems' shelves.
+      * neither — a customer or a destination nobody has registered yet, exactly
+        as before.
+
+    `to_destination` is still written, always, with the chosen place's name. The
+    shop matches by name and every row raised before this existed only has the
+    string, so it stays the thing history is readable from."""
     __tablename__ = "stock_outwards"
     id = Column(Integer, primary_key=True)
     code = Column(String)                       # package / order code
     date = Column(String)
     from_company = Column(String, default="Essa Garments Private Limited")
     from_location = Column(String, default="WAREHOUSE")
+    from_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
     to_destination = Column(String)             # store / customer
+    to_warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
+    to_store_id = Column(Integer, ForeignKey("stores.id"), index=True)
     packed_by = Column(String)
     received_by = Column(String)                # who accepted it at the far end
     received_date = Column(String)              # the date they wrote on the note
@@ -640,6 +752,15 @@ class StockOutward(Base):
 
     lines = relationship("StockOutwardLine", back_populates="outward",
                          cascade="all, delete-orphan", order_by="StockOutwardLine.id")
+    from_warehouse = relationship("Warehouse", foreign_keys=[from_warehouse_id])
+    to_warehouse = relationship("Warehouse", foreign_keys=[to_warehouse_id])
+    to_store = relationship("Store", foreign_keys=[to_store_id])
+
+    @property
+    def is_transfer(self):
+        """Whether the far end is a warehouse of ours, i.e. whether receiving it
+        puts stock back into this ledger."""
+        return self.to_warehouse_id is not None
 
     @property
     def total_qty(self):
@@ -808,13 +929,240 @@ class PurchaseReturnLine(Base):
 
 
 # ============================================================================
+#  Businesses — the legal entities this platform runs
+# ============================================================================
+#  Until now "the company" was two environment variables, ESSA_COMPANY_NAME and
+#  ESSA_COMPANY_GSTIN. That is exactly right for one company and wrong the moment
+#  there are two: Essa and Taqua carry DIFFERENT GSTINs, file separate returns,
+#  and a month's trading that cannot be split between them is a month's work to
+#  unpick. The till already knew this — the shop has carried a `companies` table
+#  with a GSTIN per row, and stamps `Invoice.company_id`, for as long as it has
+#  had a picker. The warehouse is the half that did not.
+#
+#  So a Business sits above Warehouse:
+#
+#      BUSINESS  ── warehouses ── stores ── POS terminals
+#
+#  A CATALOGUE is a different axis and is deliberately not folded in here: it is
+#  what a warehouse TRADES IN (garments, silks) and owns the categories and
+#  attributes. One business may run several lines; one line may be run by several
+#  businesses. Collapsing the two would make "sells sarees" and "files its own
+#  GST return" the same fact, and they are not.
+# ============================================================================
+class Business(Base):
+    """A legal entity. Whose GSTIN goes on the bill, and whose return it lands in."""
+    __tablename__ = "businesses"
+    id = Column(Integer, primary_key=True)
+    # The internal identifier, generated here and never typed by anybody. `code`
+    # below is the one people use and may change; this one cannot, which is what
+    # makes it safe for another system to hold onto.
+    uuid = Column(String, unique=True, index=True, default=lambda: str(_uuid.uuid4()))
+    #: What people type and see — ESSA, TAQUA. Unique, short, upper-case.
+    code = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)                  # Essa
+    legal_name = Column(String)                            # Essa Garments Private Limited
+    gstin = Column(String, index=True)
+    pan = Column(String)
+
+    address = Column(String)
+    city = Column(String)
+    state = Column(String)
+    #: The GST state code — 33 for Tamil Nadu. It decides whether a sale is
+    #: inter-state, so it is a field and not part of the address blob.
+    state_code = Column(String)
+    country = Column(String, default="India")
+    pincode = Column(String)
+    phone = Column(String)
+    email = Column(String)
+
+    currency = Column(String, default="INR")
+    timezone = Column(String, default="Asia/Kolkata")
+    #: Which month the financial year opens in — April in India. Document numbers
+    #: that carry a year (GRN-ES-2627-0001) are stamped from this, so a company
+    #: on a different year does not have to be a code change.
+    fy_start_month = Column(Integer, default=4)
+
+    is_default = Column(Boolean, default=False, index=True)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    warehouses = relationship("Warehouse", back_populates="business")
+
+
+class NumberSequence(Base):
+    """How one kind of document numbers itself, here.
+
+    Every number this app issues used to be a format string in the code:
+    `f"ESSA-{n:05d}"` for a SKU (in TWO files), `f"GRN-{year}-"`, `f"LRE-{n:05d}"`,
+    `f"OUT-{n:05d}"`, `f"PR-{n:05d}"`. A second business cannot have GRN-ES-2627-0001
+    while the first has GRN-TQ-2627-0001 without editing Python, which means it
+    cannot happen at all on a warehouse PC.
+
+    RESOLUTION IS MOST-SPECIFIC-FIRST: a row for this warehouse beats a row for
+    its business, which beats a row for everybody. So a company can set its house
+    style once and one warehouse can still differ.
+
+    THE COUNTER IS A HINT, NOT THE TRUTH. `next_number` is where the search
+    starts; services/numbering then steps over anything already issued before
+    handing a number out. That rule is inherited deliberately from the GRN
+    numbering it replaces, whose docstring says why: a counter has to be kept in
+    step with rows that get deleted, and the first time the two disagree it hands
+    out a number that already exists — on the one field people quote to each
+    other when a delivery is queried.
+    """
+    __tablename__ = "number_sequences"
+    id = Column(Integer, primary_key=True)
+    business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
+    #: NULL = every warehouse of this business. Set = this one only.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
+    #: grn | lr | invoice | transfer | debit_note | adjustment | pos_invoice | sku
+    doc = Column(String, index=True, nullable=False)
+
+    prefix = Column(String, default="")                    # "GRN-ES-"
+    #: Whether the financial year goes in the number, and how it is written:
+    #: "short" → 2627, "long" → 2026-27, "calendar" → 2026.
+    use_year = Column(Boolean, default=False)
+    year_format = Column(String, default="short")
+    padding = Column(Integer, default=5)                   # 0001 vs 00001
+    separator = Column(String, default="-")
+    next_number = Column(Integer, default=1)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    business = relationship("Business")
+    warehouse = relationship("Warehouse")
+
+    # One rule per document per place. Two would make "which format applies"
+    # depend on row order, and the answer would change when either was edited.
+    __table_args__ = (UniqueConstraint("business_id", "warehouse_id", "doc",
+                                       name="uq_sequence_scope_doc"),)
+
+
+# ============================================================================
+#  Catalogues — what a warehouse actually trades in
+# ============================================================================
+#  A garment warehouse and a silk warehouse run the SAME process — LR entry,
+#  invoice entry, GRN, inventory, labels, outward, inward, POS — over completely
+#  different goods. Essa receives t-shirts that have a sleeve and a fit; Taqua
+#  receives sarees that have a weave and a zari border and no sleeve at all.
+#
+#  Before this, there was one category master (686 rows, every one of them a
+#  garment) and one attribute vocabulary, and both were global. Pointing a silk
+#  warehouse at them would have offered its receiving clerk ESSA KIDS-TRUNK as a
+#  category for a Kanchipuram saree, and no way at all to record what it actually
+#  is. Tagging every master row with a WAREHOUSE instead would have been worse in
+#  the other direction: Essa, Palakkad and Madurai all stock garments, so the same
+#  686 rows would exist three times and drift apart the first time one was edited.
+#
+#  So the unit of separation is the BUSINESS LINE, not the building. A catalogue
+#  owns the categories, the attributes and the option lists; a warehouse points at
+#  one; and any number of warehouses can share it. A master row with no catalogue
+#  is SHARED by all of them — which is what payment modes and transporters are,
+#  and what every row that predates this is treated as until somebody says
+#  otherwise.
+# ============================================================================
+class Catalogue(Base):
+    """A line of business — the goods a warehouse deals in, and their vocabulary."""
+    __tablename__ = "catalogues"
+    id = Column(Integer, primary_key=True)
+    code = Column(String, unique=True, index=True, nullable=False)   # GARMENTS | SILKS
+    name = Column(String, nullable=False)
+    description = Column(String)
+    # The one a warehouse falls back to when nothing has been said, and the one
+    # every pre-existing row belongs to. Exactly one is default; see
+    # services/catalogues.
+    is_default = Column(Boolean, default=False, index=True)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    warehouses = relationship("Warehouse", back_populates="catalogue")
+    # Cascaded because these two ARE the catalogue — its attributes and their
+    # values have no meaning without it, and nothing else points at them. Without
+    # the cascade, deleting a line that has been set up at all fails on a foreign
+    # key, which is a 500 on the one path the router had already checked was safe.
+    # Categories, products and warehouses are deliberately NOT cascaded: those
+    # are real records that outlive the classification, and the router refuses
+    # the delete while any of them exist.
+    attributes = relationship("CatalogueAttribute", back_populates="catalogue",
+                              cascade="all, delete-orphan")
+    options = relationship("AttributeOption", back_populates="catalogue",
+                           cascade="all, delete-orphan")
+
+
+class CatalogueAttribute(Base):
+    """Which attributes this catalogue records against an item, and what to call them.
+
+    Ten of them already have a column on Product — colour, size, pattern, fit,
+    product type, material, design no, brand, style, sleeve — because those are
+    what the garment stock master has always kept. A catalogue that uses one of
+    those names it in `column`, and the value goes to the real column: the
+    matching, the splits, the labels and every screen written before catalogues
+    existed keep working unchanged.
+
+    An attribute a catalogue needs and Product has no column for — a weave, a zari
+    border, a pallu — has `column` empty and is stored in `Product.attrs`. That is
+    the difference between adding a business line and adding a migration each time
+    one is added.
+
+    `identity` says whether two items differing only in this attribute are two
+    stock items or one. Size and colour are identity; a note is not. It is what
+    inventory.match_product compares on, so getting it wrong merges goods that
+    should be separate — hence it is stated, not guessed.
+    """
+    __tablename__ = "catalogue_attributes"
+    id = Column(Integer, primary_key=True)
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True, nullable=False)
+    key = Column(String, nullable=False)          # color | weave | zari | …
+    label = Column(String)                        # what the screen calls it
+    column = Column(String)                       # Product column, when it has one
+    identity = Column(Boolean, default=True)
+    sort = Column(Integer, default=0)
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    catalogue = relationship("Catalogue", back_populates="attributes")
+
+    __table_args__ = (UniqueConstraint("catalogue_id", "key",
+                                       name="uq_cat_attr_key"),)
+
+
+class AttributeOption(Base):
+    """One value offered in one attribute's dropdown, for one catalogue.
+
+    These used to be a JSON file shipped beside the code, which was right while
+    there was one vocabulary and it came out of Essa's own stock master. It stops
+    being right the moment a second business line has to be able to build its own
+    from an empty list, through the app, without a release."""
+    __tablename__ = "attribute_options"
+    id = Column(Integer, primary_key=True)
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True, nullable=False)
+    attr = Column(String, index=True, nullable=False)
+    value = Column(String, nullable=False)
+    sort = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now)
+
+    catalogue = relationship("Catalogue", back_populates="options")
+
+    __table_args__ = (UniqueConstraint("catalogue_id", "attr", "value",
+                                       name="uq_attr_option"),)
+
+
+# ============================================================================
 #  Masters — product categories (from the GRN Excel), agents, transporters
 # ============================================================================
 class Category(Base):
     """Product category master imported from GRN PRODUCT DETAILS.xlsx
-    (sections OVERALL / KIDS / LADIES / MENS). Used to classify products."""
+    (sections OVERALL / KIDS / LADIES / MENS). Used to classify products.
+
+    `catalogue_id` is which business line owns this category. NULL means shared
+    by all of them — which is what every row imported before catalogues existed
+    is NOT: those are moved to the garment catalogue on the first run, because
+    ESSA KIDS-TRUNK is a garment category and offering it to a silk warehouse is
+    the exact problem catalogues exist to solve."""
     __tablename__ = "categories"
     id = Column(Integer, primary_key=True)
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True)
     section = Column(String, index=True)      # sheet: OVERALL | KIDS | LADIES | MENS
     name = Column(String, index=True)         # e.g. KIDS-BABASUIT
     created_at = Column(DateTime, default=now)
@@ -835,10 +1183,23 @@ class CategoryAlias(Base):
     "Ladies Tee" and "Women's Tee" is taught too.
 
     `source` records who said so, and `hits` how often it has been used — together
-    they are the evidence for reviewing a mapping that turns out to be wrong."""
+    they are the evidence for reviewing a mapping that turns out to be wrong.
+
+    ONE WORDING CAN MEAN TWO THINGS. "Plain cotton" is a category in the garment
+    master and a different one in a silk master, so an alias belongs to a
+    catalogue. `key` is unique across the whole table and always has been, and
+    that column cannot be widened into a composite key without rebuilding the
+    table — which on the one SQLite database that holds Essa's data is a real
+    risk for no real gain. So the CATALOGUE IS FOLDED INTO THE KEY instead: the
+    default line keeps the bare canonical text, exactly as every existing row has
+    it, and any other line prefixes its code. See categorize._alias_key.
+
+    `catalogue_id` is carried alongside so the aliases of one line can be listed
+    and reviewed; the key is what enforces the separation."""
     __tablename__ = "category_aliases"
     id = Column(Integer, primary_key=True)
     key = Column(String, unique=True, index=True)   # canonical description text
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True)
     sample = Column(String)                         # a raw description that produced it
     category = Column(String, index=True)           # the master name it maps to
     section = Column(String)
@@ -980,6 +1341,13 @@ class LREntry(Base):
     __tablename__ = "lr_entries"
     id = Column(Integer, primary_key=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
+    # The warehouse the consignment is coming TO. A lorry is booked in against
+    # the building expecting it, and the transport desk at one branch should not
+    # be reading another branch's register.
+    #
+    # NULL on rows raised before workspaces existed; those stay visible from
+    # every warehouse rather than disappearing. See services/scope.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
     entry_source = Column(String, default="import")   # import | manual
     # Our own running number for the entry (LRE-00001). Distinct from `lr_no`,
     # which is the TRANSPORTER's docket number printed on the consignment.
@@ -1162,6 +1530,12 @@ class MasterOption(Base):
     id = Column(Integer, primary_key=True)
     kind = Column(String, index=True)    # see masters.OPTION_KINDS
     value = Column(String, index=True)
+    # Which business line this value belongs to. NULL means SHARED, and that is
+    # the right default for nearly all of these: a payment mode, a rack label or
+    # a transport mode is the same whichever goods are in the box. A list that
+    # genuinely differs per line is tagged, and each catalogue then sees the
+    # shared values plus its own.
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True)
     sort = Column(Integer, default=0)    # seeded lists keep their given order
     created_at = Column(DateTime, default=now)
 
@@ -1353,7 +1727,60 @@ class AppSetting(Base):
 #  next change and a much larger one. These tables are what that change needs to
 #  exist first, and what the Locations screen manages in the meantime.
 # ============================================================================
-class Warehouse(Base):
+class LocationProfile:
+    """The postal and statutory identity every trading place carries.
+
+    One definition on all three levels rather than only on the warehouse,
+    because the thing that needs these is a DOCUMENT and all three appear on
+    one: a GRN is received at a warehouse, a transfer note is addressed to a
+    store, a retail bill is printed at a till. Each has to show that place's
+    own address, its own GSTIN and the person to ring about it — a branch
+    registered separately for GST has a different number from the warehouse
+    supplying it, so printing the parent's would put the wrong one on the bill.
+
+    EVERY COLUMN IS NULLABLE, and that is load-bearing twice over. It is what
+    lets `_add_missing_columns` in main.py add them to an existing database
+    with a plain ALTER TABLE — a not-null column is skipped there and reported
+    as needing a hand-written migration. And it is honest: an install that has
+    only ever needed a name should not meet a form that refuses to save
+    without a CIN.
+
+    Kept as separate columns rather than one address blob because the state
+    decides whether a sale is inter-state, and "which places are in Kerala" is
+    a question somebody actually asks.
+    """
+    # Garments | Silks | Franchise — what sort of place this is, in the words
+    # used here. Deliberately NOT the catalogue: `Warehouse.catalogue_id`
+    # decides which categories and attributes a building's GRN offers and is
+    # refused once the building holds stock, whereas a franchise store still
+    # sells one of those same lines. Folding "Franchise" into the catalogue
+    # list would make it a business line with an empty product master.
+    loc_type = Column(String)
+    # Two lines, because that is how an address is printed on an invoice and
+    # how it is read out over a phone. One field means every document that has
+    # to lay it out is left guessing where to break it.
+    address = Column(String)
+    address2 = Column(String)
+    city = Column(String)
+    district = Column(String)
+    state = Column(String)
+    # The GST state code — 33 for Tamil Nadu. Filled from the first two digits
+    # of `gstin` rather than typed, which is the rule services/businesses.py
+    # has always applied to the company's own number.
+    state_code = Column(String)
+    country = Column(String)
+    pincode = Column(String)
+    contact_person = Column(String)
+    phone = Column(String)
+    email = Column(String)
+    # This place's own GST registration.
+    gstin = Column(String)
+    # Corporate Identity Number — the MCA registration that sits beside the
+    # GSTIN on a letterhead. Not derivable from it, so it is its own column.
+    cin = Column(String)
+
+
+class Warehouse(LocationProfile, Base):
     """A building that holds stock. The top of the location tree."""
     __tablename__ = "warehouses"
     id = Column(Integer, primary_key=True)
@@ -1361,7 +1788,21 @@ class Warehouse(Base):
     # so two people cannot create the same building twice.
     name = Column(String, unique=True, index=True, nullable=False)
     code = Column(String, unique=True, index=True)
-    address = Column(String)
+    # What this building trades in — which categories its GRN offers, which
+    # attributes its items carry, which option lists its forms read. Blank falls
+    # back to the default catalogue, which is what a single-business-line install
+    # has always implicitly been.
+    catalogue_id = Column(Integer, ForeignKey("catalogues.id"), index=True)
+    # Whose warehouse it is. Nullable because every building that predates the
+    # Business table belongs to the one company this install has always been —
+    # filled in on the first run, not guessed at every read.
+    business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
+    # The internal identifier, as distinct from `code` which people type. See
+    # models.Business.uuid for why both exist.
+    uuid = Column(String, unique=True, index=True, default=lambda: str(_uuid.uuid4()))
+    # Central | Regional | Distribution | Transit | Other — what kind of building
+    # this is, which decides nothing today and is what a report will group by.
+    kind = Column(String)
     # Deactivated rather than deleted, always: a warehouse that closed still has
     # last year's transfers filed against it, and removing the row to tidy a
     # dropdown would orphan them.
@@ -1370,9 +1811,11 @@ class Warehouse(Base):
 
     stores = relationship("Store", back_populates="warehouse",
                           order_by="Store.name")
+    catalogue = relationship("Catalogue", back_populates="warehouses")
+    business = relationship("Business", back_populates="warehouses")
 
 
-class Store(Base):
+class Store(LocationProfile, Base):
     """A place that sells, supplied by one warehouse.
 
     `name` is unique across the whole company, not just within its warehouse.
@@ -1386,7 +1829,10 @@ class Store(Base):
     warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
     name = Column(String, unique=True, index=True, nullable=False)
     code = Column(String, unique=True, index=True)
-    address = Column(String)
+    # Whose store it is. A store need not belong to the same company as the
+    # warehouse that supplies it — that is exactly what a franchise branch is —
+    # so this is asked for here rather than inherited from the parent.
+    business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
     active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=now)
 
@@ -1395,19 +1841,27 @@ class Store(Base):
                              order_by="PosTerminal.name")
 
 
-class PosTerminal(Base):
+class PosTerminal(LocationProfile, Base):
     """One till at one store.
 
     A terminal is NOT a stock location. The store owns the stock; a terminal
     only records sales against it. Giving each till its own holding would mean
     a garment on the shelf belonging to counter 2, and a sale at counter 1
     failing for stock that is standing in front of the person selling it.
+
+    It carries the same identity columns as its store all the same, because a
+    till PRINTS. What goes at the head of a retail bill is the counter's own
+    address and GSTIN where it has been given one, and a counter run under a
+    franchise agreement bills under a different number from the store it stands
+    in. Left blank — which is the ordinary case — the bill falls back to the
+    store's, so nothing has to be typed twice to keep working.
     """
     __tablename__ = "pos_terminals"
     id = Column(Integer, primary_key=True)
     store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False)
     name = Column(String, nullable=False)
     code = Column(String, unique=True, index=True)
+    business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
     active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=now)
 

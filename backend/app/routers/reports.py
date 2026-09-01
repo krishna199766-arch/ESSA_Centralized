@@ -1,5 +1,7 @@
 import io
 import csv
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
@@ -8,6 +10,7 @@ from ..database import get_db
 from ..services import reports as svc
 from ..services import nlq as nlq_svc
 from ..services import dates as date_svc
+from ..services import scope
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -56,17 +59,26 @@ def ask(body: Question, db: Session = Depends(get_db)):
 
 #: Every filter any report takes. `svc.run` drops the ones a given report doesn't
 #: accept, so this list can grow without a per-report branch here.
-def _filters(date_from, date_to, as_on, kind, product_id, supplier_id):
+def _filters(date_from, date_to, as_on, kind, product_id, supplier_id,
+             warehouse_id=None, store_id=None):
+    """The filters a report MAY accept. `svc.run` hands each report only the ones
+    its own signature declares, so adding one here costs nothing to the reports
+    that do not want it — and a report that declares `warehouse_id` starts
+    honouring it with no change to this router."""
     return {"date_from": date_from, "date_to": date_to, "as_on": as_on,
-            "kind": kind, "product_id": product_id, "supplier_id": supplier_id}
+            "kind": kind, "product_id": product_id, "supplier_id": supplier_id,
+            "warehouse_id": warehouse_id, "store_id": store_id}
 
 
 @router.get("/{key}")
 def run_report(key: str, date_from: str = None, date_to: str = None,
                as_on: str = None, kind: str = None, product_id: int = None,
-               supplier_id: int = None, db: Session = Depends(get_db)):
+               supplier_id: int = None, store_id: int = None,
+               db: Session = Depends(get_db),
+               warehouse_id: Optional[int] = Depends(scope.current)):
     rep = svc.run(db, key, **_filters(date_from, date_to, as_on, kind,
-                                      product_id, supplier_id))
+                                      product_id, supplier_id,
+                                      warehouse_id, store_id))
     if rep is None:
         raise HTTPException(404, "unknown report")
     return rep
@@ -75,11 +87,14 @@ def run_report(key: str, date_from: str = None, date_to: str = None,
 @router.get("/{key}/csv")
 def report_csv(key: str, date_from: str = None, date_to: str = None,
                as_on: str = None, kind: str = None, product_id: int = None,
-               supplier_id: int = None, db: Session = Depends(get_db)):
+               supplier_id: int = None, store_id: int = None,
+               db: Session = Depends(get_db),
+               warehouse_id: Optional[int] = Depends(scope.current)):
     """The same rows the screen is showing — so the export honours the filters
     rather than quietly exporting everything."""
     rep = svc.run(db, key, **_filters(date_from, date_to, as_on, kind,
-                                      product_id, supplier_id))
+                                      product_id, supplier_id,
+                                      warehouse_id, store_id))
     if rep is None:
         raise HTTPException(404, "unknown report")
     buf = io.StringIO()

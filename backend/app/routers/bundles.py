@@ -7,6 +7,7 @@ from ..database import get_db
 from .. import models
 from ..services import bundles as bundle_svc
 from ..services import barcode_svc
+from ..services import scope
 
 router = APIRouter(prefix="/api/bundles", tags=["bundles"])
 
@@ -54,9 +55,13 @@ def _out(b: models.Bundle, with_items=False):
 
 @router.get("")
 def list_bundles(status: str = "", location: str = "", q: str = "",
-                 db: Session = Depends(get_db)):
-    """Cartons in the warehouse. status: stored | opened | tagged."""
-    query = db.query(models.Bundle)
+                 db: Session = Depends(get_db),
+                 wid: Optional[int] = Depends(scope.current)):
+    """Cartons in the warehouse. status: stored | opened | tagged.
+
+    Narrowed to cartons made by a receipt into THIS warehouse — a carton is
+    where its goods were unloaded, and it cannot be in two buildings."""
+    query = scope.bundles(db.query(models.Bundle), wid)
     if status:
         query = query.filter(models.Bundle.status == status)
     if location:

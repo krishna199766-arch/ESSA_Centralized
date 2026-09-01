@@ -6,6 +6,7 @@ from ..database import get_db
 from .. import models
 from ..services import returns as svc
 from ..services import stock_view
+from ..services import scope
 
 router = APIRouter(prefix="/api/returns", tags=["purchase-returns"])
 
@@ -85,8 +86,14 @@ def _out(r, db: Session = None, with_lines=False):
 
 
 @router.get("")
-def list_returns(db: Session = Depends(get_db)):
-    return [_out(r) for r in db.query(models.PurchaseReturn).order_by(models.PurchaseReturn.id.desc()).all()]
+def list_returns(db: Session = Depends(get_db),
+                 wid: Optional[int] = Depends(scope.current)):
+    """Debit notes raised against GRNs received at this warehouse.
+
+    A return carries no warehouse of its own — it belongs to the receipt it
+    reverses, and giving it a second answer would let the two disagree."""
+    q = scope.returns(db.query(models.PurchaseReturn), wid)
+    return [_out(r) for r in q.order_by(models.PurchaseReturn.id.desc()).all()]
 
 
 @router.post("/from-purchase/{purchase_id}")

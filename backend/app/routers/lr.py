@@ -13,6 +13,7 @@ from ..services import storage
 from ..services import lr_link
 from ..services import masters as masters_svc
 from ..services import dates
+from ..services import scope
 
 router = APIRouter(prefix="/api/lr", tags=["lr-entry"])
 
@@ -173,7 +174,8 @@ async def extract(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
 
 @router.post("/save")
-def save(body: SaveLR, db: Session = Depends(get_db)):
+def save(body: SaveLR, db: Session = Depends(get_db),
+         wid: Optional[int] = Depends(scope.current)):
     """Persist the (reviewed) LR rows and auto-create transport + supplier
     masters. Duplicates (already in the DB, or repeated within this batch) are
     skipped authoritatively on the server, even if the client didn't filter
@@ -193,7 +195,8 @@ def save(body: SaveLR, db: Session = Depends(get_db)):
                 skipped += 1
                 continue
             seen.setdefault(key, []).append(r)
-        entry = models.LREntry(document_id=body.document_id, entry_source="import")
+        entry = models.LREntry(document_id=body.document_id, entry_source="import",
+                               warehouse_id=wid)
         _apply(entry, r, db)
         # A translated row keeps the page's own words. Handled here rather than
         # through WRITABLE because these two are provenance, not data entry: the
@@ -226,7 +229,8 @@ def _today():
 
 
 @router.post("")
-def create(body: LRIn, db: Session = Depends(get_db)):
+def create(body: LRIn, db: Session = Depends(get_db),
+           wid: Optional[int] = Depends(scope.current)):
     """Key in ONE consignment — the LR Entry form's Save / Save&Next.
 
     The import path is still the fast way in; this exists for the consignment
@@ -239,7 +243,9 @@ def create(body: LRIn, db: Session = Depends(get_db)):
     if missing:
         raise HTTPException(400, "Required: " + ", ".join(missing))
 
-    entry = models.LREntry(entry_source="manual")
+    # Booked in against the warehouse expecting the lorry — whichever one the
+    # person keying it is working inside.
+    entry = models.LREntry(entry_source="manual", warehouse_id=wid)
     _apply(entry, data, db)
     entry.lr_entry_no = lr_svc.next_entry_no(db)
     entry.lr_entry_date = entry.lr_entry_date or _today()
@@ -323,11 +329,16 @@ def _filtered(db, received="all", q="", supplier="", transport="",
 
 
 @router.get("")
-def list_lr(received: str = "all", limit: int = 500, db: Session = Depends(get_db)):
+def list_lr(received: str = "all", limit: int = 500, db: Session = Depends(get_db),
+            wid: Optional[int] = Depends(scope.current)):
     """The register, newest first. `received=pending|received` filters by whether
     the warehouse has taken the consignment in — that's what the phone app lists,
-    and it keeps the payload small as the register grows."""
-    rows = _filtered(db, received=received).order_by(
+    and it keeps the payload small as the register grows.
+
+    Narrowed to consignments coming to the warehouse this call is made inside;
+    rows booked before workspaces existed have no warehouse and stay on every
+    register. See services/scope."""
+    rows = scope.lr_entries(_filtered(db, received=received), wid).order_by(
         models.LREntry.id.desc()).limit(max(1, min(limit, 2000))).all()
     return [_row_out(e) for e in rows]
 

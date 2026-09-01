@@ -25,10 +25,42 @@ export const session = {
 let onUnauthorized = () => {}
 export const setUnauthorizedHandler = (fn) => { onUnauthorized = fn || (() => {}) }
 
+// ==========================================================================
+//  The warehouse you are working INSIDE
+//  ------------------------------------------------------------------------
+//  Sent as a header on every call, from here, rather than threaded through the
+//  fifty places that make one. The failure mode of threading it is a single
+//  screen that forgets — and a screen that forgets does not look broken, it
+//  looks like another warehouse's work has turned up in yours. One place cannot
+//  forget one screen at a time.
+//
+//  Endpoints that don't scope simply ignore the header. Held in localStorage so
+//  a reload keeps you where you were standing.
+// ==========================================================================
+const WAREHOUSE_KEY = 'essa_warehouse'
+let warehouseListener = () => {}
+
+export const warehouse = {
+  get: () => {
+    const raw = localStorage.getItem(WAREHOUSE_KEY)
+    try { return raw ? JSON.parse(raw) : null } catch { return null }
+  },
+  set: (w) => {
+    if (w && w.id) localStorage.setItem(WAREHOUSE_KEY, JSON.stringify(
+      { id: w.id, name: w.name, code: w.code, catalogue: w.catalogue }))
+    else localStorage.removeItem(WAREHOUSE_KEY)
+    warehouseListener(w || null)
+  },
+  clear: () => warehouse.set(null),
+  onChange: (fn) => { warehouseListener = fn || (() => {}) },
+}
+
 const fetch = (url, opts = {}) => {
   const token = session.get()
   const headers = new Headers(opts.headers || {})
   if (token) headers.set('X-Essa-Token', token)
+  const here = warehouse.get()
+  if (here && here.id) headers.set('X-Essa-Warehouse', String(here.id))
   return window.fetch(url, { ...opts, headers, credentials: 'same-origin' })
     .then((r) => {
       // 401 is "not signed in" and 403 is "signed in, not allowed" — only the
@@ -63,6 +95,15 @@ const J = async (r) => {
     throw Object.assign(new Error(String(r.status)), { status: r.status, detail })
   }
   return r.json()
+}
+
+// One file, as multipart. No Content-Type is set on purpose: the browser has to
+// write it itself so it can add the multipart boundary, and setting it by hand
+// produces a body the server cannot parse.
+const _upload = (url, file) => {
+  const body = new FormData()
+  body.append('file', file)
+  return fetch(url, { method: 'POST', body }).then(J)
 }
 
 // ?a=1&b=2 from an object, skipping blanks — so an untouched filter is absent
@@ -167,6 +208,12 @@ export const api = {
   // purchases / GRN
   listPurchases: () => fetch('/api/purchases').then(J),
   getPurchase: (id) => fetch(`/api/purchases/${id}`).then(J),
+  // which warehouse took this delivery in. Draft only — once posted the stock is
+  // standing somewhere and moving it is unpost → set → post.
+  setGrnWarehouse: (id, warehouse_id) => fetch(`/api/purchases/${id}/warehouse`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ warehouse_id }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('wh'), { detail: j.detail }); return j }),
   buildGrn: (docId) => fetch(`/api/purchases/from-document/${docId}`, { method: 'POST' }).then(J),
   postGrn: (id) => fetch(`/api/purchases/${id}/post`, { method: 'POST' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('post'), { detail: j.detail }); return j }),
@@ -296,15 +343,81 @@ export const api = {
     { method: 'POST' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('repair'), { detail: j.detail }); return j }),
 
-  // dropdown option sets (same lists the phone app uses, incl. sizes)
-  productOptions: () => fetch('/api/inventory/product-options').then(J),
+  // Dropdown option sets (same lists the phone app uses, incl. sizes), for one
+  // business line. Pass the warehouse a screen is working at and the answer is
+  // that warehouse's vocabulary — which attributes apply and what each offers.
+  // Passing nothing answers for the default line, as it always did.
+  productOptions: (warehouseId, catalogueId) => {
+    const q = new URLSearchParams()
+    if (warehouseId) q.set('warehouse_id', warehouseId)
+    if (catalogueId) q.set('catalogue_id', catalogueId)
+    const s = q.toString()
+    return fetch('/api/inventory/product-options' + (s ? '?' + s : '')).then(J)
+  },
   barcodeSvgUrl: (id) => `/api/inventory/products/${id}/barcode.svg`,
   // scale drives the QR's module size — 2 is right for a list thumbnail, the
   // default 4 for the detail panel and print
   qrSvgUrl: (id, scale) => `/api/inventory/products/${id}/qr.svg` + (scale ? `?scale=${scale}` : ''),
-  // map a free-text description onto the Product Category master
-  categorize: (description) =>
-    fetch('/api/inventory/categorize?description=' + encodeURIComponent(description || '')).then(J),
+  // map a free-text description onto one business line's Product Category master
+  categorize: (description, warehouseId) =>
+    fetch('/api/inventory/categorize?description=' + encodeURIComponent(description || '')
+      + (warehouseId ? '&warehouse_id=' + warehouseId : '')).then(J),
+
+  // --- catalogues: what each warehouse trades in ---
+  // The categories, attributes and option lists are per business line, so Essa
+  // (garments) and Taqua (silks) never see each other's.
+  listCatalogues: () => fetch('/api/catalogues').then(J),
+  getCatalogue: (id) => fetch(`/api/catalogues/${id}`).then(J),
+  createCatalogue: (body) => fetch('/api/catalogues', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('cat'), { detail: j.detail }); return j }),
+  updateCatalogue: (id, body) => fetch(`/api/catalogues/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('cat'), { detail: j.detail }); return j }),
+  deleteCatalogue: (id) => fetch(`/api/catalogues/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('cat'), { detail: j.detail }); return j }),
+  addCatalogueAttr: (id, body) => fetch(`/api/catalogues/${id}/attributes`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('attr'), { detail: j.detail }); return j }),
+  removeCatalogueAttr: (id, key) => fetch(`/api/catalogues/${id}/attributes/${encodeURIComponent(key)}`,
+    { method: 'DELETE' }).then(J),
+  setAttrOptions: (id, key, values) => fetch(
+    `/api/catalogues/${id}/attributes/${encodeURIComponent(key)}/options`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }) }).then(J),
+  removeAttrOption: (id, key, value) => fetch(
+    `/api/catalogues/${id}/attributes/${encodeURIComponent(key)}/options?value=`
+    + encodeURIComponent(value), { method: 'DELETE' }).then(J),
+  // --- download a master as a spreadsheet ---
+  // Plain URLs, opened as links: a download carries the login cookie on its own,
+  // and routing the bytes through fetch() only to rebuild a Blob would lose the
+  // filename the server already set. What comes down is a file the importer
+  // above reads back, so download → edit in Excel → upload is a round trip.
+  attributesFileUrl: (id, format) =>
+    `/api/catalogues/${id}/attributes/export?format=${format || 'xlsx'}`,
+  attrOptionsFileUrl: (id, key, format) =>
+    `/api/catalogues/${id}/attributes/${encodeURIComponent(key)}/options/export?format=${format || 'xlsx'}`,
+  categoriesFileUrl: (id, format) =>
+    `/api/catalogues/${id}/categories/export?format=${format || 'xlsx'}`,
+
+  // --- bulk import from a spreadsheet or PDF ---
+  // `commit` false (the default) previews: the server answers with exactly what
+  // it WOULD write and writes nothing, so a misread layout is caught before it
+  // reaches a live master.
+  importAttributes: (id, file, commit) =>
+    _upload(`/api/catalogues/${id}/attributes/import?commit=${!!commit}`, file),
+  importAttrOptions: (id, key, file, commit) =>
+    _upload(`/api/catalogues/${id}/attributes/${encodeURIComponent(key)}/options/import?commit=${!!commit}`, file),
+  importCategories: (id, file, commit) =>
+    _upload(`/api/catalogues/${id}/categories/import?commit=${!!commit}`, file),
+
+  catalogueCategories: (id) => fetch(`/api/catalogues/${id}/categories`).then(J),
+  addCatalogueCategory: (id, body) => fetch(`/api/catalogues/${id}/categories`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('cat'), { detail: j.detail }); return j }),
+  removeCatalogueCategory: (id, catId) => fetch(`/api/catalogues/${id}/categories/${catId}`,
+    { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('cat'), { detail: j.detail }); return j }),
   // the full product record as the stock screens show it — QR, name, size,
   // colour, batch. Takes anything scannable: a product QR, a piece label, a SKU.
   // Item Locator: one scanned code, everything known about that item —
@@ -314,10 +427,23 @@ export const api = {
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('card'), { detail: j.detail }); return j }),
 
   // stock outward (dispatch) + stock inward (the destination accepting it)
-  listOutwards: (status) => fetch('/api/outward' + (status ? '?status=' + status : '')).then(J),
+  // `kind` narrows to transfer (warehouse → warehouse) / store / dispatch;
+  // `warehouseId` returns the notes a building is either end of.
+  listOutwards: (status, kind, warehouseId) => {
+    const q = new URLSearchParams()
+    if (status) q.set('status', status)
+    if (kind && kind !== 'all') q.set('kind', kind)
+    if (warehouseId) q.set('warehouse_id', warehouseId)
+    const s = q.toString()
+    return fetch('/api/outward' + (s ? '?' + s : '')).then(J)
+  },
   getOutward: (id) => fetch(`/api/outward/${id}`).then(J),
+  // body may carry from_warehouse_id and one of to_warehouse_id / to_store_id;
+  // a bad pair (same warehouse both ends, unknown place) comes back as a 400
+  // with the reason, so it is surfaced rather than swallowed by J
   createOutward: (body) => fetch('/api/outward', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(J),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('create'), { detail: j.detail }); return j }),
   postOutward: (id, allowNeg) => fetch(`/api/outward/${id}/post?allow_negative=${!!allowNeg}`, { method: 'POST' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('post'), { detail: j.detail }); return j }),
   // stock inward: accept a dispatched transfer, line by line
@@ -407,8 +533,33 @@ export const api = {
   // rather than looking empty. `status` is kept on the error the way
   // labelFields does it: a 404 here is a backend started before this module
   // existed, which is a restart rather than a fault.
+  // the central dashboard: company totals plus a row per warehouse, in one call
+  locationOverview: (days, warehouseId) => {
+    const q = new URLSearchParams()
+    if (days) q.set('days', days)
+    if (warehouseId) q.set('warehouse_id', warehouseId)
+    const s = q.toString()
+    return fetch('/api/locations/overview' + (s ? '?' + s : '')).then(J)
+  },
+  // What the shops sold, per branch. A SEPARATE call from the overview on
+  // purpose: it reads the till's own database, which can be absent or switched
+  // off, and folding it in would let that take the whole dashboard down.
+  storeSales: (days, warehouseId) => {
+    const q = new URLSearchParams()
+    if (days) q.set('days', days)
+    if (warehouseId) q.set('warehouse_id', warehouseId)
+    const s = q.toString()
+    return fetch('/api/locations/sales' + (s ? '?' + s : '')).then(J)
+  },
+  warehouseStock: (id, limit) => fetch(`/api/locations/warehouses/${id}/stock`
+    + (limit ? '?limit=' + limit : '')).then(J),
+  rebuildStock: () => fetch('/api/locations/rebuild-stock', { method: 'POST' }).then(J),
+
   locationTree: () => fetch('/api/locations')
     .then(r => { if (!r.ok) throw Object.assign(new Error(String(r.status)), { status: r.status }); return r.json() }),
+  // The type vocabulary and the company list the location form picks from, read
+  // from the server rather than repeated here — see the endpoint's own note.
+  locationFormOptions: () => fetch('/api/locations/form-options').then(J),
   createWarehouse: (body) => fetch('/api/locations/warehouses', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('wh'), { detail: j.detail }); return j }),

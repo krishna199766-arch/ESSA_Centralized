@@ -136,8 +136,15 @@ def ensure_default_warehouse(db: Session) -> models.Warehouse:
     wh = db.query(models.Warehouse).order_by(models.Warehouse.id).first()
     if wh:
         return wh
+    # Filed under the company as it is created. This warehouse is made LAZILY —
+    # on the first call that needs one, which is usually after the business seed
+    # has already run — so waiting for that seed to backfill it would leave it
+    # unfiled, and its business's document-numbering rules would not apply to it.
+    from . import businesses
+    biz = businesses.default_business(db)
     wh = models.Warehouse(name=DEFAULT_WAREHOUSE,
-                          code=_next_code(db, models.Warehouse, "WH"), active=True)
+                          code=_next_code(db, models.Warehouse, "WH"),
+                          business_id=biz.id if biz else None, active=True)
     db.add(wh)
     db.commit()
     db.refresh(wh)
@@ -154,18 +161,47 @@ def sync(db: Session) -> dict:
 # ---------------------------------------------------------------------------
 #  reads
 # ---------------------------------------------------------------------------
+#: The identity columns models.LocationProfile puts on all three levels, in the
+#: order the form asks for them. Named once so the serializer below, the
+#: request schema in routers/locations.py and the writer that applies it cannot
+#: drift apart — a field added to the model and forgotten in one of the three
+#: is a field that saves and never comes back, or comes back and never saves.
+PROFILE_FIELDS = ("loc_type", "address", "address2", "city", "district",
+                  "state", "state_code", "country", "pincode",
+                  "contact_person", "phone", "email", "gstin", "cin")
+
+
+def profile_out(obj) -> dict:
+    """The postal/statutory block, on every level's payload.
+
+    Emitted whether or not it is filled in. A key that appears only when it has
+    a value makes the editor's job "is this absent or is it empty", and the
+    answer decides whether PATCHing it back clears the column.
+    """
+    return {f: getattr(obj, f, None) for f in PROFILE_FIELDS}
+
+
 def warehouse_out(w: models.Warehouse, counts=True) -> dict:
-    out = {"id": w.id, "name": w.name, "code": w.code, "address": w.address,
-           "active": bool(w.active)}
+    out = {"id": w.id, "name": w.name, "code": w.code,
+           "active": bool(w.active), "business_id": w.business_id,
+           # What this building trades in. Carried on every warehouse payload
+           # because the screens that pick a warehouse — GRN, dispatch, the
+           # phone's detail form — need to know which vocabulary follows from it.
+           "catalogue_id": w.catalogue_id,
+           "catalogue": w.catalogue.name if w.catalogue else None,
+           "catalogue_code": w.catalogue.code if w.catalogue else None,
+           **profile_out(w)}
     if counts:
         out["store_count"] = len([s for s in w.stores if s.active])
     return out
 
 
 def store_out(s: models.Store, counts=True) -> dict:
-    out = {"id": s.id, "name": s.name, "code": s.code, "address": s.address,
+    out = {"id": s.id, "name": s.name, "code": s.code,
            "active": bool(s.active), "warehouse_id": s.warehouse_id,
-           "warehouse_name": s.warehouse.name if s.warehouse else None}
+           "business_id": s.business_id,
+           "warehouse_name": s.warehouse.name if s.warehouse else None,
+           **profile_out(s)}
     if counts:
         out["terminal_count"] = len([t for t in s.terminals if t.active])
     return out
@@ -173,15 +209,26 @@ def store_out(s: models.Store, counts=True) -> dict:
 
 def terminal_out(t: models.PosTerminal) -> dict:
     return {"id": t.id, "name": t.name, "code": t.code, "active": bool(t.active),
-            "store_id": t.store_id,
+            "store_id": t.store_id, "business_id": t.business_id,
             "store_name": t.store.name if t.store else None,
-            "warehouse_id": t.store.warehouse_id if t.store else None}
+            "warehouse_id": t.store.warehouse_id if t.store else None,
+            **profile_out(t)}
 
 
-def tree(db: Session) -> list:
-    """The whole hierarchy in one read — what the Locations screen draws."""
+def tree(db: Session, allowed=None) -> list:
+    """The whole hierarchy in one read — what the Locations screen draws.
+
+    `allowed` narrows it to a set of warehouse ids — an account allotted certain
+    buildings. This is the read the GRN receiving picker and the dispatch
+    from/to pickers are built from, so narrowing it here is what stops a
+    restricted manager being OFFERED a warehouse the server would then refuse.
+    None means no narrowing, which is every unrestricted account.
+    """
     out = []
-    for w in db.query(models.Warehouse).order_by(models.Warehouse.name).all():
+    q = db.query(models.Warehouse)
+    if allowed:
+        q = q.filter(models.Warehouse.id.in_(list(allowed)))
+    for w in q.order_by(models.Warehouse.name).all():
         node = warehouse_out(w, counts=False)
         node["stores"] = []
         for s in sorted(w.stores, key=lambda x: x.name):
@@ -193,7 +240,10 @@ def tree(db: Session) -> list:
     # A store whose warehouse was never set would otherwise be invisible on a
     # screen built from the tree — and invisible is how a place keeps receiving
     # stock nobody can account for.
-    orphans = db.query(models.Store).filter(
+    # A store belonging to no warehouse is nobody's to claim, so an account
+    # confined to particular buildings is not shown it either — it would be a
+    # branch they cannot reach through any warehouse they hold.
+    orphans = [] if allowed else db.query(models.Store).filter(
         models.Store.warehouse_id.is_(None)).order_by(models.Store.name).all()
     if orphans:
         out.append({"id": None, "name": "Not assigned to a warehouse",
@@ -202,6 +252,38 @@ def tree(db: Session) -> list:
                     "stores": [dict(store_out(s, counts=False),
                                     terminals=[terminal_out(t) for t in s.terminals])
                                for s in orphans]})
+    return out
+
+
+def store_rows(db: Session, warehouse_id=None) -> list:
+    """Every store as a FLAT row, with the warehouse that supplies it.
+
+    The tree above answers "what does this warehouse supply"; this answers "what
+    stores are there", which is the question a consolidated dashboard asks. Drawn
+    from the same rows, so the two can never disagree — a second query shaped
+    differently is how a store comes to exist on one screen and not the other.
+    """
+    q = db.query(models.Store)
+    if warehouse_id:
+        q = q.filter(models.Store.warehouse_id == warehouse_id)
+    out = []
+    for s in q.order_by(models.Store.name).all():
+        wh = s.warehouse
+        tills = [t for t in s.terminals if t.active]
+        out.append({
+            "id": s.id, "name": s.name, "code": s.code, "address": s.address,
+            "active": bool(s.active),
+            "warehouse_id": s.warehouse_id,
+            "warehouse": wh.name if wh else None,
+            "catalogue": wh.catalogue.name if (wh and wh.catalogue) else None,
+            # A store with no till cannot bill, and that is worth seeing on a
+            # list of stores rather than only by opening each one.
+            "terminals": len(tills),
+            "terminal_names": [t.name for t in tills],
+            # POS is what the wireframe calls a till; the type column tells a
+            # store that sells from one that only holds stock.
+            "type": "POS" if tills else "Store",
+        })
     return out
 
 

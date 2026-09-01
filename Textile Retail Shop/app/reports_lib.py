@@ -121,15 +121,28 @@ def sales_by_customer(start, end):
 
 
 def sales_by_payment(start, end):
-    rows = db.session.query(
-        Invoice.payment_method, func.count(Invoice.id), func.sum(Invoice.total)
-    ).filter(func.date(Invoice.invoice_date) >= start,
-             func.date(Invoice.invoice_date) <= end
-             ).group_by(Invoice.payment_method).all()
-    out = [[(m or "—").capitalize(), c, _money(t)] for m, c, t in rows]
-    return {"columns": ["Payment", "Bills", "Amount"], "rows": out,
+    """What was taken, by tender.
+
+    Summed from the settlement rows rather than grouped on the invoice's
+    one-word label: a bill paid half in cash and half on a card is labelled
+    "mixed", and grouping on that would drop its cash out of the cash line — so
+    the drawer would stop reconciling to this report the day split payments
+    arrived. `Invoice.settled` falls back to the single method for every bill
+    raised before settlements were recorded.
+    """
+    totals, counts = {}, {}
+    for inv in _inv_in(start, end).all():
+        for method, amount in inv.settled.items():
+            totals[method] = round(totals.get(method, 0.0) + amount, 2)
+            counts[method] = counts.get(method, 0) + 1
+    out = [[(m or "—").capitalize(), counts[m], totals[m]]
+           for m in sorted(totals, key=lambda k: -totals[k])]
+    return {"columns": ["Payment", "Bills", "Amount"],
+            "rows": [[m, c, _money(t)] for m, c, t in out],
             "totals": {"Amount": _money(sum(r[2] for r in out))},
-            "note": "How the money came in, before any refunds."}
+            "note": "How the money came in, before any refunds. A split bill "
+                    "appears under each tender it used, so Bills can exceed the "
+                    "number of sales."}
 
 
 def gst_summary(start, end):

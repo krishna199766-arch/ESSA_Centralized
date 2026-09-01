@@ -233,19 +233,59 @@ def _shares_a_word(search_text, name_norm, section):
 STRONG_SCORE = 97
 
 
+def _alias_key(db, canonical, catalogue_id=None):
+    """The stored key for one wording in one catalogue.
+
+    The default line keeps the BARE canonical text — which is what every alias
+    written before catalogues existed already has, so none of them has to be
+    rewritten and none of them stops matching. Any other line prefixes its code,
+    which is what keeps "plain cotton" meaning one thing in garments and another
+    in silks despite `key` being a single unique column. See models.CategoryAlias.
+    """
+    from . import catalogues as cat_svc
+    if not canonical:
+        return None
+    if not catalogue_id:
+        return canonical
+    default = cat_svc.default_catalogue(db)
+    if default and default.id == catalogue_id:
+        return canonical
+    c = db.get(models.Catalogue, catalogue_id)
+    return f"{c.code}:{canonical}" if c else canonical
+
+
 def _alias_for(db, key):
+    if not key:
+        return None
     return db.query(models.CategoryAlias).filter(models.CategoryAlias.key == key).first()
 
 
-def learn_alias(db, description, category_name, section=None, source="human"):
+def _catalogue_categories(db, catalogue_id):
+    """The category rows one business line may classify into.
+
+    A blank catalogue means every row, which is what every caller that predates
+    catalogues passes and what a single-line install means by the question."""
+    q = db.query(models.Category)
+    if catalogue_id:
+        q = q.filter((models.Category.catalogue_id == catalogue_id)
+                     | (models.Category.catalogue_id.is_(None)))
+    return q.all()
+
+
+def learn_alias(db, description, category_name, section=None, source="human",
+                catalogue_id=None):
     """Remember that this wording means this category, because a human said so.
 
     Called when someone sets the category on a GRN line by hand — the one moment
     the system is being told, unambiguously, what a supplier's words mean. Re-teaching
     the same wording overwrites it, so a mapping that turns out wrong is corrected
     the same way it was created: set the right category on any line that reads that
-    way. Passing an empty category forgets it."""
-    key = _canonical_text(description, detect_section(description))
+    way. Passing an empty category forgets it.
+
+    Learned per catalogue: what a silk supplier's wording means says nothing about
+    what the same words mean on a garment invoice."""
+    canonical = _canonical_text(description, detect_section(description))
+    key = _alias_key(db, canonical, catalogue_id)
     if not key:
         return None
     row = _alias_for(db, key)
@@ -254,24 +294,30 @@ def learn_alias(db, description, category_name, section=None, source="human"):
             db.delete(row)
             db.flush()
         return None
-    cat = db.query(models.Category).filter(models.Category.name == category_name).first()
-    if not cat:
-        return None                      # never learn a name the master doesn't have
-    sec = section or next((c.section for c in db.query(models.Category).filter(
-        models.Category.name == category_name).all() if c.section and c.section != "OVERALL"),
-        cat.section)
+    names = [c for c in _catalogue_categories(db, catalogue_id)
+             if c.name == category_name]
+    if not names:
+        # never learn a name this catalogue's master doesn't have — an alias
+        # pointing at another line's category would classify goods into a list
+        # their own screens do not even show
+        return None
+    cat = names[0]
+    sec = section or next((c.section for c in names
+                           if c.section and c.section != "OVERALL"), cat.section)
     if row:
         row.category, row.section, row.source = category_name, sec, source
         row.sample = description
+        row.catalogue_id = catalogue_id
     else:
         row = models.CategoryAlias(key=key, sample=description, category=category_name,
-                                   section=sec, source=source, hits=0)
+                                   section=sec, source=source, hits=0,
+                                   catalogue_id=catalogue_id)
         db.add(row)
     db.flush()
     return row
 
 
-def suggest(db, description, limit=5, section=None):
+def suggest(db, description, limit=5, section=None, catalogue_id=None):
     """Rank the category master against a description.
 
     Returns {section, query, best, confident, via, candidates:[{name, section, score}]}.
@@ -286,7 +332,8 @@ def suggest(db, description, limit=5, section=None):
 
     # What a human has already said beats what the rules can infer — that is the
     # whole point of having been told.
-    alias = _alias_for(db, search) if section is None else None
+    alias = (_alias_for(db, _alias_key(db, search, catalogue_id))
+             if section is None else None)
     if alias:
         best = {"name": alias.category, "section": alias.section, "score": 100.0,
                 "section_match": bool(detected and alias.section == detected)}
@@ -294,7 +341,11 @@ def suggest(db, description, limit=5, section=None):
                 "via": "alias", "learned_from": alias.sample, "candidates": [best]}
 
     scored = []
-    for c in db.query(models.Category).all():
+    # Only this business line's categories. A silk warehouse whose catalogue is
+    # still empty gets NO suggestion, which is the truthful answer — the
+    # alternative is filing a Kanchipuram saree as ESSA KIDS-TRUNK because that
+    # is the only master the scorer had to choose from.
+    for c in _catalogue_categories(db, catalogue_id):
         name_norm = normalise(c.name)
         gender = _category_gender(name_norm)
         # a category that asserts a different gender is wrong however well it scores
@@ -334,8 +385,13 @@ def categorise_product(db, product, force=False):
     """Set product.category from its description when the match is confident.
 
     Returns the suggestion dict (with an added `applied` flag). Never overwrites a
-    category someone already set unless `force`."""
-    res = suggest(db, product.description)
+    category someone already set unless `force`.
+
+    Classified within the item's OWN business line — the categories its warehouse
+    trades in — so nothing can be filed into a master its own screens do not show.
+    """
+    cat_id = getattr(product, "catalogue_id", None)
+    res = suggest(db, product.description, catalogue_id=cat_id)
     res["applied"] = False
     if res["confident"] and (force or not product.category):
         product.category = res["best"]["name"]
@@ -344,7 +400,7 @@ def categorise_product(db, product, force=False):
         if res.get("via") == "alias":
             # count the use, not the render: suggest() runs every time a GRN is
             # opened, so only an actual mapping is evidence the alias earns its keep
-            row = _alias_for(db, res["query"])
+            row = _alias_for(db, _alias_key(db, res["query"], cat_id))
             if row:
                 row.hits = (row.hits or 0) + 1
     return res

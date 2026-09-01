@@ -83,7 +83,7 @@ def create_app(config_class=Config):
     # in the handler would reach for the wrong package. create_app runs while the
     # name is still ours (see backend/app/pos_mount.py), so the module objects
     # captured now stay correct for the life of the process.
-    from app import dbpatch, modules, warehouse_items
+    from app import dbpatch, modules, warehouse_items, places as places_mod
 
     @app.before_request
     def refresh_from_warehouse():
@@ -103,6 +103,32 @@ def create_app(config_class=Config):
             # ImportError and looked exactly like a sync that had nothing to do.
             db.session.rollback()
             app.logger.warning("warehouse refresh failed", exc_info=True)
+
+    @app.before_request
+    def _capture_warehouse_scope():
+        """Remember which warehouse this till was opened from.
+
+        The warehouse UI mounts the shop in a frame and puts `?wh=<id>` on the
+        first URL. A frame cannot send a header, and only that first request
+        carries the parameter — the till then navigates between its own screens
+        — so it is copied into the session, where the rest of the shop reads it
+        (see places.current_scope).
+
+        `?wh=` with nothing after it CLEARS the scope, which is how the shop
+        behaves when it is opened directly rather than from inside a warehouse.
+
+        `places_mod` is the module captured in create_app, NOT imported here. By
+        the time a request runs, `app` in sys.modules is the WAREHOUSE's package
+        again — the swap in backend/app/pos_mount is over — so `from app import
+        places` at this point reaches for the wrong package and 500s. Every late
+        import in this shop has to be hoisted for that reason; see the note above
+        the capture in create_app.
+        """
+        from flask import session
+        if "wh" not in request.args:
+            return
+        raw = (request.args.get("wh") or "").strip()
+        session[places_mod.SCOPE_KEY] = int(raw) if raw.isdigit() else None
 
     # Context processor for shop info
     @app.context_processor

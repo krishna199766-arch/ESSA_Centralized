@@ -28,6 +28,13 @@ from flask import current_app
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
+# Hoisted, and it has to be. Every `from app import …` inside this shop must run
+# while the package swap in backend/app/pos_mount is still in effect — at request
+# time `app` is the WAREHOUSE's package again, and a late import silently reaches
+# for the wrong one. `_warehouse_locations` gets away with importing lazily
+# because it only ever runs at startup; `stores_of_warehouse` below runs on every
+# picker draw, which is a request.
+from app import warehouse_items as _wh
 from app.models import Company, Counter, Location
 
 #: The counter every location starts with. A shop with one till should not have
@@ -176,18 +183,84 @@ def sync_locations():
     return added, retired
 
 
+#: Where the "which warehouse opened this till" scope is kept. In the SESSION,
+#: like the counter choice beside it: it is a property of the frame somebody is
+#: looking at, and it has to survive navigation inside that frame — the till
+#: moves between its own screens and only the first of them carries the
+#: parameter that set it.
+SCOPE_KEY = "warehouse_scope"
+
+
+def stores_of_warehouse(warehouse_id):
+    """Branch names one warehouse supplies, read from the warehouse's own tables.
+
+    None — not an empty list — when the question cannot be answered: no warehouse
+    was named, the warehouse database is unreachable, or it predates the stores
+    table. None means "do not narrow", which keeps every till working exactly as
+    it did rather than emptying its branch list because a lookup failed.
+
+    An empty SET is a real answer and a different one: this warehouse supplies no
+    shops yet.
+    """
+    if not warehouse_id:
+        return None
+    con = _wh._connect()
+    if con is None:
+        return None
+    try:
+        # Positional `?` with a TUPLE — that is the only shape
+        # warehouse_items._Con.execute understands; it rewrites the markers into
+        # named parameters itself. A dict passed here is silently mis-bound.
+        rows = con.execute(
+            "SELECT name, active FROM stores WHERE warehouse_id = ?",
+            (int(warehouse_id),)).fetchall()
+    except SQLAlchemyError:
+        return None               # a warehouse without the locations tables
+    finally:
+        con.close()
+    # `active` is filtered in Python for the same reason as in
+    # _warehouse_locations: it is BOOLEAN on Postgres and INTEGER on SQLite, and
+    # no single WHERE clause is valid on both.
+    return {" ".join(str(r["name"]).split()).lower() for r in rows
+            if r.get("name") and (r.get("active") is None or r.get("active"))}
+
+
+def current_scope():
+    """The warehouse this till was opened from, if the frame said so."""
+    try:
+        from flask import session
+        raw = session.get(SCOPE_KEY)
+    except RuntimeError:          # outside a request
+        return None
+    return int(raw) if str(raw or "").strip().isdigit() else None
+
+
 def picker_options():
-    """Everything the till's Company / Location / Counter dialog draws itself from."""
+    """Everything the till's Company / Location / Counter dialog draws itself from.
+
+    Narrowed to the branches of the warehouse this till was opened from, when it
+    was opened from one. A counter at Erode has no business billing as a Karur
+    shop, and a picker that offers it is the only thing standing between a
+    cashier and a sale filed against the wrong branch's stock.
+    """
+    locations = Location.query.filter_by(active=True).order_by(Location.name).all()
+    allowed = stores_of_warehouse(current_scope())
+    if allowed is not None:
+        locations = [l for l in locations
+                     if " ".join((l.name or "").split()).lower() in allowed]
+    keep = {l.id for l in locations}
     return {
         "companies": [{"id": c.id, "name": c.name, "gstin": c.gstin or ""}
                       for c in Company.query.filter_by(active=True)
                                             .order_by(Company.name).all()],
         "locations": [{"id": l.id, "name": l.name, "company_id": l.company_id}
-                      for l in Location.query.filter_by(active=True)
-                                             .order_by(Location.name).all()],
+                      for l in locations],
         "counters": [{"id": x.id, "name": x.name, "location_id": x.location_id}
                      for x in Counter.query.filter_by(active=True)
-                                           .order_by(Counter.name).all()],
+                                           .order_by(Counter.name).all()
+                     # a till at a branch this warehouse does not supply is not
+                     # offered either — it would be a counter with no location
+                     if allowed is None or x.location_id in keep],
     }
 
 
@@ -203,6 +276,15 @@ def resolve(company_id=None, location_id=None, counter_id=None):
     company = db.session.get(Company, company_id) if company_id else None
     location = db.session.get(Location, location_id) if location_id else None
     counter = db.session.get(Counter, counter_id) if counter_id else None
+    # A branch outside this till's warehouse is dropped the same way, and for the
+    # same reason: a session that still names Karur after the frame was opened
+    # from Erode would keep billing against Karur's stock while the screen around
+    # it says Erode. Dropped rather than corrected — the picker then asks, which
+    # is the only honest thing to do when the answer has become impossible.
+    allowed = stores_of_warehouse(current_scope())
+    if location is not None and allowed is not None \
+            and " ".join((location.name or "").split()).lower() not in allowed:
+        location, counter = None, None
     if location is not None and company is not None and location.company_id \
             and location.company_id != company.id:
         location, counter = None, None

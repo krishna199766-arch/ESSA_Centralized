@@ -8,6 +8,7 @@ from ..services import inventory as inv
 from ..services import barcode_svc
 from ..services import shortages as short_svc
 from ..services import size_split
+from ..services import scope
 
 router = APIRouter(prefix="/api/purchases", tags=["purchases"])
 
@@ -29,6 +30,11 @@ class WaiveShortage(BaseModel):
     balance, or it is too small to raise a debit note for."""
     reason: Optional[str] = None
     by: Optional[str] = None
+
+
+class ReceiveAt(BaseModel):
+    """Which warehouse took this delivery in."""
+    warehouse_id: Optional[int] = None
 
 
 class ScanCode(BaseModel):
@@ -109,7 +115,11 @@ def _line_out(l: models.PurchaseLine, db: Session = None, suggest: bool = True):
     suggestion = None
     if db is not None and suggest and not l.category:
         from ..services import categorize
-        s = categorize.suggest(db, l.description, limit=4)
+        # Suggested from the receiving warehouse's own category master. A silk
+        # GRN must never be offered a garment category, and a catalogue with no
+        # categories yet correctly offers nothing.
+        s = categorize.suggest(db, l.description, limit=4,
+                               catalogue_id=inv.purchase_catalogue_id(db, l.purchase))
         # `via` lets the screen say WHY: "rules" is the engine's own reading,
         # "alias" is a mapping someone already taught it for this wording
         suggestion = {"best": (s["best"] or {}).get("name"), "confident": s["confident"],
@@ -165,6 +175,8 @@ def _purchase_out(p: models.Purchase, with_lines=False, db: Session = None):
         "id": p.id, "document_id": p.document_id, "supplier_id": p.supplier_id,
         "supplier_name": p.supplier.name if p.supplier else None,
         "grn_no": p.grn_no, "invoice_number": p.invoice_number,
+        "warehouse_id": p.warehouse_id,
+        "warehouse_name": p.warehouse.name if p.warehouse else None,
         "invoice_date": p.invoice_date, "taxable_total": p.taxable_total,
         "tax_total": p.tax_total, "grand_total": p.grand_total,
         "status": p.status, "line_count": len(p.lines),
@@ -202,8 +214,15 @@ def _purchase_out(p: models.Purchase, with_lines=False, db: Session = None):
 
 
 @router.get("")
-def list_purchases(db: Session = Depends(get_db)):
-    ps = db.query(models.Purchase).order_by(models.Purchase.id.desc()).all()
+def list_purchases(db: Session = Depends(get_db),
+                   wid: Optional[int] = Depends(scope.current)):
+    """The GRN list for the warehouse this call is made inside.
+
+    A draft with no warehouse chosen yet is included: it is a receipt somebody
+    here has started, and it would otherwise be on nobody's screen until they
+    picked a building — which is the moment they most need to find it again."""
+    q = scope.purchases(db.query(models.Purchase), wid)
+    ps = q.order_by(models.Purchase.id.desc()).all()
     return [_purchase_out(p) for p in ps]
 
 
@@ -236,6 +255,34 @@ def get_purchase(pid: int, db: Session = Depends(get_db)):
     p = db.get(models.Purchase, pid)
     if not p:
         raise HTTPException(404, "purchase not found")
+    return _purchase_out(p, with_lines=True, db=db)
+
+
+@router.post("/{pid}/warehouse")
+def set_warehouse(pid: int, body: ReceiveAt, db: Session = Depends(get_db)):
+    """Say which warehouse this delivery was unloaded at.
+
+    Only while the GRN is a draft. Once it is posted the stock is standing in a
+    building, and changing the label on the receipt would not move it — it would
+    just make the ledger disagree with the shelf. Correcting a receipt that
+    landed at the wrong warehouse is unpost → set → post, which reverses the
+    stock out of the first one and receives it into the second."""
+    p = db.get(models.Purchase, pid)
+    if not p:
+        raise HTTPException(404, "purchase not found")
+    if p.status == "posted":
+        raise HTTPException(400, "this GRN is posted — its stock is already in a "
+                                 "warehouse. Unpost it to receive it somewhere else.")
+    if body.warehouse_id is not None:
+        wh = db.get(models.Warehouse, body.warehouse_id)
+        if not wh:
+            raise HTTPException(404, "warehouse not found")
+        if not wh.active:
+            raise HTTPException(400, f"“{wh.name}” is switched off — goods can't be "
+                                     f"received into a closed warehouse")
+    p.warehouse_id = body.warehouse_id
+    db.commit()
+    db.refresh(p)
     return _purchase_out(p, with_lines=True, db=db)
 
 
@@ -283,12 +330,21 @@ def edit_line(line_id: int, body: LineEdit, db: Session = Depends(get_db)):
     fields = body.model_dump(exclude_unset=True)
     if "category" in fields:
         name = (fields["category"] or "").strip()
+        # Checked against THIS warehouse's master. A garment category typed onto
+        # a silk GRN is not a valid classification of these goods, and accepting
+        # it would put an item in a list its own inventory screen never shows.
+        cat_id = inv.purchase_catalogue_id(db, line.purchase)
         if name and not db.query(models.Category).filter(
-                models.Category.name == name).first():
-            raise HTTPException(400, f"“{name}” is not in the category master")
+                models.Category.name == name,
+                (models.Category.catalogue_id == cat_id)
+                | (models.Category.catalogue_id.is_(None))).first():
+            cat = line.purchase.warehouse.catalogue if (
+                line.purchase.warehouse and line.purchase.warehouse.catalogue) else None
+            raise HTTPException(400, f"“{name}” is not in the "
+                                     f"{cat.name + ' ' if cat else ''}category master")
         line.category = name or None
         from ..services import categorize
-        categorize.learn_alias(db, line.description, name or None)
+        categorize.learn_alias(db, line.description, name or None, catalogue_id=cat_id)
     if "unit_type" in fields:
         from ..services import unit_types as ut
         code = (fields["unit_type"] or "").strip().upper()

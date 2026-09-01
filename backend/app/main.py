@@ -14,7 +14,7 @@ from . import models  # noqa: F401  (register tables)
 from .routers import (documents, suppliers, purchases, inventory, outward,
                       payments, returns, reports, settings, auth, masters, lr,
                       bundles, dashboard, master_data, labels, dead_stock,
-                      notifications, voice, users, locations)
+                      notifications, voice, users, locations, catalogues)
 from .extraction.engine import provider_status
 from .security import auth_middleware
 from .config import COMPANY_NAME, COMPANY_GSTIN
@@ -388,6 +388,17 @@ def _boot_database():
         _db = SessionLocal()
         _n = _masters.import_categories(_db)
         _masters.seed_options(_db)
+        # The business lines this company trades in, and the filing of everything
+        # that predates them under the garment line. AFTER import_categories, so
+        # the 686 rows it may have just loaded are tagged in the same pass rather
+        # than staying untagged until the next start. See services/catalogues.
+        from .services import catalogues as _catalogues
+        _catalogues.ensure_seed(_db)
+        # The legal entity this install has always been, written down so a second
+        # one can exist beside it — and every warehouse filed under it. A no-op
+        # once done; see services/businesses.
+        from .services import businesses as _businesses
+        _businesses.ensure_seed(_db)
         # dozens-to-pieces needs a unit master to convert against, and the warehouse
         # should not have to build one before the first receipt
         _unit_types.seed(_db)
@@ -400,6 +411,11 @@ def _boot_database():
         # the consignment row beside them — see inventory.backfill_grn_numbers.
         from .services import inventory as _inv
         _inv.backfill_grn_numbers(_db)
+        # Stock movements written before stock was split by warehouse belong to
+        # the one warehouse that existed, and the per-warehouse balances are
+        # built from them. A no-op once done — see stock_locations.backfill.
+        from .services import stock_locations as _stock_loc
+        _stock_loc.backfill(_db)
         _db.close()
     except Exception:
         pass
@@ -506,6 +522,7 @@ app.include_router(dead_stock.router)
 app.include_router(notifications.router)
 app.include_router(voice.router)
 app.include_router(locations.router)
+app.include_router(catalogues.router)
 app.include_router(users.router)
 
 

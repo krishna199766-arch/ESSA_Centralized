@@ -6,6 +6,7 @@ from ..database import get_db
 from .. import models
 from ..services import outward as svc
 from ..services import stock_view
+from ..services import scope
 
 router = APIRouter(prefix="/api/outward", tags=["stock-outward"])
 
@@ -19,6 +20,13 @@ class OutwardLineIn(BaseModel):
 
 class OutwardIn(BaseModel):
     date: Optional[str] = None
+    # Where it leaves from, and where it goes. `to_warehouse_id` makes this a
+    # warehouse-to-warehouse transfer that ARRIVES when it is received;
+    # `to_store_id` dispatches to a shop, whose own database owns it from there.
+    # `to_destination` alone still works and is matched to a known place by name.
+    from_warehouse_id: Optional[int] = None
+    to_warehouse_id: Optional[int] = None
+    to_store_id: Optional[int] = None
     to_destination: Optional[str] = None
     packed_by: Optional[str] = None
     received_by: Optional[str] = None
@@ -36,11 +44,20 @@ class ReceiveIn(BaseModel):
 
 def _line_out(l, db: Session):
     prod = l.product
+    # What is on hand AT THE SOURCE — the only figure that answers "can I send
+    # this". The company total is shown beside it so a picker who is short can
+    # see the goods exist somewhere rather than concluding they are out of stock.
+    from ..services import stock_locations as stock_loc
+    src = l.outward.from_warehouse_id if l.outward else None
+    here = stock_loc.qty_at(db, prod.id, src) if (prod and src) else None
     return {
         "id": l.id, "product_id": l.product_id, "barcode": l.barcode,
         "description": l.description, "qty": l.qty,
         "accepted_qty": l.accepted_qty, "short_qty": l.short_qty,
-        "rate": l.rate, "stock_on_hand": prod.stock_qty if prod else None,
+        "rate": l.rate,
+        "stock_on_hand": here if here is not None else (prod.stock_qty if prod else None),
+        "stock_company_wide": prod.stock_qty if prod else None,
+        "stock_by_warehouse": stock_loc.balances_for(db, prod.id) if prod else [],
         "value": round(float(l.qty or 0) * float(l.rate or 0), 2),
         # The whole product record — QR, name, size, colour, batch and the rest.
         # A dispatch or an acceptance is someone matching a row against a garment
@@ -53,6 +70,17 @@ def _line_out(l, db: Session):
 def _out(o, db: Session = None, with_lines=False):
     d = {"id": o.id, "code": o.code, "date": o.date, "to_destination": o.to_destination,
          "from_company": o.from_company, "from_location": o.from_location,
+         "from_warehouse_id": o.from_warehouse_id,
+         "from_warehouse": o.from_warehouse.name if o.from_warehouse else None,
+         "to_warehouse_id": o.to_warehouse_id,
+         "to_warehouse": o.to_warehouse.name if o.to_warehouse else None,
+         "to_store_id": o.to_store_id,
+         "to_store": o.to_store.name if o.to_store else None,
+         # What KIND of movement this is, said once here rather than re-derived
+         # on every screen that has to draw it differently.
+         "kind": ("transfer" if o.to_warehouse_id else
+                  "store" if o.to_store_id else "dispatch"),
+         "is_transfer": o.is_transfer,
          "packed_by": o.packed_by, "received_by": o.received_by,
          "received_date": o.received_date, "status": o.status,
          "total_qty": o.total_qty, "accepted_qty": o.total_accepted,
@@ -73,18 +101,40 @@ def _get(oid: int, db: Session):
 
 
 @router.get("")
-def list_outwards(status: str = "all", db: Session = Depends(get_db)):
+def list_outwards(status: str = "all", kind: str = "all",
+                  db: Session = Depends(get_db),
+                  warehouse_id: Optional[int] = Depends(scope.current)):
     """`status` filters the list: draft | posted | received. 'posted' is what the
-    Stock Inward screen wants — dispatched, not yet accepted anywhere."""
+    Stock Inward screen wants — dispatched, not yet accepted anywhere.
+
+    `kind` narrows it to transfer (warehouse → warehouse), store, or dispatch.
+    `warehouse_id` returns the notes that concern one building — sent from it OR
+    coming to it, because both are that warehouse's business and making the
+    screen ask twice is how the inbound half gets forgotten."""
     q = db.query(models.StockOutward)
     if status and status != "all":
         q = q.filter(models.StockOutward.status == status)
+    if kind == "transfer":
+        q = q.filter(models.StockOutward.to_warehouse_id.isnot(None))
+    elif kind == "store":
+        q = q.filter(models.StockOutward.to_store_id.isnot(None))
+    elif kind == "dispatch":
+        q = q.filter(models.StockOutward.to_warehouse_id.is_(None),
+                     models.StockOutward.to_store_id.is_(None))
+    # Sent from here OR coming to here — both are this warehouse's business, and
+    # filtering to the source alone is what makes an arriving transfer invisible
+    # at the branch that has to count it in.
+    q = scope.outwards(q, warehouse_id)
     return [_out(o) for o in q.order_by(models.StockOutward.id.desc()).all()]
 
 
 @router.post("")
 def create_outward(body: OutwardIn, db: Session = Depends(get_db)):
-    o = svc.create_outward(db, body.model_dump())
+    try:
+        o = svc.create_outward(db, body.model_dump())
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc))
     db.commit(); db.refresh(o)
     return _out(o, db, with_lines=True)
 
