@@ -645,7 +645,15 @@ def update_terminal(tid: int, body: TerminalIn, db: Session = Depends(get_db)):
         t.code = _clean(body.code)
     _apply_profile(t, body, db)
     if body.active is not None:
-        t.active = bool(body.active)
+        want = bool(body.active)
+        # The DATE it was switched off, not merely the fact — a closed till may
+        # be deleted a year later and this is what that year is counted from.
+        # Only a real change is stamped: saving an edit on a till that was
+        # already closed must not push its date forward and restart the year.
+        if want != bool(t.active):
+            import datetime as _dt
+            t.deactivated_at = None if want else _dt.datetime.utcnow()
+        t.active = want
     db.commit()
     db.refresh(t)
     return svc.terminal_out(t)
@@ -653,9 +661,41 @@ def update_terminal(tid: int, body: TerminalIn, db: Session = Depends(get_db)):
 
 @router.delete("/terminals/{tid}")
 def delete_terminal(tid: int, db: Session = Depends(get_db)):
+    """Remove a till — but only one that has been closed for a year.
+
+    A terminal is not like a store, which is refused deletion because rows point
+    at it. Nothing in THIS database points at a till: the sales are the shop's,
+    in the shop's own file, and they name the counter by name. Deleting the row
+    here would break nothing the server could detect, and that is exactly why
+    the rule has to be a date rather than a reference count — the damage shows up
+    a year later on a screen in a different application, when a bill is read back
+    and the counter that raised it cannot be named.
+
+    So the till is closed first (which the screen offers instead of this) and
+    removed afterwards. Closing keeps every bill readable; the year is how long
+    anyone realistically reads them back.
+    """
     t = db.get(models.PosTerminal, tid)
     if not t:
         raise HTTPException(404, "terminal not found")
+    on = svc.terminal_deletable_on(t)
+    if on is None:
+        raise HTTPException(409, "close this till first — it can be deleted a "
+                                 "year after it is switched off, so the bills it "
+                                 "printed stay readable until then")
+    import datetime as _dt
+    import math
+    # Compared as instants, not as whole days. `(on - now).days` truncates, so a
+    # till with 23 hours left to serve reads as 0 days and would be let through
+    # — while terminal_out, which compares the datetimes, still hides the button.
+    # The screen would offer nothing and the server would allow it.
+    now = _dt.datetime.utcnow()
+    if on > now:
+        left = math.ceil((on - now).total_seconds() / 86400)
+        raise HTTPException(409, f"this till was closed on "
+                                 f"{t.deactivated_at:%d-%m-%Y} and can be deleted "
+                                 f"from {on:%d-%m-%Y} — {left} day(s) to go. "
+                                 f"It stays switched off until then.")
     db.delete(t)
     db.commit()
     return {"ok": True}

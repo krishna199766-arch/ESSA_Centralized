@@ -10316,7 +10316,7 @@ function locWhere(node) {
     .join(', ')
 }
 
-function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, children }) {
+function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, deleteHint, children }) {
   const dim = node.active === false
   const where = locWhere(node)
   return (
@@ -10355,8 +10355,17 @@ function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, children }
           title={dim ? 'Reopen this' : 'Close it — its history stays readable'}
           onClick={onToggle}>{dim ? '↺' : '⊘'}</button>}
         {onDelete && <button className="iconbtn danger"
-          title="Delete — only possible while nothing is filed under it"
+          title={deleteHint || 'Delete — only possible while nothing is filed under it'}
           onClick={onDelete}>×</button>}
+        {/* Not deletable, but with a reason to give: the cross stays in place
+            greyed out rather than disappearing, so the row does not look like it
+            is missing a control and nobody goes hunting for one. Rows that are
+            merely blocked by their children pass no hint and keep the old
+            behaviour of showing nothing at all. */}
+        {!onDelete && deleteHint && (
+          <button className="iconbtn" disabled title={deleteHint}
+            style={{ opacity: .35, cursor: 'not-allowed' }}>×</button>
+        )}
       </div>
       {children}
     </div>
@@ -10771,10 +10780,19 @@ function Locations({ toast }) {
                       <div className="small locempty">No tills at this store yet.</div>
                     )}
                     {(s.terminals || []).map((t) => (
+                      /* A till is closed, not deleted — its number is on every
+                         bill it printed, and those are read back long after it
+                         stops being used. The cross appears a year after it is
+                         switched off; until then the switch beside it is the
+                         whole of what this screen offers, and the server
+                         refuses the same thing with the date. */
                       <LocationRow key={t.id} node={t} kind="terminal"
+                        deleteHint={t.deletable_on
+                          ? `Closed on ${fmtDate(t.deactivated_at)} — can be deleted from ${fmtDate(t.deletable_on)}`
+                          : 'Close this till first — it can be deleted a year after it is switched off'}
                         onEdit={() => setEdit({ kind: 'terminal', init: t })}
                         onToggle={() => toggle('terminal', t)}
-                        onDelete={() => remove('terminal', t)} />
+                        onDelete={t.can_delete ? () => remove('terminal', t) : null} />
                     ))}
                   </div>
                 </LocationRow>

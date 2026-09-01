@@ -1864,6 +1864,19 @@ class PosTerminal(LocationProfile, Base):
     business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
     active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=now)
+    #: When this till was last switched off, and None while it is open.
+    #:
+    #: A till is not deleted the day it stops being used. Its number is on every
+    #: bill it ever printed, and those bills are read back for a year afterwards —
+    #: a return, an audit, a GST return that has to name the counter that raised
+    #: the invoice. So removal waits: close it, and it can be deleted a year
+    #: later. This column is what that year is counted from, which is why the
+    #: date is kept rather than the fact — see routers/locations.delete_terminal.
+    #:
+    #: Reopening clears it. A till that came back into use has not been retired
+    #: at all, and leaving the old date behind would let a counter that billed
+    #: yesterday be deleted because it happened to be shut this time last year.
+    deactivated_at = Column(DateTime)
 
     store = relationship("Store", back_populates="terminals")
 

@@ -26,6 +26,7 @@ NOTHING HERE SPLITS STOCK. Product.stock_qty is still one figure and
 StockMovement still has no location column. These tables are what that change
 needs in place first.
 """
+import datetime as dt
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -34,6 +35,14 @@ from .. import models
 
 #: The list the whole app already reads for "which branch".
 LOCATION_OPTION_KIND = "auto_transfer_location"
+
+#: How long a closed till is kept before anyone may delete it.
+#:
+#: A terminal's name is on every bill it printed, and those bills are read back
+#: long after it stops being used — a return, an audit, a GST return that has to
+#: name the counter. So a till is closed first and removed a year later, and in
+#: the meantime the screen offers the switch rather than the cross.
+TERMINAL_RETENTION = dt.timedelta(days=365)
 
 #: "keep it here" — the default on the LR form, and never a store.
 NONE_VALUE = "NONE"
@@ -207,11 +216,31 @@ def store_out(s: models.Store, counts=True) -> dict:
     return out
 
 
+def terminal_deletable_on(t: models.PosTerminal):
+    """The date this till may be deleted, or None while it may not be.
+
+    None for an open till — closing it is what starts the clock — and None for
+    one closed before the column existed, which has no date to count from. Both
+    read the same way on the screen: no cross, use the switch.
+    """
+    if t.active or not t.deactivated_at:
+        return None
+    return t.deactivated_at + TERMINAL_RETENTION
+
+
 def terminal_out(t: models.PosTerminal) -> dict:
+    on = terminal_deletable_on(t)
     return {"id": t.id, "name": t.name, "code": t.code, "active": bool(t.active),
             "store_id": t.store_id, "business_id": t.business_id,
             "store_name": t.store.name if t.store else None,
             "warehouse_id": t.store.warehouse_id if t.store else None,
+            # The screen hides the delete button rather than offering one that
+            # the server would refuse. It is told the answer and the date behind
+            # it, so it can say WHEN instead of only "no" — and the rule is
+            # worked out in one place, here, for both.
+            "deactivated_at": t.deactivated_at.isoformat() if t.deactivated_at else None,
+            "deletable_on": on.isoformat() if on else None,
+            "can_delete": bool(on and on <= dt.datetime.utcnow()),
             **profile_out(t)}
 
 
