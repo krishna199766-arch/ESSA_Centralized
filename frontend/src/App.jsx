@@ -2335,14 +2335,21 @@ function Purchases({ selId, setSelId, toast }) {
     }
     if (l.splits.length) { setSrows(l.splits.map(from)); return }
     // A new row starts from what the LINE already says about itself: its category
-    // (or the mapping it would get), and the brand and design number that came off
-    // the invoice. The common case — one garment, one brand, one design, several
-    // sizes — should need none of that typed twice, and a brand re-keyed per size
-    // is a brand that ends up spelled two ways.
+    // (or the mapping it would get), and the brand, design number and size that
+    // came off the invoice. The common case — one garment, one brand, one design,
+    // several sizes — should need none of that typed twice, and a brand re-keyed
+    // per size is a brand that ends up spelled two ways.
+    //
+    // The size cell is carried across as it was written. When it holds a run the
+    // parser could read, the branch below overwrites it with the size of each row
+    // it found, so this only ever shows through on a line whose size is a single
+    // value — or one written in a form the parser declined to guess at, which
+    // arrives verbatim for the operator to correct rather than to retype.
     const blank = () => ({
       ...blankVariant(l.rate, l.category || l.category_suggestion?.best),
       ...(l.brand ? { brand: l.brand } : {}),
       ...(l.design_no ? { design_no: l.design_no } : {}),
+      ...(l.size ? { size: l.size } : {}),
     })
     // The supplier printed the mix in the size column — "30:2, 32:4, 34:4, 36:2"
     // is the count already done by whoever packed the carton. Re-keying it here
