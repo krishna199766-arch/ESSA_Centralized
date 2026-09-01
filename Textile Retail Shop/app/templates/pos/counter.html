@@ -202,8 +202,57 @@
         </div>
         <div class="d-flex justify-content-between mt-2"><strong>Total</strong><strong id="grandTotal" style="color:var(--brand-dark)">₹0.00</strong></div>
 
-        <button id="checkoutBtn" class="btn btn-brand w-100 mt-3">
+        <!-- How this bill is being paid, for the sale that is paid ONE way.
+             That is nearly every sale, and sending it through the settlement
+             modal meant a popup and a second click to confirm a number the till
+             had already worked out. The method is picked here and the bill is
+             taken in one press.
+
+             The modal has not gone anywhere: the moment a bill is split across
+             two tenders there are amounts to balance to the paisa, and that is
+             what it exists for. "Split across methods" opens it, pre-filled from
+             whatever was picked here. Both paths post the same payments array to
+             the same endpoint, so a split bill and a plain one cannot come out
+             of the till differently. -->
+        <div class="mt-3">
+          <label class="form-label small mb-1">Pay by</label>
+          <div class="btn-group w-100" role="group" aria-label="Payment method">
+            <input type="radio" class="btn-check" name="qpMethod" id="qpCash" value="cash" checked>
+            <label class="btn btn-outline-primary btn-sm" for="qpCash"><i class="bi bi-cash"></i> Cash</label>
+            <input type="radio" class="btn-check" name="qpMethod" id="qpCard" value="card">
+            <label class="btn btn-outline-primary btn-sm" for="qpCard"><i class="bi bi-credit-card"></i> Card</label>
+            <input type="radio" class="btn-check" name="qpMethod" id="qpUpi" value="upi">
+            <label class="btn btn-outline-primary btn-sm" for="qpUpi"><i class="bi bi-phone"></i> UPI</label>
+          </div>
+
+          <!-- Cash is the only tender that is over-paid, so it is the only one
+               that asks what was handed over and works out the change. -->
+          <div class="row g-2 mt-1" id="qpCashRow">
+            <div class="col-6">
+              <label class="form-label small mb-1">Tendered ₹</label>
+              <input id="qpTender" class="form-control form-control-sm"
+                     type="number" min="0" step="0.01" placeholder="0.00">
+            </div>
+            <div class="col-6 d-flex align-items-end">
+              <div class="d-flex justify-content-between w-100 pb-1">
+                <span class="small text-muted">Change</span>
+                <span id="qpChange" class="fw-bold" style="color:var(--brand-dark)">₹0.00</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-2 d-none" id="qpRefRow">
+            <input id="qpRef" class="form-control form-control-sm" maxlength="64"
+                   placeholder="Reference (optional)">
+          </div>
+
+          <div id="qpWarn" class="small mt-1 d-none" style="color:#b23b3b"></div>
+        </div>
+
+        <button id="checkoutBtn" class="btn btn-brand w-100 mt-2">
           <i class="bi bi-cash-coin"></i> Settle &amp; bill</button>
+        <button type="button" id="splitBtn" class="btn btn-link btn-sm w-100 mt-1 text-decoration-none"
+                title="Take this bill across more than one tender">Split across methods ›</button>
       </div>
     </div>
   </div>
@@ -320,6 +369,10 @@ function renderCart(){
   // how a till comes to disagree with its own bill.
   window._billTotal = Math.round(Math.max(0, preLoyalty - redeem) * 100) / 100;
   document.getElementById('grandTotal').innerText = fmt(window._billTotal);
+  // The tender picker sits under this total and quotes it, so it is repainted
+  // from the same place — a discount typed after the method was chosen has to
+  // move the cash tendered and the change with it.
+  paintQuickPay();
 
   // loyalty helper
   const help = document.getElementById('ptsHelp');
@@ -747,39 +800,107 @@ document.querySelectorAll('.st-rest').forEach((b) => {
   };
 });
 
-document.getElementById('checkoutBtn').onclick = () => {
+// ---- the one-tender sale, taken from the cart itself ------------------------
+// Nearly every bill is paid one way. That sale has nothing to balance — the
+// single amount IS the total — so it does not need the modal, and asking for a
+// popup and a second click to confirm a figure the till already worked out was
+// the slowest part of the busiest path.
+const qpEl = (id) => document.getElementById(id);
+const qpMethod = () =>
+  (document.querySelector('input[name="qpMethod"]:checked') || {}).value || 'cash';
+
+function paintQuickPay(){
+  const due = Number(window._billTotal || 0);
+  const m = qpMethod();
+  const cash = m === 'cash';
+  // Only cash is over-tendered and only cash returns change; the others take a
+  // reference instead, which is the thing anyone ever looks up afterwards.
+  qpEl('qpCashRow').classList.toggle('d-none', !cash);
+  qpEl('qpRefRow').classList.toggle('d-none', cash);
+
+  // Tendered follows the bill until the cashier types over it — exact money is
+  // the common case, and re-keying the total is friction for nothing.
+  const t = qpEl('qpTender');
+  if (!t.dataset.touched) t.value = due ? due.toFixed(2) : '';
+  const tendered = parseFloat(t.value) || 0;
+  qpEl('qpChange').innerText = fmt(cash ? Math.max(0, Math.round((tendered - due) * 100) / 100) : 0);
+
+  // The same refusal the modal makes, for the same reason: nothing is committed
+  // until the money covers the bill.
+  let msg = '';
+  if (due <= 0) msg = 'Nothing to settle — the cart is empty.';
+  else if (cash && tendered < due) msg = `${fmt(Math.round((due - tendered) * 100) / 100)} short of the bill.`;
+  const warn = qpEl('qpWarn');
+  warn.classList.toggle('d-none', !msg);
+  warn.innerText = msg;
+  qpEl('checkoutBtn').disabled = !!msg;
+}
+
+document.querySelectorAll('input[name="qpMethod"]').forEach((r) => {
+  r.onchange = () => { delete qpEl('qpTender').dataset.touched; paintQuickPay(); };
+});
+qpEl('qpTender').oninput = (e) => { e.target.dataset.touched = '1'; paintQuickPay(); };
+// Once for the empty cart the page opens on: renderCart only runs when something
+// is in it, and until then the button has to be off rather than merely quiet.
+paintQuickPay();
+
+// Both buttons below refuse for the same two reasons, so they ask once.
+function readyToBill(){
   if (!servingStaffId){
     alert('Identify the staff member serving this customer first.');
-    document.getElementById('staffCode').focus();
-    return;
+    qpEl('staffCode').focus();
+    return false;
   }
-  if (cart.size === 0){ alert('Cart is empty'); return; }
+  if (cart.size === 0){ alert('Cart is empty'); return false; }
+  return true;
+}
+
+qpEl('checkoutBtn').onclick = () => {
+  if (!readyToBill()) return;
+  const due = Number(window._billTotal || 0);
+  const m = qpMethod();
+  submitSale([{
+    method: m, amount: due,
+    tendered: m === 'cash' ? (parseFloat(qpEl('qpTender').value) || 0) : due,
+    reference: m === 'cash' ? null : ((qpEl('qpRef').value || '').trim() || null),
+  }], qpEl('checkoutBtn'));
+};
+
+// ---- the split: the modal, opened with what was picked here already on it ----
+qpEl('splitBtn').onclick = () => {
+  if (!readyToBill()) return;
   METHODS.forEach((m) => {
     stAmt(m).value = ''; stRef(m).value = '';
     const t = stTender(m); t.value = ''; delete t.dataset.touched;
   });
-  // Cash pre-filled with the whole bill: it is what most sales are, and it makes
-  // the common case one click rather than a number to type.
-  stAmt('cash').value = Number(window._billTotal || 0).toFixed(2);
-  stTender('cash').value = stAmt('cash').value;
+  const m = qpMethod();
+  stAmt(m).value = Number(window._billTotal || 0).toFixed(2);
+  if (m === 'cash') stTender('cash').value = stAmt('cash').value;
+  else stRef(m).value = (qpEl('qpRef').value || '').trim();
   paintSettle();
   settleModal.show();
-  setTimeout(() => stAmt('cash').select(), 300);
+  setTimeout(() => stAmt(m).select(), 300);
 };
 
-document.getElementById('stConfirm').onclick = async () => {
-  const btn = document.getElementById('stConfirm');
+document.getElementById('stConfirm').onclick = () =>
+  submitSale(settleRows().map((r) => ({
+    method: r.method, amount: r.amount,
+    tendered: r.method === 'cash' ? r.tendered : r.amount,
+    reference: r.reference || null,
+  })), document.getElementById('stConfirm'));
+
+// ---- the one way a sale is committed ---------------------------------------
+// Both paths end here. One place builds the payload, so a split bill and a plain
+// one cannot come out of the till describing themselves differently — and the
+// server checks the tenders against its OWN total either way (see pos.checkout).
+async function submitSale(payments, btn){
   btn.disabled = true;
   const payload = {
     staff_id: servingStaffId,
     customer_id: currentCustomerId,
     discount: parseFloat(document.getElementById('discount').value) || 0,
     redeem_points: parseFloat(document.getElementById('redeemPoints').value) || 0,
-    payments: settleRows().map((r) => ({
-      method: r.method, amount: r.amount,
-      tendered: r.method === 'cash' ? r.tendered : r.amount,
-      reference: r.reference || null,
-    })),
+    payments,
     items: [...cart.entries()].map(([id, it]) => ({product_id: id, quantity: it.qty, unit_price: it.price}))
   };
   try {
@@ -801,7 +922,7 @@ document.getElementById('stConfirm').onclick = async () => {
     alert('Billing failed: ' + err);
     btn.disabled = false;
   }
-};
+}
 
 // ---- Company / Location / Counter -----------------------------------------
 // The lists are nested: a location belongs to a company and a counter to a
