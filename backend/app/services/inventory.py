@@ -188,16 +188,24 @@ def build_grn_from_document(db, doc):
     tot = data.get("totals", {}) or {}
     meta = data.get("meta", {}) or {}
 
+    # Where the goods came in. Read from the document, not from the purchase —
+    # the purchase does not exist yet at this point, and reaching for it here is
+    # an UnboundLocalError on every invoice that does not carry its own GRN
+    # number, which is most of them. Carried onto the purchase below too, so the
+    # receipt is scoped to the same warehouse its number was drawn from.
+    warehouse_id = doc.warehouse_id
+
     # A number the invoice itself carried is kept — some suppliers print the
     # buyer's GRN reference on the bill, and ours must not talk over theirs.
     # Otherwise one is allocated HERE, at the moment a receipt actually exists.
     # Allocating earlier, on the review screen, would spend numbers on invoices
     # that are never received and leave gaps nobody can account for.
     grn_no = ((meta.get("grn_no") or "").strip()
-              or next_grn_no(db, warehouse_id=purchase.warehouse_id))
+              or next_grn_no(db, warehouse_id=warehouse_id))
 
     purchase = models.Purchase(
         document_id=doc.id, supplier_id=doc.supplier_id,
+        warehouse_id=warehouse_id,
         grn_no=grn_no, invoice_number=inv.get("number"),
         invoice_date=inv.get("date"),
         taxable_total=tot.get("taxable_total") or 0.0,
