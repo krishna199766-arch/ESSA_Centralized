@@ -34,6 +34,33 @@ def _profile_dict(profile: models.SupplierProfile):
     }
 
 
+def _page_refs(doc: models.Document) -> List[str]:
+    """Every stored page of this document, in order, first page first.
+
+    `pages` is NULL on everything uploaded before a document could have more
+    than one — and on the LR register's own documents, which never set it — so
+    an empty list means "just stored_path", not "no pages". A manual entry has
+    neither and is legitimately empty.
+
+    One place, because the answer was previously spelled `doc.pages or
+    [doc.stored_path]` at each call site and the image route did not spell it at
+    all: it read stored_path directly, which is why the second page of a merged
+    invoice could be sent to the extractor but never looked at.
+    """
+    refs = list(doc.pages or ([doc.stored_path] if doc.stored_path else []))
+    return [r for r in refs if r]
+
+
+class PagesMissing(RuntimeError):
+    """The stored file behind one or more pages no longer resolves.
+
+    Its own type because the answer to it is nothing like the answer to a bad
+    photograph or an unreachable API. Nothing can be read, re-reading will not
+    help, and the fix is on the server rather than on the invoice — so it is
+    reported in those words instead of arriving as an empty invoice at 3%.
+    """
+
+
 def _doc_out(doc: models.Document):
     ex = doc.latest_extraction
     data = ex.data if ex else {}
@@ -59,6 +86,13 @@ def _doc_out(doc: models.Document):
         # reads as "the scan failed to load", which is a different and much more
         # alarming thing than "this one was typed in".
         "has_image": bool(doc.stored_path),
+        # How many photographs are behind this row. One for an ordinary upload;
+        # two or more for a bill photographed a page at a time and then merged.
+        # The viewer needs it to offer the other pages — without it the merge
+        # joined the pages in the database, sent them all to the extractor, and
+        # still showed only page one, which reads as the merge having done
+        # nothing at all.
+        "page_count": len(_page_refs(doc)),
     }
 
 
@@ -143,8 +177,29 @@ def _extract_into(doc: models.Document, db: Session) -> dict:
     second time and add another row to the list. The pages are already there;
     only the reading needs repeating.
     """
-    refs = doc.pages or [doc.stored_path]
-    locals_ = [storage.materialise(r) or r for r in refs]
+    # A reference that no longer resolves used to be passed on ANYWAY —
+    # `materialise(r) or r` handed the extractor the path it had just failed to
+    # find. What came back was a FileNotFoundError from inside the vision
+    # provider, swallowed by the engine's fallback as "claude_vision failed
+    # (FileNotFoundError); fell back to OCR" and turned into an empty invoice at
+    # 3% confidence: no supplier, no number, no total, no lines. Every one of
+    # those reads as "this bill could not be read", and the truth is that the
+    # bill was never opened, because the file is gone.
+    #
+    # So the pages that resolve are read and the ones that do not are named. The
+    # commonest cause by far is a server whose upload folder does not survive a
+    # restart while its database does — see /api/status, `storage`.
+    refs = _page_refs(doc)
+    locals_, missing = [], []
+    for n, ref in enumerate(refs, 1):
+        local = storage.materialise(ref)
+        (locals_.append(local) if local else missing.append(n))
+    if not locals_:
+        raise PagesMissing(
+            f"The stored image for this document is no longer there "
+            f"({len(refs) or 'no'} page(s) recorded, none readable). Nothing can "
+            f"be read from it — the row is in the database but the file behind "
+            f"it is not. Upload the invoice again.")
     local = locals_[0]
 
     # detect supplier via OCR header, load its learned profile
@@ -158,6 +213,16 @@ def _extract_into(doc: models.Document, db: Session) -> dict:
 
     # Every page to the extractor — the totals are only on the last one.
     result = engine.run_extraction(locals_, profile=profile, ocr_text=ocr_text)
+
+    # Said out loud, because of WHICH page tends to go missing and what is on
+    # it. The reading below will reconcile lines against totals and find them
+    # short, and the reviewer would be left looking for a mistake in the reading
+    # of a page that was never read.
+    if missing:
+        result["warnings"] = result["warnings"] + [
+            f"Page {', '.join(str(n) for n in missing)} of {len(refs)} could not be "
+            f"opened — the stored file is gone, so anything printed only on it "
+            f"(the totals are on the last page) is not in this reading."]
 
     # Back-fill the consignment fields (LR no & date, transporter, booking city)
     # from the matching LR register row BEFORE the extraction is stored, so the
@@ -386,20 +451,50 @@ def merge_documents(doc_id: int, body: MergeIn, db: Session = Depends(get_db)):
                                      "Un-post or clear it before merging.")
 
     first, second = (target, other) if target.id < other.id else (other, target)
-    pages = list(first.pages or [first.stored_path]) + list(second.pages or [second.stored_path])
+    pages = _page_refs(first) + _page_refs(second)
     # The same photograph added twice adds nothing and costs a page of reading.
     seen, ordered = set(), []
     for ref in pages:
         if ref not in seen:
             seen.add(ref)
             ordered.append(ref)
+    if not ordered:
+        raise HTTPException(400, "Neither of these documents has a page behind it — "
+                                 "there is nothing to merge.")
+
+    # Checked BEFORE anything is written, because of what this operation costs
+    # if it goes wrong. Two rows become one and both readings are replaced by a
+    # reading of the whole; if the stored images are not actually there, that
+    # replacement is an empty invoice and the two half-readings it replaced are
+    # gone. The operator sees a merge that "did nothing" and has lost the data
+    # they had. Refusing with the reason keeps both halves intact.
+    gone = [n for n, ref in enumerate(ordered, 1) if not storage.exists(ref)]
+    if gone:
+        raise HTTPException(400,
+            f"Page {', '.join(str(n) for n in gone)} of {len(ordered)} cannot be "
+            f"found in storage, so the merged invoice could not be read and both "
+            f"halves would be lost. The rows are in the database but the image "
+            f"files behind them are not — check /api/status, `storage`: an upload "
+            f"folder that does not survive a restart loses files exactly this way. "
+            f"Upload the invoice again, both pages at once.")
+
+    # Every half-reading, kept until the whole document has actually been read.
+    # These used to be deleted here, before the re-read was attempted — so a
+    # read that failed left the merged document with no extraction at all, which
+    # is the "merged and now there is nothing" outcome.
+    superseded = [ex.id for ex in target.extractions]
 
     target.pages = ordered
     target.stored_path = ordered[0]
     target.filename = first.filename
+    # The document's identity changed when its page set did, and content_hash is
+    # what the viewer hangs its image URL off — left at page one's original
+    # value, a merged invoice asks the browser for the very URL it asked for
+    # before it had a second page. Hashed over the page REFERENCES: each one is
+    # already named after its own content, so re-reading every page over the
+    # network to learn what the names already say buys nothing.
+    target.content_hash = hashlib.sha256("|".join(ordered).encode()).hexdigest()
     target.status = "uploaded"
-    for ex in list(target.extractions):
-        db.delete(ex)                       # the old reading was of half a bill
     _detach_document(db, other, move_to=target)
     db.delete(other)
     db.commit()                             # the merge itself is now permanent
@@ -415,14 +510,30 @@ def merge_documents(doc_id: int, body: MergeIn, db: Session = Depends(get_db)):
     except Exception as exc:                # noqa: BLE001 — reported, not raised
         db.rollback()
         target = db.get(models.Document, doc_id)
-        target.status = "uploaded"
+        # The half-reading survived (see `superseded`), so this is not the blank
+        # document it used to be — say which of the two states it is in, because
+        # "press Read it now" is the right advice for one and misleading for the
+        # other.
+        target.status = "needs_review" if target.extractions else "uploaded"
         db.commit()
+        ex = target.latest_extraction
         return {
             "document": _doc_out(target),
-            "extraction": None,
+            "extraction": ({"id": ex.id, "provider": ex.provider,
+                            "confidence": ex.confidence, "warnings": ex.warnings,
+                            "field_flags": ex.field_flags, "data": ex.data} if ex else None),
             "merged": {"pages": len(ordered), "absorbed": body.from_id},
             "read_failed": f"{type(exc).__name__}: {exc}"[:300],
         }
+
+    # Read, and only now are the half-readings of no further use. Deleted by id
+    # rather than through target.extractions, which by here also holds the new
+    # one — walking the relationship would take the answer away with the
+    # question.
+    if superseded:
+        db.query(models.Extraction).filter(
+            models.Extraction.id.in_(superseded)).delete(synchronize_session=False)
+        db.commit()
     out["merged"] = {"pages": len(ordered), "absorbed": body.from_id}
     return out
 
@@ -437,8 +548,12 @@ def re_extract(doc_id: int, db: Session = Depends(get_db)):
     was to upload the same photographs again and leave the first behind.
 
     Any existing extraction is replaced rather than added to, so a document that
-    has been read twice does not accumulate versions of the same answer. A
-    document already posted to inventory is refused: its GRN was built from the
+    has been read twice does not accumulate versions of the same answer — but it
+    is replaced AFTERWARDS, once there is something to replace it with. Deleted
+    first, a re-read that failed took the previous reading with it and left the
+    document blank, which is the one outcome nobody asked for by pressing this.
+
+    A document already posted to inventory is refused: its GRN was built from the
     reading, and replacing it underneath would leave the two disagreeing.
     """
     doc = db.get(models.Document, doc_id)
@@ -447,23 +562,18 @@ def re_extract(doc_id: int, db: Session = Depends(get_db)):
     if doc.status == "posted":
         raise HTTPException(400, "This document is already posted to inventory — "
                                  "re-reading it would leave its GRN disagreeing with it.")
-    for ex in list(doc.extractions):
-        db.delete(ex)
-    db.commit()
-    db.refresh(doc)
-    return _extract_into(doc, db)
-
-    return {
-        "document": _doc_out(doc),
-        "extraction": {
-            "id": ex.id, "provider": ex.provider, "confidence": ex.confidence,
-            "warnings": ex.warnings, "field_flags": ex.field_flags, "data": ex.data,
-        },
-        "supplier_recognised": bool(supplier),
-        "profile_used": bool(profile),
-        "lr_filled": lr_filled,
-        "lr_source": lr_source,
-    }
+    superseded = [ex.id for ex in doc.extractions]
+    try:
+        out = _extract_into(doc, db)
+    except PagesMissing as exc:
+        # Not a 500. Nothing is broken in the server and trying again will do
+        # exactly the same thing; the file is gone, and the message says so.
+        raise HTTPException(400, str(exc)) from exc
+    if superseded:
+        db.query(models.Extraction).filter(
+            models.Extraction.id.in_(superseded)).delete(synchronize_session=False)
+        db.commit()
+    return out
 
 
 @router.get("/{doc_id}")
@@ -484,12 +594,36 @@ def get_document(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{doc_id}/image")
-def get_image(doc_id: int, db: Session = Depends(get_db)):
+def get_image(doc_id: int, page: int = 0, db: Session = Depends(get_db)):
+    """One page of this document's photograph. `page` is 0-based.
+
+    It used to read `stored_path` and nothing else — which is page one, and was
+    the whole of the answer even for a document that had two. A bill merged from
+    two uploads therefore had both pages in the database and both pages sent to
+    the extractor, while the reviewer could still only look at the first: the
+    merge appeared to have done nothing.
+    """
     from fastapi.responses import Response
     doc = db.get(models.Document, doc_id)
-    raw = storage.read(doc.stored_path) if doc else None
+    if not doc:
+        raise HTTPException(404, "document not found")
+    refs = _page_refs(doc)
+    if not refs:
+        raise HTTPException(404, "image not found")
+    # Clamped rather than rejected. The viewer asks for whichever page it had
+    # open, and a document that lost a page — un-merged, or re-uploaded with
+    # fewer — would answer a stale URL with a 404 that an <img> draws as a
+    # broken file. Out of range means the request is old, not that the invoice
+    # is missing, so it gets page one.
+    ref = refs[page] if 0 <= page < len(refs) else refs[0]
+    raw = storage.read(ref)
     if raw is None:
         raise HTTPException(404, "image not found")
+    # From the page's OWN reference: `doc.mime` was recorded from page one, and
+    # a bill photographed a page at a time can be a JPEG followed by a PNG.
+    media = storage.mime_for(ref)
+    if media == "application/octet-stream" and doc.mime:
+        media = doc.mime
     # This URL is not content-addressed — it names a row, and rows are recycled:
     # "Clear all" empties the table, and SQLite hands the next upload the same id
     # the deleted one had. Without a directive the browser applies *heuristic*
@@ -504,8 +638,7 @@ def get_image(doc_id: int, db: Session = Depends(get_db)):
     # stored. On a deployment that store is Vercel Blob, whose URLs are public
     # and do not expire — handing one to the browser would put a supplier invoice
     # outside the login for good, and this route is policed like every other.
-    return Response(raw, media_type=doc.mime or "application/octet-stream",
-                    headers={"Cache-Control": "no-cache"})
+    return Response(raw, media_type=media, headers={"Cache-Control": "no-cache"})
 
 
 def _searched_for(data):

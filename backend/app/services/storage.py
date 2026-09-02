@@ -125,7 +125,7 @@ def save(raw: bytes, name: str) -> str:
             headers={
                 "authorization": f"Bearer {BLOB_TOKEN}",
                 "x-api-version": BLOB_API_VERSION,
-                "x-content-type": _mime_for(name),
+                "x-content-type": mime_for(name),
                 # The name is x-vercel-blob-access, not the x-access an
                 # educated guess produces — taken from the official SDK's own
                 # dist, which is the only place it is written down.
@@ -235,11 +235,19 @@ def _is_remote(ref: str) -> bool:
     return ref.startswith("http://") or ref.startswith("https://")
 
 
-def _mime_for(name: str) -> str:
+def mime_for(ref: str) -> str:
     """The stored object's content type, from its extension.
 
     Worth getting right rather than sending octet-stream for everything: it is
     what comes back on the GET, and the invoice viewer decides whether it has an
     image or a PDF from that.
+
+    Public because the image route needs it too. A document carries ONE `mime`,
+    recorded from the first page — and a bill photographed page by page and then
+    merged can perfectly well be a JPEG followed by a PNG, so page two has to be
+    typed from its own reference rather than from the document's.
+
+    The query string goes first: a blob reference is a URL, and `?download=1`
+    on the end of it is not a file extension.
     """
-    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return mimetypes.guess_type(ref.split("?")[0])[0] or "application/octet-stream"

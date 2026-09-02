@@ -105,14 +105,26 @@ def run_extraction(image_path, profile: Optional[Dict[str, Any]] = None,
             except Exception as e:
                 # a vision/API failure must never 500 the upload — fall back to
                 # offline OCR (or an empty shell) and flag it for review.
-                note = f"{prov.name} failed ({type(e).__name__}); fell back to OCR"
+                #
+                # The note has to say which of the two happened. Both branches
+                # used to report "fell back to OCR", so a run with OCR switched
+                # off — which produces an EMPTY invoice, every field blank and
+                # no lines at all — announced a fallback that never ran, and the
+                # blank form read as a failed reading of the bill rather than as
+                # no reading of it. They lead to different fixes.
+                why = f"{prov.name} failed ({type(e).__name__}: {e})"[:200]
                 if prov is not _tesseract and _tesseract.available():
                     result = _tesseract.extract(first, pdata, ocr_text)
-                    result.notes.append(note)
+                    result.notes.append(f"{why}; fell back to offline OCR")
                 else:
                     from .base import empty_invoice
-                    result = ProviderResult(data=empty_invoice(), provider="manual",
-                                            confidence=0.0, raw_text=ocr_text, notes=[note])
+                    result = ProviderResult(
+                        data=empty_invoice(), provider="manual", confidence=0.0,
+                        raw_text=ocr_text,
+                        notes=[f"{why}, and OCR is not available to fall back to — "
+                               f"NOTHING was read off this invoice. Every field "
+                               f"below is blank because none was filled in, not "
+                               f"because the bill could not be understood."])
 
     inv, warnings, flags, confidence = normalise_and_check(
         result.data, profile=profile, company_gstin=COMPANY_GSTIN)

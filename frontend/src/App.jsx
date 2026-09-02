@@ -1605,6 +1605,11 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
   // (useMinimized persists it) — how much room someone wants for the image is a
   // standing preference about how they work, not a per-invoice decision.
   const [imgOpen, toggleImg] = useMinimized('rev.image', true)
+  // Which pages the browser could not fetch, by index. Tracked rather than left
+  // to <img>'s broken-file icon: the icon says nothing, the cause is nearly
+  // always one nameable server condition, and it matters WHICH page it was —
+  // the last one carries the totals.
+  const [lostPages, setLostPages] = useState({})
 
   // A document with no extraction is not a document still loading. Reading a
   // dense two-page invoice can outlast the request that started it, and what is
@@ -1616,7 +1621,7 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
 
   useEffect(() => {
     if (!docId) return
-    setTab('party'); setUnread(false)
+    setTab('party'); setUnread(false); setLostPages({})
     api.getDocument(docId).then((d) => {
       setDoc(d.document)
       setUnread(!d.extraction)
@@ -1659,6 +1664,9 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
     try {
       const d = await api.mergeDocuments(docId, twin.id)
       setDoc(d.document); setTwin(null)
+      // Earlier load failures forgotten: this is a longer document now, and the
+      // indexes they were recorded against no longer mean the same pages.
+      setLostPages({})
       // The pages are joined whether or not the re-read finished. When it did
       // not, this drops into the same "uploaded but never read" screen, which
       // already offers to read it — rather than reporting a failure for work
@@ -1668,10 +1676,15 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
       setFlags(d.extraction?.field_flags || {})
       setWarnings(d.extraction?.warnings || [])
       onSaved && onSaved()
-      toast(d.extraction
-        ? `Merged — ${d.merged?.pages} pages, ${d.extraction?.data?.line_items?.length || 0} lines`
-        : `Merged ${d.merged?.pages} pages — reading timed out, press “Read it now”`,
-        d.extraction ? 'ok' : 'err')
+      // Keyed on read_failed rather than on the presence of an extraction: the
+      // server now KEEPS the half-reading when the re-read fails, so a document
+      // can come back with data attached and still not have been read as a
+      // whole. Reporting that as success would claim the second page's lines
+      // and totals are in there when they are not.
+      toast(d.read_failed
+        ? `Pages joined (${d.merged?.pages}) but the invoice could not be read: ${d.read_failed}`
+        : `Merged — ${d.merged?.pages} pages, ${d.extraction?.data?.line_items?.length || 0} lines`,
+        d.read_failed ? 'err' : 'ok')
     } catch (e) {
       toast(e.detail || 'Could not merge them', 'err')
     }
@@ -1855,7 +1868,51 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
                     right are the record. Confirm it the same way.</span>
                 </div>
               ) : (
-                <img src={api.imageUrl(docId, doc?.content_hash)} alt="invoice" />
+                /* EVERY page, stacked, rather than one with controls to reach
+                   the others. Two photographs of one bill is a document to be
+                   scrolled, the way the paper is turned over — and a merge that
+                   worked has to LOOK like it worked, which a viewer showing one
+                   page and a "2 of 2" counter does not. Checking that the lines
+                   on the right cover both pages means seeing both pages.
+
+                   page_count is absent on a payload from a server that predates
+                   it; `|| 1` keeps that showing its single page rather than
+                   nothing at all. */
+                <div className="pagestack">
+                  {Array.from({ length: doc?.page_count || 1 }, (_, i) => (
+                    <figure className="pagefig" key={`${docId}:${i}:${doc?.content_hash || ''}`}>
+                      {(doc?.page_count || 1) > 1 && (
+                        <figcaption>Page {i + 1} of {doc.page_count}
+                          {i === doc.page_count - 1 && <> · the totals are on this one</>}
+                        </figcaption>
+                      )}
+                      {lostPages[i] ? (
+                        /* Per page, because one missing page does not make the
+                           others unviewable — and because WHICH page is gone is
+                           the useful part: the last one carries the totals, and
+                           its absence explains a reading that will not add up.
+                           This is also the case the broken-file icon was hiding:
+                           the row is in the database and the file is not, which
+                           is exactly why the extractor read nothing off it. */
+                        <div className="noimage lost">
+                          <div className="noimage-ico" aria-hidden="true">🚫</div>
+                          <b>Page {i + 1} is not in storage</b>
+                          <span>This row is in the database but its image file is
+                            not, so there was nothing for the extractor to read
+                            either. Upload the invoice again — all its pages at
+                            once. If this keeps happening the server's upload
+                            folder is not surviving restarts;{' '}
+                            <code>/api/status</code> → <b>storage</b> says where
+                            files are being put.</span>
+                        </div>
+                      ) : (
+                        <img src={api.imageUrl(docId, doc?.content_hash, i)}
+                          alt={`invoice page ${i + 1}`} loading="lazy"
+                          onError={() => setLostPages((p) => ({ ...p, [i]: true }))} />
+                      )}
+                    </figure>
+                  ))}
+                </div>
               )}
             </div>
           </>
@@ -1896,6 +1953,29 @@ function Review({ docId, onSaved, onCreateGrn, toast }) {
                 : <span className="small" style={{ float: 'right' }}>via {doc && data.template_key ? '' : ''}extraction · confidence <b className={'conf ' + confClass(doc?.confidence)}>{doc ? Math.round(doc.confidence * 100) + '%' : '—'}</b></span>)}
             </h4>
             {warnings.length ? <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul> : null}
+            {/* Reading it again was reachable ONLY from the "uploaded but never
+                read" screen — which is shown when a document has NO extraction.
+                A document with a BAD one therefore had no way back: a reading
+                that failed and left every field blank is exactly the case where
+                someone wants to try again, and it was the one case with no
+                button. That is also what a merge leaves behind when the re-read
+                did not work, so the operator was stuck holding a merged invoice
+                and no way to re-read it.
+
+                Offered on any document that has a photograph and is not yet
+                posted; the server refuses a posted one anyway, because its GRN
+                was built from the reading being replaced. */}
+            {doc && doc.has_image !== false && doc.status !== 'posted' && (
+              <div style={{ marginTop: 10 }}>
+                <button className="btn" disabled={reading} onClick={readAgain}>
+                  {reading ? 'Reading — this can take a minute…' : 'Read it again'}</button>
+                <span className="small" style={{ marginLeft: 10 }}>
+                  Replaces this reading with a fresh one from the
+                  {(doc.page_count || 1) > 1 ? ` ${doc.page_count} stored pages` : ' stored page'}.
+                  Anything typed here by hand and not yet confirmed is lost.
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Four tabs, one open at a time. Seven stacked panels made the screen a

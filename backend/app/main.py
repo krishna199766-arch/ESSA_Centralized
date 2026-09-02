@@ -444,7 +444,12 @@ def _boot_wanted() -> bool:
     return not os.environ.get("VERCEL")
 
 
-app = FastAPI(title="Essa Document Intake", version="0.1.0",
+# Bumped when something a user could OBSERVE changes, so /api/status can settle
+# "is the fix actually live?" without a guess. 0.2.0: a document's pages are all
+# viewable (the image route takes ?page=), a merge refuses rather than destroys
+# when a page's file is gone, and a failed reading says which of the two things
+# went wrong instead of always claiming it fell back to OCR.
+app = FastAPI(title="Essa Document Intake", version="0.2.0",
               description="Trainable invoice-to-data extraction for Essa Garments")
 
 # ---- who may call what ----
@@ -622,6 +627,19 @@ def status():
         "boot": {"ran": BOOT_RAN, "seconds": BOOT_SECONDS,
                  "wanted": _boot_wanted()},
         "database": _database_status(DB_URL),
+        # WHICH code is answering. Three fixes in a row were tested against a
+        # deployment that had not finished replacing the previous one, and an
+        # unchanged symptom looks identical to a fix that did not work — so the
+        # running server states what it is. The commit comes from whichever
+        # variable the platform sets by itself; nothing has to be remembered at
+        # deploy time, and `null` for it means "not deployed from git", which is
+        # the honest answer on a warehouse PC running from a folder.
+        "build": {
+            "version": app.version,
+            "commit": (os.environ.get("RENDER_GIT_COMMIT")
+                       or os.environ.get("VERCEL_GIT_COMMIT_SHA")
+                       or os.environ.get("ESSA_BUILD_COMMIT") or None),
+        },
         "storage": storage_svc.backend_name(),
         # Enough to tell which build is actually serving. Three fixes in a row
         # here were tested against a deployment that had not finished replacing

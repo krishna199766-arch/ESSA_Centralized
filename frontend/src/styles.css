@@ -591,6 +591,21 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .viewer.collapsed { width: 36px; }
 .viewerscroll { flex: 1; min-width: 0; overflow: auto; display: flex;
   align-items: flex-start; justify-content: center; padding: var(--sp-4); }
+/* Every page of the bill, one under the next — .viewerscroll is a row, so the
+   pages need their own column or a two-page invoice would try to sit side by
+   side and halve the width of each. Scrolled, the way the paper is turned. */
+.pagestack { display: flex; flex-direction: column; align-items: center;
+  gap: var(--sp-5); max-width: 100%; }
+.pagefig { margin: 0; display: flex; flex-direction: column; align-items: center;
+  gap: var(--sp-2); max-width: 100%; }
+/* Only drawn when there IS more than one page, so an ordinary single-page bill
+   is not captioned "Page 1 of 1". Sticky, because on a tall two-page invoice
+   the label for the page you are looking at would otherwise have scrolled off
+   the top by the time you are reading its totals. */
+.pagefig figcaption { position: sticky; top: 0; z-index: 1;
+  color: var(--muted); font-size: var(--fs-xs); letter-spacing: .02em;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); padding: 2px var(--sp-2); }
 .viewer img { max-width: 100%; border-radius: var(--radius-sm); box-shadow: var(--shadow-2); }
 /* What stands where the photograph would be on an invoice keyed in by hand.
    Deliberately not a warning: nothing has gone wrong, this is simply a bill
@@ -603,6 +618,16 @@ a { color: var(--brand); text-underline-offset: 2px; }
   border-radius: var(--radius-lg); padding: var(--sp-5) var(--sp-4); }
 .noimage b { color: var(--text-2); font-size: var(--fs-base); }
 .noimage-ico { font-size: 30px; line-height: 1; opacity: .55; }
+/* And the opposite case, which IS a fault: the row is here and its file is not.
+   Coloured like a warning precisely because .noimage above is deliberately
+   quiet — the two look nothing alike on purpose, since one means "nothing went
+   wrong" and this one means the invoice cannot be read at all. */
+.noimage.lost { background: var(--warn-bg); border-color: var(--warn-line);
+  border-style: solid; max-width: 340px; }
+.noimage.lost b { color: var(--warn); }
+.noimage.lost code { font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-xs); background: var(--panel); padding: 1px 4px;
+  border-radius: var(--radius-sm); border: 1px solid var(--line); }
 @media (prefers-reduced-motion: reduce) { .viewer { transition: none; } }
 .editor { flex: 1; overflow-y: auto; padding: var(--gutter); background: var(--bg); }
 

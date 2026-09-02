@@ -173,7 +173,10 @@ export const api = {
   clearAllDocuments: (wipeMasters) => fetch('/api/documents/clear-all' + (wipeMasters ? '?wipe_masters=true' : ''), { method: 'DELETE' }).then(J),
   // `v` is the document's content hash — see _doc_out. Without it the URL names
   // a recycled row id and the browser can serve the previous occupant's invoice.
-  imageUrl: (id, v) => `/api/documents/${id}/image` + (v ? `?v=${v}` : ''),
+  // `page` is 0-based: a merged invoice is one document with a photograph per
+  // page, and page 1 is not the whole of it — the totals are on the last one.
+  imageUrl: (id, v, page = 0) =>
+    `/api/documents/${id}/image?page=${page}` + (v ? `&v=${v}` : ''),
   // One invoice, however many pages it was photographed as. The field is
   // repeated rather than renamed, so the server sees a list either way and a
   // single page behaves exactly as it always did.
