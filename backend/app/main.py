@@ -17,7 +17,7 @@ from .routers import (documents, suppliers, purchases, inventory, outward,
                       notifications, voice, users, locations, catalogues)
 from .extraction.engine import provider_status
 from .security import auth_middleware
-from .config import COMPANY_NAME, COMPANY_GSTIN
+from .config import COMPANY_NAME, COMPANY_GSTIN, UPLOAD_DIR
 from . import runtime
 from .services import storage as storage_svc
 
@@ -79,6 +79,42 @@ def _database_status(url: str) -> dict:
         # Only shown when there is a problem: when it is working, the list of
         # variables that were not needed is noise on an endpoint the app polls.
         "checked": None if not ephemeral else database_url_report(),
+    }
+
+
+def _storage_status() -> dict:
+    """What /api/status says about where uploaded invoices are being PUT.
+
+    The exact counterpart of the database warning above, and it was the missing
+    half of it. A serverless deployment with no blob store attached writes the
+    invoice photographs to the only place it can — a per-invocation /tmp — and
+    then answers every request perfectly. The upload succeeds. The reading
+    succeeds, because it happens in the SAME invocation, while the file is still
+    there. The document is confirmed at 100%.
+
+    And on the next request the file is gone: the image 404s, re-reading it
+    fails with FileNotFoundError, and a merge cannot re-read the joined pages.
+    Nothing in the app said the storage was temporary, so the symptom that
+    surfaces looks like an extraction fault — which is a long way from the fix,
+    and is exactly the wrong place to go looking.
+    """
+    ephemeral = not storage_svc.using_blob() and bool(os.environ.get("VERCEL"))
+    warning = None
+    if ephemeral:
+        warning = ("Uploaded invoices are being written to this instance's own "
+                   "temporary directory, because no blob store is attached. The "
+                   "upload works and the FIRST reading works — both happen while "
+                   "the file is still there — and then the file is gone: the "
+                   "invoice image 404s, re-reading it fails, and pages cannot be "
+                   "merged. Attach a Vercel Blob store (BLOB_READ_WRITE_TOKEN), "
+                   "or run somewhere with a persistent disk and point "
+                   "ESSA_UPLOAD_DIR at it.")
+    return {
+        "ok": not ephemeral,
+        "backend": storage_svc.backend_name(),
+        "persistent": not ephemeral,
+        "upload_dir": None if storage_svc.using_blob() else UPLOAD_DIR,
+        "warning": warning,
     }
 
 
@@ -640,13 +676,12 @@ def status():
                        or os.environ.get("VERCEL_GIT_COMMIT_SHA")
                        or os.environ.get("ESSA_BUILD_COMMIT") or None),
         },
+        # A bare string, kept because it is what earlier notes and error
+        # messages tell people to look at. `storage_detail.ok` is the one that
+        # answers whether the files will still be there tomorrow.
         "storage": storage_svc.backend_name(),
-        # Enough to tell which build is actually serving. Three fixes in a row
-        # here were tested against a deployment that had not finished replacing
-        # the previous one, and an unchanged error looks identical to a fix that
-        # did not work — so the running code states its own version.
         "storage_detail": {
-            "backend": storage_svc.backend_name(),
+            **_storage_status(),
             "blob_api_version": storage_svc.BLOB_API_VERSION,
             "blob_access": storage_svc.BLOB_ACCESS,
         },
