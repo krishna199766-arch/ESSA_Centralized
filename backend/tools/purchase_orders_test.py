@@ -180,6 +180,13 @@ entry = r.json()
 eq("and the entry carries the order's number", entry["po_no"], po["po_no"])
 eq("and is not flagged as missing one", entry["po_missing"], False)
 
+listed = {r["id"]: r for r in client.get("/api/purchase-orders", headers=H).json()}
+eq("the list says how many consignments cite an order, so the screen can hide "
+   "a Cancel that would be refused",
+   listed[po["id"]]["linked_lr_count"], 1)
+eq("and reports none for an order nothing has arrived against",
+   listed[draft["id"]]["linked_lr_count"], 0)
+
 eq("an order goods are booked in against cannot be cancelled",
    move(po["id"], "cancelled").status_code, 400)
 eq("and says how many consignments hold it back",

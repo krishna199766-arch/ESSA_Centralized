@@ -6455,9 +6455,20 @@ function PurchaseOrdersView({ toast }) {
                             title={r.blockers?.length ? 'Needs ' + r.blockers.join(', ') : 'Agreed — allow goods against it'}
                             onClick={() => move(r, 'confirmed')}>Confirm</button>
                         )}
-                        {r.status !== 'cancelled' && <button className="btn" disabled={busy}
-                          style={{ padding: '2px 8px', marginRight: 4 }}
-                          onClick={() => move(r, 'cancelled')}>Cancel</button>}
+                        {/* Not offered once goods are booked in against it: the
+                            consignment on the register points at this order, and
+                            the server refuses for that reason. Drawing the
+                            button anyway and letting it fail is how people learn
+                            to expect errors. */}
+                        {r.status !== 'cancelled' && !r.linked_lr_count && (
+                          <button className="btn" disabled={busy}
+                            style={{ padding: '2px 8px', marginRight: 4 }}
+                            onClick={() => move(r, 'cancelled')}>Cancel</button>
+                        )}
+                        {!!r.linked_lr_count && r.status !== 'cancelled' && (
+                          <span className="small" title="A consignment has been booked in against this order">
+                            {r.linked_lr_count} consignment{r.linked_lr_count === 1 ? '' : 's'}</span>
+                        )}
                         {r.status === 'draft' && <button className="rowdel"
                           title="Delete this draft" onClick={(e) => remove(e, r)}>×</button>}
                       </td>
@@ -6555,9 +6566,10 @@ function StockAuditView({ toast }) {
     <div className="screen">
       <div className="pagehead">
         <h2>Stock Audit</h2>
+        {/* Short enough to survive `.pagesub`, which clips rather than wraps —
+            a sentence that ends in an ellipsis says less than a shorter one. */}
         <span className="small pagesub">
-          What the shelf holds against what the books say. Counting never changes
-          stock — a correction is made deliberately, in Inventory.</span>
+          The shelf against the books. Counting never changes stock.</span>
         <div style={{ flex: 1 }} />
         {session
           ? <button className="btn" onClick={finish}>Close {session.code}</button>

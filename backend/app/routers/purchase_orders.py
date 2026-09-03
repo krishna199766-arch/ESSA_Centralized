@@ -121,7 +121,26 @@ def list_orders(status: str = "all", q: str = "", supplier: str = "",
     rows = (scope.purchase_orders(query, wid)
             .order_by(models.PurchaseOrder.id.desc())
             .limit(max(1, min(limit, 2000))).all())
-    return [po_svc.out(r, with_lines=False) for r in rows]
+    # How many consignments cite each order, in ONE query rather than one per
+    # row. The list needs it so the Cancel button can be offered only where it
+    # would actually work — a button that is drawn and then refused teaches
+    # people to expect errors, which is exactly what the per-status actions were
+    # written to avoid. Passing `db` to `out()` per row would have answered the
+    # same question with N queries.
+    ids = [r.id for r in rows]
+    linked = {}
+    if ids:
+        linked = dict(
+            db.query(models.LREntry.purchase_order_id,
+                     func.count(models.LREntry.id))
+              .filter(models.LREntry.purchase_order_id.in_(ids))
+              .group_by(models.LREntry.purchase_order_id).all())
+    out = []
+    for r in rows:
+        d = po_svc.out(r, with_lines=False)
+        d["linked_lr_count"] = linked.get(r.id, 0)
+        out.append(d)
+    return out
 
 
 @router.get("/open")
