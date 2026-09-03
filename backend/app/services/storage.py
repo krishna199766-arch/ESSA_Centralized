@@ -193,14 +193,45 @@ def materialise(ref: str) -> str | None:
     return path
 
 
-def exists(ref: str) -> bool:
+def missing(ref: str) -> bool:
+    """True only when the bytes CERTAINLY cannot be fetched.
+
+    This replaces an `exists()` that answered the opposite question and answered
+    it the wrong way round: anything it was unsure of, it called absent. Nothing
+    called it, so that was harmless — right up until the merge preflight did,
+    and every uncertainty became a refusal to merge. Deleted rather than kept
+    beside this one, because the two read as interchangeable and only one of
+    them is safe to refuse work on.
+
+    A HEAD is the specific worry. It is not a GET, a store can decline it while
+    serving the object perfectly well, and an object this app reads successfully
+    every time would then be reported missing. So a HEAD that does not clearly
+    succeed settles nothing, and the question is put again as the one-byte range
+    request — a real GET, the same verb `read` uses, for one byte instead of a
+    two-megabyte photograph. A store that ignores the Range header sends the
+    whole object and is still answering the question asked.
+
+    Only a local path is authoritative on its own: os.path.exists IS the answer
+    there, and it is the case running on a warehouse PC.
+    """
     if not ref:
-        return False
+        return True
     if not _is_remote(ref):
-        return os.path.exists(ref)
+        return not os.path.exists(ref)
     try:
-        return httpx.head(ref, headers=_read_headers(), timeout=_TIMEOUT).status_code < 400
+        if httpx.head(ref, headers=_read_headers(), timeout=_TIMEOUT).status_code < 400:
+            return False
     except httpx.HTTPError:
+        pass
+    try:
+        r = httpx.get(ref, headers={**_read_headers(), "range": "bytes=0-0"},
+                      timeout=_TIMEOUT)
+        return r.status_code >= 400
+    except httpx.HTTPError:
+        # Unreachable is not the same as absent — the network is down, or the
+        # store is having a moment. Reported as present, because the caller's
+        # response to "missing" is to refuse, and refusing the operator's work
+        # over a timeout is worse than attempting it and reporting what happened.
         return False
 
 

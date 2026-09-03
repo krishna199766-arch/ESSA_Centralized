@@ -468,7 +468,7 @@ def merge_documents(doc_id: int, body: MergeIn, db: Session = Depends(get_db)):
     # replacement is an empty invoice and the two half-readings it replaced are
     # gone. The operator sees a merge that "did nothing" and has lost the data
     # they had. Refusing with the reason keeps both halves intact.
-    gone = [n for n, ref in enumerate(ordered, 1) if not storage.exists(ref)]
+    gone = [n for n, ref in enumerate(ordered, 1) if storage.missing(ref)]
     if gone:
         raise HTTPException(400,
             f"Page {', '.join(str(n) for n in gone)} of {len(ordered)} cannot be "

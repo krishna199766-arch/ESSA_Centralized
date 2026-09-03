@@ -17,7 +17,7 @@ from .routers import (documents, suppliers, purchases, inventory, outward,
                       notifications, voice, users, locations, catalogues)
 from .extraction.engine import provider_status
 from .security import auth_middleware
-from .config import COMPANY_NAME, COMPANY_GSTIN
+from .config import COMPANY_NAME, COMPANY_GSTIN, UPLOAD_DIR
 from . import runtime
 from .services import storage as storage_svc
 
@@ -79,6 +79,83 @@ def _database_status(url: str) -> dict:
         # Only shown when there is a problem: when it is working, the list of
         # variables that were not needed is noise on an endpoint the app polls.
         "checked": None if not ephemeral else database_url_report(),
+    }
+
+
+# The variable each host sets by itself, so the deployment can be named in the
+# warning below rather than described. Only used to make the message concrete —
+# the test that actually fires it is the mismatch, not this list, because a host
+# that is not on it is exactly the case a VERCEL-only check already got wrong.
+_PLATFORM_ENV = [
+    ("VERCEL", "Vercel"), ("RENDER", "Render"),
+    ("RAILWAY_ENVIRONMENT", "Railway"), ("FLY_APP_NAME", "Fly.io"),
+    ("DYNO", "Heroku"), ("K_SERVICE", "Google Cloud Run"),
+    ("WEBSITE_INSTANCE_ID", "Azure App Service"), ("KOYEB_APP_NAME", "Koyeb"),
+    ("CONTAINER_APP_NAME", "Azure Container Apps"),
+]
+
+
+def _platform_name():
+    return next((n for var, n in _PLATFORM_ENV if os.environ.get(var)), None)
+
+
+def _storage_status(db_url: str) -> dict:
+    """What /api/status says about where uploaded invoices are being PUT.
+
+    The counterpart of the database warning above, and it was the missing half
+    of it. Uploaded invoices written to a container's own filesystem work
+    perfectly and then vanish: the upload succeeds, and the FIRST reading
+    succeeds too because it happens in the same request while the file is still
+    there — the document is confirmed at 100%. Only afterwards is it gone, and
+    what surfaces is a 404 on the image and a FileNotFoundError from inside the
+    vision provider. That reads as an extraction fault, which is a long way from
+    the fix and the wrong place to go looking.
+
+    What fires it is a MISMATCH, not a platform. This asked `os.environ["VERCEL"]`
+    first, which was the mistake it was written to catch: the deployment that
+    prompted it turned out to be Neon Postgres somewhere else entirely, so the
+    check stayed silent on precisely the installation it was for.
+
+    The durable signal is that the two halves of this app's state are being kept
+    in places with different lifetimes. A warehouse PC is consistent — SQLite
+    beside the uploads, both on the same disk, both surviving a reboot. A
+    deployment with a managed Postgres has already decided its data must outlive
+    the instance; invoice images on the instance's own filesystem contradict
+    that decision, and the images are the half that loses.
+    """
+    local_uploads = not storage_svc.using_blob()
+    remote_db = not db_url.startswith("sqlite")
+    platform = _platform_name()
+    # A managed database is the strong signal; a known host is the weaker one,
+    # and either is enough. Blob storage settles it — that is durable wherever
+    # it runs from, being someone else's HTTP API rather than this disk.
+    ephemeral = local_uploads and (remote_db or platform is not None)
+
+    warning = None
+    if ephemeral:
+        where = f"this {platform} instance's" if platform else "this server's"
+        why = ("the database is a managed Postgres, so it already outlives the "
+               "instance — the invoice images do not"
+               if remote_db else
+               "a hosted instance's filesystem is replaced on the next deploy "
+               "or restart")
+        warning = (
+            f"Uploaded invoices are being written to {where} own filesystem "
+            f"({UPLOAD_DIR}), and {why}. The upload works and the FIRST reading "
+            f"works — both happen while the file is still there — and then the "
+            f"file is gone: the invoice image 404s, re-reading it fails with "
+            f"FileNotFoundError, and pages cannot be merged. Fix it by setting "
+            f"BLOB_READ_WRITE_TOKEN to a Vercel Blob store (it is an HTTP API "
+            f"and works from any host), or by mounting a persistent disk and "
+            f"pointing ESSA_UPLOAD_DIR at it. If this path IS already a mounted "
+            f"disk, this warning is wrong and can be ignored.")
+    return {
+        "ok": not ephemeral,
+        "backend": storage_svc.backend_name(),
+        "persistent": not ephemeral,
+        "platform": platform,
+        "upload_dir": None if storage_svc.using_blob() else UPLOAD_DIR,
+        "warning": warning,
     }
 
 
@@ -640,13 +717,12 @@ def status():
                        or os.environ.get("VERCEL_GIT_COMMIT_SHA")
                        or os.environ.get("ESSA_BUILD_COMMIT") or None),
         },
+        # A bare string, kept because it is what earlier notes and error
+        # messages tell people to look at. `storage_detail.ok` is the one that
+        # answers whether the files will still be there tomorrow.
         "storage": storage_svc.backend_name(),
-        # Enough to tell which build is actually serving. Three fixes in a row
-        # here were tested against a deployment that had not finished replacing
-        # the previous one, and an unchanged error looks identical to a fix that
-        # did not work — so the running code states its own version.
         "storage_detail": {
-            "backend": storage_svc.backend_name(),
+            **_storage_status(DB_URL),
             "blob_api_version": storage_svc.BLOB_API_VERSION,
             "blob_access": storage_svc.BLOB_ACCESS,
         },
