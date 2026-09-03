@@ -36,11 +36,12 @@ ${slice('const COMPANY_ONLY =', 'const POS_HOME =')}
 ${slice('const POS_HOME =', 'const POS_ITEMS =')}
 const POS_ITEMS = [POS_HOME, null, ...POS_SCREENS]
 ${slice('const KEEPALIVE = new Set(', '// Which open tabs hold work')}
-export { MODULES, POS_ITEMS, POS_SCREENS, KEEPALIVE, keepAlive }
+export { MODULES, POS_ITEMS, POS_SCREENS, KEEPALIVE, keepAlive,
+         COMPANY_LEVEL, COMPANY_ONLY }
 `);
 
-const { MODULES, POS_ITEMS, POS_SCREENS, KEEPALIVE, keepAlive } =
-  await import('file://' + HARNESS);
+const { MODULES, POS_ITEMS, POS_SCREENS, KEEPALIVE, keepAlive,
+        COMPANY_LEVEL, COMPANY_ONLY } = await import('file://' + HARNESS);
 unlinkSync(HARNESS);
 
 let bad = 0;
@@ -97,6 +98,34 @@ head('an unknown key is never kept by accident');
 
 ['', 'nonsense', 'po', 'purchase_order', 'POS:counter', 'documentsx']
   .forEach((k) => eq(`“${k}” is not kept`, keepAlive(k), false));
+
+// ===========================================================================
+head('a kept tab is one warehouse’s work, and belongs nowhere else');
+
+// This is the shipped bug that prompted the check. The strip kept Purchase
+// Orders, LR Entry, Invoice Entry and GRN open after the user stepped out to
+// the Central Dashboard — and a kept tab is a MOUNTED screen, so those four
+// were sitting at company level rendering the warehouse just left. That is
+// precisely what remount-on-warehouse-change exists to prevent.
+//
+// The shell now filters the strip through the same `modules` list the menu is
+// built from, so it cannot offer a screen the menu hides. What is pinned here
+// is the fact underneath it: every keep-alive module is warehouse work.
+[...KEEPALIVE].forEach((k) => {
+  eq(`${k} has no answer at company level`, COMPANY_LEVEL.has(k), false);
+});
+eq('and none of them is a company-only screen either',
+   [...KEEPALIVE].some((k) => COMPANY_ONLY.has(k)), false);
+
+// The shop is reached from inside the warehouse that supplies it, so its tabs
+// are warehouse work too.
+eq('POS is not a company-level destination',
+   POS_SCREENS.some((p) => COMPANY_LEVEL.has(p.key)), false);
+
+// The company-level screens are the ones that DO have an answer up there, and
+// none of them is kept — so at company level the strip has nothing to draw.
+eq('no company-level screen is kept, so the strip is empty up there',
+   [...COMPANY_LEVEL].some(keepAlive), false);
 
 // ===========================================================================
 head('every open tab can be named in the strip');

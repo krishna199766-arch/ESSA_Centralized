@@ -13832,11 +13832,10 @@ export default function App() {
     // return to.
     if (keepAlive(t) && !openTabs.includes(t)) rememberOpen([...openTabs, t])
   }
-  //: The tabs actually mounted right now — the open keep-alive ones, plus the
-  //: active screen whatever it is. The active one is always in the list, so it
-  //: always renders; that is what lets a non-keep-alive screen (Reports) show
-  //: normally while two kept tabs sit hidden behind it.
-  const alive = Array.from(new Set([...openTabs, tab]))
+  // `alive` — which tabs are mounted right now — is computed BELOW, beside
+  // `modules`: deciding it needs the role and the grant map, and reading a
+  // `const` above its declaration is a TDZ throw, not undefined. See the note on
+  // `canCentral` for the same trap caught the same way.
   const labelFor = (k) => (POS_ITEMS.find((p) => p && p.key === k)
     || MODULES.find((m) => m.key === k) || {}).label || k
   const closeTab = (k) => {
@@ -14061,6 +14060,38 @@ export default function App() {
     // settings and edits the company's list has been misled by the menu.
     && (here ? !COMPANY_ONLY.has(m.key) : COMPANY_LEVEL.has(m.key)))
   const isSuper = atLeast(role, 'superadmin')
+
+  // ------------------------------------------------------------------------
+  //  Which open tabs belong WHERE YOU ARE STANDING
+  //  ----------------------------------------------------------------------
+  //  A tab is not portable between altitudes. Purchase Orders, LR Entry,
+  //  Invoice Entry and GRN are one warehouse's work; at company level they have
+  //  no answer at all, and the menu has always hidden them there. The strip has
+  //  to obey the same rule, for a stronger reason than tidiness: a kept tab is
+  //  a MOUNTED screen, so a warehouse module left open at company level would
+  //  be sitting there rendering the warehouse you just left. That is the exact
+  //  failure the remount-on-warehouse-change exists to prevent, and the strip
+  //  had quietly reintroduced it.
+  //
+  //  Same predicate as `modules` above, so the strip can never offer a screen
+  //  the menu does not — including one this ACCOUNT is not granted.
+  //
+  //  The stored list is left alone. Coming back into a warehouse brings its
+  //  tabs back, freshly loaded, which is what "reopen a module" means; what
+  //  does not survive the trip is their STATE, and it never could — the content
+  //  is keyed on the warehouse and remounts when it changes.
+  const availableHere = (k) => {
+    // The shop is reached from inside the warehouse that supplies it.
+    if (String(k).startsWith('pos:')) return !!here
+    const m = MODULES.find((x) => x.key === k)
+    if (!m) return false
+    return modules.includes(m)
+  }
+  //: The tabs actually mounted right now — the open keep-alive ones that belong
+  //: here, plus the active screen whatever it is. The active one is always in
+  //: the list, so it always renders; that is what lets a non-keep-alive screen
+  //: (Reports) show normally while two kept tabs sit hidden behind it.
+  const alive = Array.from(new Set([...openTabs.filter(availableHere), tab]))
   // The open tab is remembered across sessions, so the person who signs in at
   // this terminal is not always the one who left it on Payments. One guard in
   // front of the whole chain rather than a check inside each branch: a screen
