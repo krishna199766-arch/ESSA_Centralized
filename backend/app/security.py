@@ -52,7 +52,11 @@ READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 #: masters, catalogues, users, the label designer) or are the very screens used
 #: to choose a warehouse, and must stay reachable without one.
 WAREHOUSE_SCOPED = {
-    "dashboard", "lr", "documents", "purchases", "inventory",
+    "dashboard", "lr", "documents", "purchases", "purchase_orders", "inventory",
+    # A count is of ONE building's shelves — more literally than anything else on
+    # this list, because somebody physically walked them. Two counts of two
+    # warehouses appearing as one would be a count of nothing.
+    "stock_audit",
     "labelprint", "outward", "inward", "returns", "deadstock", "reports",
 }
 
@@ -107,6 +111,11 @@ POLICY = [
     # account can be given the order book without the receipt book.
     (r"^/api/purchase-orders", "user", "user", "purchase_orders"),
     (r"^/api/purchases", "user", "user", "purchases"),
+    # Counting the shelf is floor work and its own screen: a stock auditor reads
+    # every figure and changes none, which is exactly the split the permissions
+    # module was written for. Its own prefix, so it is not governed by the
+    # inventory screen's grants even though it reads through them.
+    (r"^/api/stock-audit", "user", "user", "stock_audit"),
     # The locator reads the whole account of one item and writes nothing. It is
     # its own screen and sits above /api/inventory, which it lives inside.
     (r"^/api/inventory/locate", "user", "user", "locator"),

@@ -89,6 +89,19 @@ def lr_entries(query, warehouse_id):
     return own(query, models.LREntry.warehouse_id, warehouse_id)
 
 
+def audit_sessions(query, warehouse_id):
+    """Counts run in this building.
+
+    `include_unassigned=False`, unlike almost everything else here. A count is
+    physical — somebody walked THIS warehouse's racks — so a session with no
+    warehouse is not "might be ours", it is a session that predates workspaces or
+    was raised outside a building, and showing it inside every warehouse would
+    let two counts of two different buildings appear to be one.
+    """
+    return own(query, models.AuditSession.warehouse_id, warehouse_id,
+               include_unassigned=False)
+
+
 def purchase_orders(query, warehouse_id):
     """Orders raised here.
 

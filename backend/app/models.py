@@ -744,6 +744,78 @@ class GrnShortage(Base):
         return self.kind in self.CLAIMABLE_KINDS
 
 
+class AuditSession(Base):
+    """One stock-count run: somebody walking a rack with a phone.
+
+    THE SESSION IS THE POINT, and it is why this is a table rather than a screen
+    that calls `/lookup` in a loop. A count is not a series of unrelated
+    questions — it is one piece of work with a beginning, a set of findings and
+    an end, and the questions it answers ("what did we check", "what was missing
+    on the 3rd", "who counted this shelf") can only be asked of something that
+    was recorded as a whole.
+
+    Stock is NOT adjusted here, deliberately. A scan says what the shelf holds
+    against what the system believes; deciding to change the ledger is a separate
+    act with its own audit trail (`inventory.adjust_stock`, which writes a real
+    movement). Letting a count silently correct the books would make the one
+    record that is supposed to be independent of them derived from them.
+    """
+    __tablename__ = "audit_sessions"
+    id = Column(Integer, primary_key=True)
+    code = Column(String, index=True)              # AUD-00001
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
+    status = Column(String, default="open", index=True)     # open | closed
+    note = Column(String)
+    started_at = Column(DateTime, default=now)
+    started_by = Column(String)
+    closed_at = Column(DateTime, nullable=True)
+    closed_by = Column(String)
+
+    warehouse = relationship("Warehouse")
+    scans = relationship("AuditScan", back_populates="session",
+                         cascade="all, delete-orphan", order_by="AuditScan.id")
+
+
+class AuditScan(Base):
+    """One tag read during a count, and what the system said about it.
+
+    Everything here is recorded AT THE MOMENT OF THE SCAN and never refreshed.
+    `stock_qty` is what the books said when the shelf was looked at; re-deriving
+    it later would turn the count into a report on today's figures and destroy
+    the only thing it was for. Same reason `product_name` is copied rather than
+    joined: a product renamed or deleted afterwards must not rewrite what the
+    counter saw.
+
+    ONE ROW PER DISTINCT CODE PER SESSION. Scanning the same label again does not
+    add a row — it bumps `times_seen` and is reported back as a duplicate, which
+    is what the screen needs to say "you have already counted this" without
+    quietly double-counting the shelf.
+    """
+    __tablename__ = "audit_scans"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey("audit_sessions.id"), index=True)
+    #: exactly what came off the label — a product QR, a piece code, a barcode
+    code = Column(String, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    #: available | not_available | unknown
+    #: `unknown` is a code that resolved to nothing at all, which is a different
+    #: finding from a product that resolved and has no stock — the first is a
+    #: master-data problem, the second is a shelf problem, and collapsing them
+    #: would send someone to fix the wrong thing.
+    result = Column(String, index=True)
+    product_name = Column(String)
+    sku = Column(String)
+    stock_qty = Column(Float)
+    location = Column(String)
+    times_seen = Column(Integer, default=1)
+    scanned_at = Column(DateTime, default=now)
+    last_seen_at = Column(DateTime, default=now)
+    scanned_by = Column(String)
+
+    session = relationship("AuditSession", back_populates="scans")
+    product = relationship("Product")
+
+
 class StockMovement(Base):
     """Append-only ledger. Every stock change is a row with the running balance,
     so inventory is always reconstructable and auditable.

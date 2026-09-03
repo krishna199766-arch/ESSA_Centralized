@@ -66,6 +66,36 @@ label{display:block;color:var(--muted);font-size:12px;margin:0 0 5px}
 .bpend{background:var(--warnbg);color:var(--warn)}
 .bdone{background:var(--okbg);color:var(--ok)}
 .bdup{background:var(--dangerbg);color:var(--danger)}
+/* --- stock audit ----------------------------------------------------------
+   The scan button is the screen. Someone is holding the phone in one hand and a
+   garment in the other, so it is a thumb-sized target at the top rather than a
+   control among controls. */
+.scanbig{width:100%;padding:26px;font-size:20px;font-weight:800;border:none;
+  border-radius:14px;background:var(--accent);color:#fff;letter-spacing:.3px}
+.scanbig:disabled{opacity:.6}
+/* The tally. Three figures, and the two that matter are coloured — but each
+   carries its WORD underneath, because a count read at arm's length under
+   warehouse lighting cannot depend on telling two pastels apart. */
+.tally{display:flex;gap:8px;margin-top:10px}
+.tally>div{flex:1;background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;padding:10px;text-align:center}
+.tally .n{font-size:22px;font-weight:800;line-height:1}
+.tally .l{font-size:11px;color:var(--muted);margin-top:4px;text-transform:uppercase;
+  letter-spacing:.4px}
+.tally .ok .n{color:var(--ok)} .tally .no .n{color:var(--danger)}
+/* The verdict on the scan just taken — the thing the person is looking at, so
+   it is big, coloured AND worded, and it sits above the running list. */
+.verdict{border-radius:14px;padding:16px;margin-top:12px;border:1px solid}
+.verdict .big{font-size:20px;font-weight:800;letter-spacing:.3px}
+.verdict .det{font-size:13px;margin-top:6px;line-height:1.5}
+.vok{background:var(--okbg);border-color:var(--ok);color:var(--ok)}
+.vno{background:var(--dangerbg);border-color:var(--danger);color:var(--danger)}
+.vunk{background:var(--warnbg);border-color:var(--warn);color:var(--warn)}
+.verdict .det{color:var(--text)}
+.arow{border-left:4px solid var(--line)}
+.arow.ok{border-left-color:var(--ok)}
+.arow.no{border-left-color:var(--danger)}
+.arow.unk{border-left-color:var(--warn)}
 .detwrap{flex:1;overflow:auto;padding:16px}
 .detname{font-size:20px;font-weight:700}
 .detmeta{color:var(--muted);font-size:13px;margin-top:4px}
@@ -476,6 +506,7 @@ function render(){
   if(S.screen==='grnposted') return renderPosted();
   if(S.screen==='bundles') return renderBundles();
   if(S.screen==='bundle') return renderBundle();
+  if(S.screen==='audit') return renderAudit();
   return renderList();
 }
 
@@ -491,6 +522,7 @@ function tabs(active){
     <div class="chip ${active==='grn'?'on':''}" data-tab="grn">Receive</div>
     <div class="chip ${active==='bundles'?'on':''}" data-tab="bundles">Bundles</div>
     <div class="chip ${active==='list'?'on':''}" data-tab="list">Products</div>
+    <div class="chip ${active==='audit'?'on':''}" data-tab="audit">Audit</div>
     <div class="chip ${active==='notifs'?'on':''}" data-tab="notifs">🔔${un?` <b>${un}</b>`:''}</div>
   </div>${whoami()}`;
 }
@@ -512,6 +544,10 @@ function whoami(){
 function wireTabs(){
   app.querySelectorAll('.chip[data-tab]').forEach(c=>c.onclick=()=>{
     if(S.screen===c.dataset.tab) return;
+    // The count lives on the server, and another handset may have started or
+    // closed one. Clearing it on the way in makes the screen re-read rather than
+    // show a session that has since been closed by whoever had the other phone.
+    if(c.dataset.tab==='audit'){ S.audit=undefined; S.lastScan=null; }
     S.screen=c.dataset.tab; render();
   });
 }
@@ -652,6 +688,146 @@ async function openScanner(onCode){
     await new Promise(r=>setTimeout(r,160));
   }
 }
+// ---- stock audit -----------------------------------------------------------
+// Counting a rack with a phone. The whole screen is built around one gesture —
+// scan, read the answer, scan again — so the button is thumb-sized and the
+// verdict is the largest thing under it.
+//
+// Every scan is one round trip (`/scan` returns the finding AND the new tally),
+// because on warehouse wifi a screen that needed three calls to answer one scan
+// would feel broken long before it was.
+const AUDIT_TONE={available:['vok','ok'],not_available:['vno','no'],unknown:['vunk','unk']};
+
+async function auditOpen(){
+  try{ S.audit=await api('/api/stock-audit/open',{method:'POST',body:JSON.stringify({})}); }
+  catch(e){ toast(e.message||'Could not start a count'); return; }
+  S.lastScan=null; render();
+}
+async function auditClose(){
+  if(!S.audit) return;
+  if(!confirm(`Close ${S.audit.code}? Its readings become a record and it takes no more scans.`)) return;
+  try{ await api(`/api/stock-audit/${S.audit.id}/close`,{method:'POST'}); }
+  catch(e){ toast(e.message||'Could not close the count'); return; }
+  S.audit=null; S.lastScan=null; toast('Count closed'); render();
+}
+// The one call. `duplicate` is decided by the server so two handsets counting
+// the same rack agree about what has already been seen.
+async function auditScan(code){
+  if(!S.audit) return;
+  try{
+    const r=await api(`/api/stock-audit/${S.audit.id}/scan`,
+      {method:'POST',body:JSON.stringify({code})});
+    S.audit.totals=r.totals;
+    S.lastScan={...r.scan,duplicate:r.duplicate};
+    // A refresh of the list, so the row that just moved to the top is there.
+    S.audit=await api(`/api/stock-audit/${S.audit.id}`);
+    S.lastScan={...r.scan,duplicate:r.duplicate};
+    render();
+    if(navigator.vibrate) navigator.vibrate(r.duplicate?[40,60,40]:30);
+  }catch(e){ toast(e.message||'That scan could not be recorded'); }
+}
+async function auditDrop(id){
+  if(!S.audit) return;
+  try{
+    await api(`/api/stock-audit/${S.audit.id}/scans/${id}`,{method:'DELETE'});
+    S.audit=await api(`/api/stock-audit/${S.audit.id}`);
+    if(S.lastScan&&S.lastScan.id===id) S.lastScan=null;
+    render();
+  }catch(e){ toast(e.message||'Could not remove that reading'); }
+}
+
+function auditVerdict(s){
+  if(!s) return '';
+  const [tone]=AUDIT_TONE[s.result]||['vunk'];
+  const bits=[];
+  if(s.sku) bits.push(`<b>${esc(s.sku)}</b>`);
+  if(s.stock_qty!=null) bits.push(`stock <b>${s.stock_qty}</b>`);
+  if(s.location) bits.push(`at ${esc(s.location)}`);
+  return `<div class="verdict ${tone}">
+    <div class="big">${s.result==='available'?'🟢':s.result==='not_available'?'🔴':'🟡'} ${esc(s.label)}</div>
+    <div class="det">
+      ${s.product_name?esc(s.product_name)+'<br>':''}
+      ${bits.join(' · ')||'&nbsp;'}
+      <br><span style="color:var(--muted)">${esc(s.code)}</span>
+      ${s.duplicate?'<br><b>Already counted in this session</b> — not counted twice'
+                   :''}
+      ${s.result==='unknown'
+        ? '<br>Product not found. Check the physical stock or the product master.'
+        : ''}
+    </div></div>`;
+}
+
+async function renderAudit(){
+  // What is already in progress here, so a handset put down mid-rack comes back
+  // to its own count rather than silently starting a second one.
+  if(S.audit===undefined){
+    app.innerHTML='<div class="spin"></div>';
+    try{ S.audit=await api('/api/stock-audit/current'); }catch(e){ S.audit=null; }
+  }
+  const a=S.audit, t=(a&&a.totals)||{};
+  app.innerHTML=`<div class="topbar"><h1>Stock Audit</h1>
+      <span class="count">${a?esc(a.code)+(a.warehouse?' · '+esc(a.warehouse):''):''}</span>
+      <button class="link" id="lo">Logout</button></div>
+    <div class="controls">${tabs('audit')}</div>
+    <div class="controls">
+      ${a?`
+        <button class="scanbig" id="scan">⛶ &nbsp;SCAN QR CODE</button>
+        <div class="tally">
+          <div><div class="n">${t.scanned||0}</div><div class="l">Scanned</div></div>
+          <div class="ok"><div class="n">${t.available||0}</div><div class="l">Available</div></div>
+          <div class="no"><div class="n">${(t.not_available||0)+(t.unknown||0)}</div><div class="l">Not available</div></div>
+        </div>
+        ${auditVerdict(S.lastScan)}
+        <div class="row" style="margin-top:10px">
+          <input id="acode" placeholder="or type / handheld-scan a code…" autocapitalize="characters" enterkeyhint="go">
+          <button class="btn" style="width:auto;padding:12px 18px" id="ago">Go</button>
+        </div>
+        <button class="btn sec" id="aclose">Close this count</button>
+      `:`
+        <div class="card" style="max-width:none">
+          <b>No count in progress</b>
+          <div class="hint" style="margin-top:6px">A count records what is on the
+            shelf against what the system holds. It never changes stock — a
+            correction is made deliberately, afterwards, on the desktop.</div>
+        </div>
+        <button class="btn" id="astart">Start a count</button>
+      `}
+    </div>
+    <div class="list" id="list">${
+      a&&a.scans&&a.scans.length
+        ? a.scans.map(s=>{
+            const [,tone]=AUDIT_TONE[s.result]||['','unk'];
+            return `<div class="prow arow ${tone}">
+              <div style="flex:1">
+                <div class="t">${esc(s.product_name||s.code)}</div>
+                <div class="m">${s.sku?esc(s.sku)+' · ':''}${
+                  s.stock_qty!=null?'stock '+s.stock_qty:'no product'}${
+                  (s.times_seen||1)>1?' · seen '+s.times_seen+'×':''}</div>
+              </div>
+              <span class="badge ${s.result==='available'?'bdone':s.result==='unknown'?'bpend':'bdup'}">${esc(s.label)}</span>
+              <button class="link" data-drop="${s.id}" title="Remove this reading">✕</button>
+            </div>`;
+          }).join('')
+        : (a?'<div class="hint" style="padding:14px">Nothing counted yet. Press <b>SCAN QR CODE</b> and point the camera at a label.</div>':'')
+    }</div>`;
+  document.getElementById('lo').onclick=logout;
+  wireTabs();
+  const el=id=>document.getElementById(id);
+  if(el('astart')) el('astart').onclick=auditOpen;
+  if(el('aclose')) el('aclose').onclick=auditClose;
+  // Reuses the app's own scanner — BarcodeDetector, camera permission handling
+  // and the iOS fallback are all already there. `onCode` keeps the reading here
+  // instead of opening the product screen.
+  if(el('scan')) el('scan').onclick=()=>openScanner(code=>auditScan(code));
+  if(el('ago')) el('ago').onclick=()=>{
+    const v=el('acode').value.trim(); if(v){ el('acode').value=''; auditScan(v); }
+  };
+  if(el('acode')) el('acode').addEventListener('keydown',e=>{
+    if(e.key==='Enter'){ const v=e.target.value.trim(); if(v){ e.target.value=''; auditScan(v); } }
+  });
+  app.querySelectorAll('[data-drop]').forEach(b=>b.onclick=()=>auditDrop(+b.dataset.drop));
+}
+
 async function paint(){
   const el=document.getElementById('list'); if(el) el.innerHTML='<div class="spin"></div>';
   await fetchProducts();

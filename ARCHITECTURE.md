@@ -757,6 +757,53 @@ supplier **case-insensitively** before creating one — otherwise a spoken
 "supplier matoshree" would file a second Matoshree beside the real one, and two
 spellings of one vendor is precisely what a supplier master exists to prevent.
 
+## 8c. Stock Audit: counting the shelf against the books
+
+The ledger says what should be there. A count says what is. The gap is the
+finding, and the whole value of `AuditSession` / `AuditScan`
+(`services/stock_audit.py`) is that it records that gap **as it was at the moment
+somebody looked** — every figure on a scan is copied at scan time and never
+re-derived. A count that reported today's stock figures would be a report, not a
+count, and the one record meant to be independent of the books would be derived
+from them.
+
+**It never moves stock.** Finding an empty shelf is evidence; deciding the books
+are wrong is a separate act, made deliberately, through `inventory.adjust_stock`,
+which writes a real movement with a reason on it. Wiring a count straight into
+the ledger would do that silently, from a phone, in a warehouse.
+
+**Three results, not two.** The screen shows green and red, as asked, but the
+data keeps a third:
+
+| | what it means | who fixes it |
+|---|---|---|
+| `available` | the code resolved, this warehouse holds some | nobody |
+| `not_available` | the code resolved, this warehouse holds none | the shelf |
+| `unknown` | the code resolved to nothing at all | the product master |
+
+Folding `unknown` into `not_available` would send somebody to look for stock that
+was never supposed to exist. The screen still shows two colours — and every
+result carries its own WORD as well, because a count is read at arm's length
+under warehouse lighting and must never depend on telling two pastels apart.
+
+**A re-scan does not double-count.** One row per distinct code per session; a
+repeat bumps `times_seen` and comes back flagged, so the screen says "already
+counted" instead of the register quietly growing a second row for one garment.
+
+**The scanner was already there.** `openScanner()` in the phone app has used the
+browser's `BarcodeDetector` since the GRN screens needed it — camera permission
+handling, an iOS fallback to typing, and no external library. The audit screen
+calls it with its own `onCode`; nothing new was written to read a QR code.
+
+**Which building is being counted.** The phone sends no `X-Essa-Warehouse` header
+and never has — every other screen on it works company-wide quite correctly. A
+count cannot: somebody physically walked one building's racks. So a blank is
+resolved, but only when the answer is not a guess — one warehouse on file means
+there IS only one, and adopting it states what is already true. Two or more and
+the route refuses and says so, because silently picking the first would file
+Erode's count against Karur with nothing on screen to say so. `scope.audit_sessions`
+is correspondingly the one filter here that does **not** include unassigned rows.
+
 ## 9. The remaining modules
 
 The same canonical shape and the inventory ledger extend to the rest of the

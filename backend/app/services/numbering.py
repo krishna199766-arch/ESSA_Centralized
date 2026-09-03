@@ -59,6 +59,8 @@ DOCS = {
                     "use_year": False},
     "adjustment":  {"label": "Stock Adjustment", "prefix": "ADJ-",  "padding": 5,
                     "use_year": False},
+    "stock_audit": {"label": "Stock Audit",      "prefix": "AUD-",  "padding": 5,
+                    "use_year": False},
     "pos_invoice": {"label": "POS Invoice",      "prefix": "POS-",  "padding": 5,
                     "use_year": False},
 }

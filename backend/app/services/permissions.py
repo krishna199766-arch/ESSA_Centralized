@@ -56,6 +56,7 @@ SCREENS = [
     ("purchases",  "GRN — Receive Goods", "Warehouse", None),
     ("inventory",  "Inventory", "Warehouse", None),
     ("locator",    "Item Locator", "Warehouse", None),
+    ("stock_audit", "Stock Audit", "Warehouse", None),
     ("labelprint", "QR / Label Printing", "Warehouse", None),
     ("outward",    "Stock Outward", "Warehouse", None),
     ("inward",     "Stock Inward", "Warehouse", None),
