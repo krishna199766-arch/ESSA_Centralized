@@ -6174,6 +6174,13 @@ function POForm({ editing, extracted, lists, opts, onDone, onCancel, toast }) {
   const dictateDef = useMemo(() => poDictateDef(opts, lists), [opts, lists])
 
   const readOnly = !!editing && editing.editable === false
+  // §11: closing this tab with an order half typed asks first. Registered from
+  // the FORM rather than the module, because the module is only holding work
+  // while a form is open on it — a list of orders has nothing to lose.
+  useUnsavedGuard('purchase_orders', !readOnly && (
+    !!extracted                                   // a reading nobody has saved
+    || (!editing && (lines.some((l) => l.particulars || l.qty || l.rate)
+                     || !!form.supplier_name))))
   // Shown live rather than only after a save, because the discount is the figure
   // the office argues about and finding out what it came to on the next screen
   // is finding out too late.
@@ -13479,12 +13486,113 @@ function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStoc
   )
 }
 
+// ==========================================================================
+//  Several modules open at once — and only where it earns its place
+//  ------------------------------------------------------------------------
+//  A tab that stays alive is a component that stays MOUNTED, which is the only
+//  way React keeps its state. That is not free: a mounted screen keeps its
+//  timers, its polling and its memory, and doing it to all twenty-two would
+//  multiply the open requests on a warehouse tablet by however many tabs
+//  somebody had left open — for screens where nothing is ever half-finished.
+//
+//  So it is an ALLOW-LIST of the screens that genuinely hold unfinished work:
+//
+//    pos:*             a till mid-sale. The strongest case by far — the shop is
+//                      a separate app in a frame, and unmounting the frame
+//                      destroys the cart with no way to get it back.
+//    purchase_orders   an order half typed, with its lines
+//    lr                a consignment half keyed
+//    documents         an invoice being reviewed against its photograph
+//    purchases         a GRN being counted, with breakdowns entered
+//
+//  Everything else — reports, masters, dashboards, locations — is read, acted
+//  on and left. Re-opening one costs a fetch, which is what it costs today.
+const KEEPALIVE = new Set(['purchase_orders', 'lr', 'documents', 'purchases'])
+const keepAlive = (k) => KEEPALIVE.has(k) || String(k).startsWith('pos:')
+
+// Which open tabs hold work somebody has not saved. A registry rather than a
+// prop threaded through every module: only the screens that actually carry a
+// draft need to say so, and the ones that do not are left completely alone.
+const dirtyTabs = new Map()
+
+/** A screen tells the shell it is holding unsaved work, so closing asks first. */
+function useUnsavedGuard(key, dirty) {
+  useEffect(() => {
+    if (dirty) dirtyTabs.set(key, true)
+    else dirtyTabs.delete(key)
+    return () => dirtyTabs.delete(key)
+  }, [key, dirty])
+}
+
+// The open-tabs strip. Absent entirely until a second tab exists — one tab is
+// not a set of tabs, and a strip showing the only screen you have open is a row
+// of chrome that says nothing.
+//
+// It scrolls horizontally rather than wrapping, which is what keeps it to ONE
+// line on a phone: §12's requirement is that this must not eat the room the
+// scanner and the forms need, and a strip that grows to three rows is exactly
+// how that happens.
+function TabStrip({ open, active, setTab, close, label }) {
+  if (!open || open.length < 2) return null
+  return (
+    <div className="tabstrip" role="tablist">
+      {open.map((k) => (
+        <div key={k} role="tab" aria-selected={k === active}
+          className={'opentab' + (k === active ? ' on' : '')}
+          onClick={() => setTab(k)}>
+          <span className="ot-label">{label(k)}</span>
+          <button className="ot-x" title={`Close ${label(k)}`}
+            onClick={(e) => { e.stopPropagation(); close(k) }}>×</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ---------- app shell ----------
 export default function App() {
   // the open tab survives a reload — a warehouse screen is left on the module
   // someone works in, and losing it on every refresh is a small daily tax
   const [tab, setTabState] = useState(() => localStorage.getItem('essa_tab') || 'dashboard')
-  const setTab = (t) => { setTabState(t); try { localStorage.setItem('essa_tab', t) } catch { /* private mode */ } }
+  // Which keep-alive modules are open besides the active one. Remembered across
+  // a reload for the same reason the active tab is: someone with an order half
+  // typed and the till open should find both where they left them.
+  const [openTabs, setOpenTabs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('essa_open_tabs') || '[]').filter(keepAlive) }
+    catch { return [] }
+  })
+  const rememberOpen = (list) => {
+    setOpenTabs(list)
+    try { localStorage.setItem('essa_open_tabs', JSON.stringify(list)) } catch { /* private mode */ }
+  }
+  const setTab = (t) => {
+    setTabState(t)
+    try { localStorage.setItem('essa_tab', t) } catch { /* private mode */ }
+    // Opening a keep-alive screen adds it to the strip. Everything else leaves
+    // the strip alone — a report opened between two half-finished jobs must not
+    // push either of them out or grow the strip with something nobody will
+    // return to.
+    if (keepAlive(t) && !openTabs.includes(t)) rememberOpen([...openTabs, t])
+  }
+  //: The tabs actually mounted right now — the open keep-alive ones, plus the
+  //: active screen whatever it is. The active one is always in the list, so it
+  //: always renders; that is what lets a non-keep-alive screen (Reports) show
+  //: normally while two kept tabs sit hidden behind it.
+  const alive = Array.from(new Set([...openTabs, tab]))
+  const labelFor = (k) => (POS_ITEMS.find((p) => p && p.key === k)
+    || MODULES.find((m) => m.key === k) || {}).label || k
+  const closeTab = (k) => {
+    // §11: unsaved work is protected. Only screens that registered a guard can
+    // answer this, which is why an unregistered one closes silently — it has
+    // nothing to lose, and asking anyway would train people to click through.
+    if (dirtyTabs.get(k)
+        && !window.confirm(`${labelFor(k)} has unsaved changes. Close it and lose them?`)) return
+    const left = openTabs.filter((x) => x !== k)
+    rememberOpen(left)
+    // Closing the tab you are looking at has to land somewhere. The next open
+    // tab is the least surprising place; the dashboard when there is none.
+    if (k === tab) setTab(left[left.length - 1] || (here ? 'dashboard' : homeTab))
+  }
   // Which warehouse this session is working INSIDE, or null for the whole
   // company. Every API call carries it as a header (see api.js), so the screens
   // below need no per-screen plumbing — but they DO need to refetch when it
@@ -13695,9 +13803,6 @@ export default function App() {
     // settings and edits the company's list has been misled by the menu.
     && (here ? !COMPANY_ONLY.has(m.key) : COMPANY_LEVEL.has(m.key)))
   const isSuper = atLeast(role, 'superadmin')
-  // A `pos:` tab is a screen of the shop rather than one of ours, and is served
-  // in a frame — so it is answered before the warehouse chain below.
-  const posScreen = POS_ITEMS.find((p) => p && p.key === tab)
   // The open tab is remembered across sessions, so the person who signs in at
   // this terminal is not always the one who left it on Payments. One guard in
   // front of the whole chain rather than a check inside each branch: a screen
@@ -13815,6 +13920,9 @@ export default function App() {
           each refetches its own data under the new context — the alternative is
           asking fifty components to notice a change, and the one that forgets
           quietly shows the warehouse you just left. */}
+      <TabStrip open={alive} active={tab} setTab={setTab} close={closeTab}
+        label={labelFor} />
+
       <React.Fragment key={'wh-' + (here?.id || 'all')}>
       {denied ? (
         <div className="body"><div className="empty" style={{ margin: 'auto', maxWidth: 420, lineHeight: 1.7 }}>
@@ -13829,17 +13937,62 @@ export default function App() {
               {here ? 'Back to the dashboard' : 'Choose a warehouse'}</button>
           </div>
         </div></div>
-      ) : posScreen ? (
-        <PosScreen screen={posScreen} available={status?.pos?.available}
-          error={status?.pos?.error} warehouse={here} />
-      ) : tab === 'dashboard' ? (
+      ) : alive.length > 1 ? (
+        // MORE THAN ONE TAB OPEN. Each is mounted and only the active one is
+        // shown, which is the entire mechanism behind keeping a half-written
+        // order alive while somebody serves a customer at the till — React keeps
+        // the state of a component that stays mounted, and loses it the moment
+        // it does not.
+        //
+        // Below, with a single tab, the module is rendered bare and this wrapper
+        // never exists. That is deliberate: it keeps the ordinary
+        // one-screen-at-a-time case byte-for-byte what it has always been, so
+        // multi-tab cannot regress the layout of a warehouse that never opens a
+        // second one.
+        alive.map((k) => (
+          <div key={k} className="tabpane" hidden={k !== tab}>{screenFor(k)}</div>
+        ))
+      ) : screenFor(tab)}
+      </React.Fragment>
+
+      {scanning && <ScanningOverlay url={scanning.url} name={scanning.name}
+        vision={!!providers.claude_vision} />}
+      {/* At the app root, not in the header the bell sits in: everything under
+          .topbar is styled for the dark chrome, and a light panel mounted there
+          inherits white button text on a white card. */}
+      {notifsOpen && <NotificationPanel go={setTab} user={user} toast={toast}
+        onClose={() => setNotifsOpen(false)}
+        onChanged={() => setNotifTick((t) => t + 1)} />}
+      {showSettings && <VisionSettings onClose={() => setShowSettings(false)}
+        onChanged={refreshStatus} toast={toast} />}
+      {showPassword && <ChangePassword onClose={() => setShowPassword(false)} toast={toast} />}
+      {toastMsg && <div className={'toast ' + toastMsg.kind}>{toastMsg.m}</div>}
+    </div>
+  )
+
+  // ==========================================================================
+  //  One module, rendered by key
+  //  ------------------------------------------------------------------------
+  //  This was an inline ternary chain on `tab`. It takes the key as an ARGUMENT
+  //  now, which is the only change: every branch maps the same key to the same
+  //  screen it always did. Taking a parameter is what lets an open-but-inactive
+  //  tab be rendered at all.
+  // ==========================================================================
+  function screenFor(k) {
+    // A `pos:` tab is a screen of the shop rather than one of ours, and is
+    // served in a frame — so it is answered before the warehouse chain.
+    const ps = POS_ITEMS.find((p) => p && p.key === k)
+    if (ps) return <PosScreen screen={ps} available={status?.pos?.available}
+      error={status?.pos?.error} warehouse={here} />
+    return (
+      k === 'dashboard' ? (
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
           docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
-      ) : tab === 'purchase_orders' ? (
+      ) : k === 'purchase_orders' ? (
         <PurchaseOrdersView toast={toast} />
-      ) : tab === 'lr' ? (
+      ) : k === 'lr' ? (
         <div className="body"><LREntryView toast={toast} /></div>
-      ) : tab === 'documents' ? (
+      ) : k === 'documents' ? (
         <div className="body">
           <Sidebar id="documents" label="Documents">
             <div className="head"><h3>Documents · {docs.length}</h3>
@@ -13887,66 +14040,52 @@ export default function App() {
           </Sidebar>
           <Review docId={sel} onSaved={refresh} onCreateGrn={gotoPurchase} toast={toast} />
         </div>
-      ) : tab === 'purchases' ? (
+      ) : k === 'purchases' ? (
         <Purchases selId={selPurchase} setSelId={setSelPurchase} toast={toast} />
-      ) : tab === 'inventory' ? (
+      ) : k === 'inventory' ? (
         <Inventory toast={toast} />
-      ) : tab === 'deadstock' ? (
+      ) : k === 'deadstock' ? (
         <DeadStock toast={toast} go={setTab} intent={dsIntent}
           onIntentUsed={() => setDsIntent(null)} />
-      ) : tab === 'labels' ? (
+      ) : k === 'labels' ? (
         <LabelDesigner toast={toast} role={role} />
-      ) : tab === 'locator' ? (
+      ) : k === 'locator' ? (
         <ItemLocator toast={toast} />
-      ) : tab === 'labelprint' ? (
+      ) : k === 'labelprint' ? (
         <LabelPrinting toast={toast} />
-      ) : tab === 'outward' ? (
+      ) : k === 'outward' ? (
         <StockOutward toast={toast} />
-      ) : tab === 'inward' ? (
+      ) : k === 'inward' ? (
         <StockInward toast={toast} />
-      ) : tab === 'returns' ? (
+      ) : k === 'returns' ? (
         <Returns toast={toast} />
-      ) : tab === 'payments' ? (
+      ) : k === 'payments' ? (
         <Payments toast={toast} />
-      ) : tab === 'reports' ? (
+      ) : k === 'reports' ? (
         <Reports />
-      ) : tab === 'masters' ? (
+      ) : k === 'masters' ? (
         // No role check here any more — the guard above the chain covers every
         // module from its MODULES entry, so this cannot drift out of step with
         // the menu the way a second copy of the rule would.
         <Masters toast={toast} />
-      ) : tab === 'pickwh' ? (
+      ) : k === 'pickwh' ? (
         <ChooseWarehouse onEnter={enterWarehouse} user={user} />
-      ) : tab === 'central' ? (
+      ) : k === 'central' ? (
         <CentralDashboard toast={toast} go={setTab} onEnter={enterWarehouse} />
-      ) : tab === 'catalogues' ? (
+      ) : k === 'catalogues' ? (
         <Catalogues toast={toast} />
-      ) : tab === 'locations' ? (
+      ) : k === 'locations' ? (
         <Locations toast={toast} />
-      ) : tab === 'users' ? (
+      ) : k === 'users' ? (
         <Users toast={toast} me={user} />
-      ) : tab === 'suppliers' ? (
+      ) : k === 'suppliers' ? (
         <Suppliers toast={toast} />
       ) : (
         // an unknown saved tab (a module renamed since it was stored) lands on
         // the dashboard rather than on a blank screen
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
           docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
-      )}
-      </React.Fragment>
-
-      {scanning && <ScanningOverlay url={scanning.url} name={scanning.name}
-        vision={!!providers.claude_vision} />}
-      {/* At the app root, not in the header the bell sits in: everything under
-          .topbar is styled for the dark chrome, and a light panel mounted there
-          inherits white button text on a white card. */}
-      {notifsOpen && <NotificationPanel go={setTab} user={user} toast={toast}
-        onClose={() => setNotifsOpen(false)}
-        onChanged={() => setNotifTick((t) => t + 1)} />}
-      {showSettings && <VisionSettings onClose={() => setShowSettings(false)}
-        onChanged={refreshStatus} toast={toast} />}
-      {showPassword && <ChangePassword onClose={() => setShowPassword(false)} toast={toast} />}
-      {toastMsg && <div className={'toast ' + toastMsg.kind}>{toastMsg.m}</div>}
-    </div>
-  )
+      )
+    )
+  }
 }

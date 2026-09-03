@@ -804,6 +804,50 @@ the route refuses and says so, because silently picking the first would file
 Erode's count against Karur with nothing on screen to say so. `scope.audit_sessions`
 is correspondingly the one filter here that does **not** include unassigned rows.
 
+## 8d. Several modules open at once — and only where it earns its place
+
+Keeping a tab alive means keeping its component **mounted**: that is the only
+way React preserves state, and losing the mount is exactly how a half-typed
+order disappears when somebody looks at the till. It is also not free. A mounted
+screen keeps its timers, its polling and its memory, so doing this to all
+twenty-two modules would multiply the open requests on a warehouse tablet by
+however many tabs had been left open — for screens where nothing is ever
+half-finished.
+
+So `KEEPALIVE` is an allow-list of the screens that genuinely hold unfinished
+work: `purchase_orders`, `lr`, `documents`, `purchases`, and every `pos:` screen.
+The till is the strongest case of the five — the shop is a separate app in a
+frame, and unmounting the frame destroys the cart mid-sale with no way back.
+Reports, masters, dashboards and locations are read, acted on and left; reopening
+one costs a fetch, which is what it costs today.
+
+Two properties of that list are silently breakable and are therefore tested
+(`frontend/tools/tabs_test.mjs`): a key that does not match a real module makes a
+screen that *looks* kept never keep anything, and a screen that should not be on
+the list is pure cost. Both build cleanly and neither shows up on screen.
+
+**The single-tab case is untouched.** With one tab open the module is rendered
+bare, exactly as it always was; the `.tabpane` wrapper only exists once a second
+tab is open. That is deliberate — multi-tab must not be able to regress the
+layout of a warehouse that never opens a second tab. `TabStrip` likewise returns
+null below two tabs, because one tab is not a set of tabs and a strip naming the
+only screen you have open is chrome that says nothing.
+
+**Unsaved work** (`useUnsavedGuard`) is a registry, not a prop threaded through
+every module: a screen that holds a draft says so, closing its tab asks first,
+and the screens that hold nothing are left completely alone. An unregistered
+screen closes silently — it has nothing to lose, and asking anyway is how people
+are trained to click through the question.
+
+**On a phone** the strip scrolls sideways and never wraps. That is the whole
+mobile answer: it stays one line whatever is open, so it cannot grow into the
+room the scanner, the camera and the forms need.
+
+What this does **not** do is preserve state across a warehouse change. Switching
+warehouses still remounts everything (§ the `key` on the content fragment), and
+that stays true: the screens are showing one building's work, and a kept tab
+across that boundary would be showing the warehouse you just left.
+
 ## 9. The remaining modules
 
 The same canonical shape and the inventory ledger extend to the rest of the

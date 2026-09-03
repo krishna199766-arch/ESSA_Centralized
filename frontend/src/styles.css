@@ -169,6 +169,43 @@ a { color: var(--brand); text-underline-offset: 2px; }
   outline: 2px solid var(--brand); outline-offset: 1px; border-radius: 4px; }
 
 .app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ==========================================================================
+   Open tabs
+   --------------------------------------------------------------------------
+   Only drawn when a SECOND module is open — see TabStrip, which returns null
+   below two. One tab is not a set of tabs, and a strip naming the only screen
+   you have open is a row of chrome that says nothing.
+
+   It scrolls sideways rather than wrapping, and that is the whole mobile
+   answer: the strip stays ONE line whatever is open, so it cannot grow into
+   the room the scanner, the camera and the forms need. A wrapped strip on a
+   phone is three rows of tabs above a form with no space left.
+   ========================================================================== */
+.tabstrip { display: flex; gap: 6px; align-items: stretch; flex: 0 0 auto;
+  padding: 6px var(--gutter); background: var(--panel-2);
+  border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
+.opentab { display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  max-width: 220px; padding: 5px 6px 5px 11px; border-radius: 7px 7px 0 0;
+  border: 1px solid var(--line); border-bottom: none; background: var(--panel-3);
+  color: var(--text-2); font-size: var(--fs-sm); cursor: pointer; }
+.opentab:hover { background: var(--panel); }
+/* The open tab carries a gold marker, the same device the nav uses for the
+   module you are in — one visual answer to "where am I" in both places. */
+.opentab.on { background: var(--panel); color: var(--text); font-weight: 600;
+  box-shadow: inset 0 2px 0 var(--gold-line); }
+.ot-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ot-x { border: none; background: none; cursor: pointer; color: var(--muted);
+  font-size: 15px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+.ot-x:hover { background: var(--danger-bg); color: var(--danger); }
+
+/* A kept-alive module that is not the one being looked at. It stays MOUNTED —
+   that is the entire point, since React keeps the state of a mounted component
+   and loses it otherwise — and is merely not shown. `display:none` via [hidden]
+   rather than visibility or an offscreen transform, because a hidden pane must
+   cost no layout and must not be reachable by tab key. */
+.tabpane { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.tabpane[hidden] { display: none; }
 /* On a narrow window the gutter is the first thing that should give: 22px of
    air either side of a 360px phone screen is 12% of the window spent on
    nothing. It shrinks, but it stays ONE number, so the screens stay aligned
