@@ -589,6 +589,41 @@ export const api = {
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pos'), { detail: j.detail }); return j }),
 
   // LR entry
+  // ------------------------------------------------------------------------
+  //  Purchase orders — the first document in the chain
+  //  ----------------------------------------------------------------------
+  //  `poOpen` is deliberately its own call rather than poList({status:'confirmed'}):
+  //  "which orders may goods be booked in against" has one right answer, and the
+  //  LR form must not be able to get a different one by changing a filter.
+  // ------------------------------------------------------------------------
+  poList: (filters) => fetch('/api/purchase-orders' + qs(filters)).then(J),
+  poOpen: (supplier_name) => fetch('/api/purchase-orders/open'
+    + qs(supplier_name ? { supplier_name } : {})).then(J),
+  poGet: (id) => fetch(`/api/purchase-orders/${id}`).then(J),
+  poStatuses: () => fetch('/api/purchase-orders/statuses').then(J),
+  poCreate: (body) => fetch('/api/purchase-orders', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('po'), { detail: j.detail }); return j }),
+  poUpdate: (id, fields) => fetch(`/api/purchase-orders/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('po'), { detail: j.detail }); return j }),
+  poStatus: (id, status, extra) => fetch(`/api/purchase-orders/${id}/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, ...(extra || {}) }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('po'), { detail: j.detail }); return j }),
+  poDelete: (id) => fetch(`/api/purchase-orders/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('po'), { detail: j.detail }); return j }),
+  // Photograph or upload an order and have it read. Returns a DRAFT and saves
+  // nothing — the form fills itself from it, the person corrects it, and the
+  // ordinary poCreate above is what writes the order. Asked about first, so the
+  // button can say why it is not there rather than failing on a press.
+  poExtractStatus: () => fetch('/api/purchase-orders/extract/status').then(J),
+  poExtract: (file) => { const fd = new FormData(); fd.append('file', file)
+    return fetch('/api/purchase-orders/extract', { method: 'POST', body: fd })
+      .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('po'), { detail: j.detail }); return j }) },
+
   lrExtract: (file) => { const fd = new FormData(); fd.append('file', file);
     return fetch('/api/lr/extract', { method: 'POST', body: fd }).then(J) },
   lrSave: (document_id, rows) => fetch('/api/lr/save', {

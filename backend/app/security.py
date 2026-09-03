@@ -102,6 +102,10 @@ POLICY = [
     # day. Listed above /api/documents so it is matched first.
     (r"^/api/documents/clear-all", "superadmin", "superadmin", "users"),
     (r"^/api/documents", "user", "user", "documents"),
+    # Raising an order is floor work — the buying desk does it all day, exactly
+    # as receiving is done on the GRN screen below. Its own screen key, so an
+    # account can be given the order book without the receipt book.
+    (r"^/api/purchase-orders", "user", "user", "purchase_orders"),
     (r"^/api/purchases", "user", "user", "purchases"),
     # The locator reads the whole account of one item and writes nothing. It is
     # its own screen and sits above /api/inventory, which it lives inside.

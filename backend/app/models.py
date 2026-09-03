@@ -253,6 +253,123 @@ class Product(Base):
         return round((self.stock_qty or 0) * (self.avg_cost or 0), 2)
 
 
+class PurchaseOrder(Base):
+    """What we asked a supplier for, before anything was sent.
+
+    THE FIRST DOCUMENT IN THE CHAIN, and until now the missing one. Intake began
+    at the supplier's invoice, which means the system could say what arrived and
+    what it cost but never what was *ordered* — so nothing could be three-way
+    matched, and "Invoice Vs Purchase Order" was one of six reports that had to
+    be listed as absent rather than empty.
+
+    Deliberately NOT folded into `Purchase`. A GRN is a receipt: it is raised
+    against a supplier's own invoice, it carries their tax arithmetic, and posting
+    it moves stock. An order moves nothing, is raised by us rather than read off
+    their document, and exists for a while with no invoice anywhere. Two records,
+    two lifecycles. `LREntry.purchase_order_id` is the first link built between
+    the order and what arrives against it.
+
+    THE LIFECYCLE IS THE POINT. draft → pending → confirmed, with cancelled
+    reachable from any of them. Only a CONFIRMED order may be received against,
+    which is what makes "no LR without a confirmed PO" expressible at all — see
+    services/purchase_orders.confirm.
+
+    Two routes in, exactly as LR has, and `entry_source` says which: `manual` is
+    the form, `import` is a photographed order read by the extraction engine and
+    then confirmed by a human. Both write this same row, so nothing downstream
+    needs to know which way an order arrived.
+    """
+    __tablename__ = "purchase_orders"
+    id = Column(Integer, primary_key=True)
+    #: Our own running number (PO-00001). Issued by services/numbering, so a
+    #: second business can have its own prefix without editing Python.
+    po_no = Column(String, index=True)
+    po_date = Column(String)              # ISO, via services/dates
+    # Which building placed the order and expects the goods. Scoped exactly like
+    # a GRN or an LR entry — a buyer at Erode should not be reading Karur's book.
+    # NULL on rows raised before workspaces, which stay visible everywhere.
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
+    #: What was typed before a supplier master row exists. An order is often
+    #: raised against a name someone has only just been given, and refusing to
+    #: record it until the master is filled in is how orders end up on paper.
+    supplier_name = Column(String)
+    # --- the header fields the buying office fills in ---
+    # `company` is per-order rather than read from config.COMPANY_NAME because an
+    # order names the entity that will be billed, and that is the one field here
+    # that a second billing entity would need before anything else. It defaults to
+    # the configured company and is almost always left alone.
+    company = Column(String)
+    brand = Column(String)
+    item = Column(String)
+    place = Column(String)
+    transport = Column(String)
+    agent = Column(String)
+    purchaser = Column(String)
+    #: Header discount, a percentage off the line total. Per-line rates stay the
+    #: supplier's quoted figures so the order still reads like what was agreed.
+    discount_pct = Column(Float)
+    # --- totals, recomputed from the lines on every write ---
+    subtotal = Column(Float, default=0.0)
+    discount_amount = Column(Float, default=0.0)
+    total = Column(Float, default=0.0)
+    #: draft | pending | confirmed | cancelled
+    status = Column(String, default="draft", index=True)
+    entry_source = Column(String, default="manual")   # manual | import
+    #: The photographed order this was read from, when it came in that way. Same
+    #: relationship Purchase has to its invoice, and the reason a PO can be
+    #: extracted by the existing engine without a second document table.
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
+    notes = Column(Text)
+    confirmed_at = Column(DateTime, nullable=True)
+    confirmed_by = Column(String)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancel_reason = Column(String)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    supplier = relationship("Supplier")
+    warehouse = relationship("Warehouse")
+    document = relationship("Document")
+    lines = relationship("PurchaseOrderLine", back_populates="order",
+                         cascade="all, delete-orphan",
+                         order_by="PurchaseOrderLine.id")
+
+    @property
+    def is_open(self):
+        """Whether this order can still be received against."""
+        return self.status == "confirmed"
+
+
+class PurchaseOrderLine(Base):
+    """One row of an order — what we asked for, at the price we were quoted.
+
+    `size` is kept as free text for the same reason `PurchaseLine.size` is: the
+    trade writes a whole size mix in one cell ("30:2, 32:4, 34:4") and parsing it
+    into columns at this point would impose a reading on a figure that is still
+    only a request. It becomes a breakdown at the GRN, where the boxes are open.
+    """
+    __tablename__ = "purchase_order_lines"
+    id = Column(Integer, primary_key=True)
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), index=True)
+    #: The description as the buyer wrote it — the "Particulars" column.
+    particulars = Column(String)
+    size = Column(String)
+    qty = Column(Float)
+    uom = Column(String)
+    rate = Column(Float)
+    amount = Column(Float)
+    # Carried per line as well as on the header: an order that is all one brand
+    # says so once at the top, and a mixed order says it per row. Blank here
+    # means "the header's", resolved when the line is read.
+    brand = Column(String)
+    design_no = Column(String)
+    hsn = Column(String)
+    notes = Column(String)
+
+    order = relationship("PurchaseOrder", back_populates="lines")
+
+
 class Purchase(Base):
     """A purchase / GRN header, created from a confirmed Document extraction.
     status: draft -> posted. Posting writes stock movements (idempotent)."""
@@ -1015,7 +1132,8 @@ class NumberSequence(Base):
     business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
     #: NULL = every warehouse of this business. Set = this one only.
     warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
-    #: grn | lr | invoice | transfer | debit_note | adjustment | pos_invoice | sku
+    #: purchase_order | grn | lr | invoice | transfer | debit_note | adjustment |
+    #: pos_invoice | sku
     doc = Column(String, index=True, nullable=False)
 
     prefix = Column(String, default="")                    # "GRN-ES-"
@@ -1424,6 +1542,14 @@ class LREntry(Base):
     # translated. See services/translate.py.
     source_language = Column(String)          # "Tamil" — None when it was English
     original_values = Column(JSON, default=dict)
+    # --- the order this consignment is arriving against ---
+    # Nullable, and that is not a loophole. Enforcement lives on the MANUAL route
+    # only (routers/lr), because the import route reads a whole register page at
+    # once and a register page names no purchase order — holding it to this would
+    # reject rows off a perfectly good page. An imported row that cannot be tied
+    # to an order is flagged, not refused. See services/lr_link.po_match.
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"),
+                               nullable=True, index=True)
     # --- invoice linkage (cross-fill): set when a matching invoice is uploaded ---
     invoice_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
     # The receipt raised against this consignment, once one exists. Written here
@@ -1436,6 +1562,7 @@ class LREntry(Base):
     mismatches = Column(JSON, default=list)
     created_at = Column(DateTime, default=now)
 
+    purchase_order = relationship("PurchaseOrder")
     attachments = relationship("LRAttachment", back_populates="entry",
                                cascade="all, delete-orphan",
                                order_by="LRAttachment.id")

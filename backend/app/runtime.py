@@ -34,6 +34,11 @@ _DEFAULTS = {
     # somebody changes it: services/dead_stock.py holds the defaults, and a
     # stored blank must not shadow a default that is later improved.
     "dead_stock_rules": {},
+    # Whether a hand-keyed consignment must name a confirmed purchase order.
+    # Here as well as in config so the buying policy can be changed from the
+    # settings screen without a redeploy — the people who decide it are not the
+    # people with shell access. See config.REQUIRE_PO_FOR_LR.
+    "require_po_for_lr": config.REQUIRE_PO_FOR_LR,
 }
 
 LEGACY_SETTINGS_PATH = os.path.join(config.STATE_DIR, "settings.json")

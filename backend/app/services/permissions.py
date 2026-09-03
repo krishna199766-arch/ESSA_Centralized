@@ -48,6 +48,9 @@ SCREENS = [
     # dashboard beside it, and a different audience.
     ("central",    "Central Dashboard", "Warehouse", "admin"),
     ("dashboard",  "Warehouse Dashboard", "Warehouse", None),
+    # The order comes first in the business chain, and the menu follows the chain:
+    # order the goods, book the lorry in, read the invoice, receive against it.
+    ("purchase_orders", "Purchase Orders", "Warehouse", None),
     ("lr",         "Transport / LR Entry", "Warehouse", None),
     ("documents",  "Invoice Entry", "Warehouse", None),
     ("purchases",  "GRN — Receive Goods", "Warehouse", None),

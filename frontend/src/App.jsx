@@ -5589,6 +5589,9 @@ const DEFAULT_HOLDING_DAYS = 90
 // its temporal dead zone here, and the ReferenceError takes the whole bundle
 // with it. A blank page, not a broken form.
 const LR_FORM_LEFT = [
+  // First, because it is first in the business chain: goods arrive against an
+  // order. Only confirmed orders are offered — see the `po` branch in LRField.
+  ['purchase_order_id', 'Purchase Order', 'po', { req: 1, wide: 1 }],
   ['lr_mode', 'LR Mode', 'select', { req: 1, list: 'lr_mode' }],
   ['lr_no', 'LR No', 'text', { req: 1 }],
   ['lr_date', 'LR Date', 'date', { req: 1 }],
@@ -5630,18 +5633,59 @@ const LR_FORM_KEYS = [...LR_FORM_LEFT, ...LR_FORM_RIGHT]
   .filter(([, , t]) => t !== 'ro').map(([k]) => k)
   .concat('freight_applicable')
 
-function LRField({ spec, form, set, opts, lists }) {
+function LRField({ spec, form, set, opts, lists, flagged }) {
   const [key, label, type, o = {}] = spec
   const v = form[key] ?? ''
   const style = o.wide ? { gridColumn: '1 / -1' } : null
   const choices = o.fixed || (o.list ? (opts[o.list] || []) : (lists[o.src] || []))
   const req = o.req ? <span style={{ color: 'var(--danger)' }}> *</span> : null
+  // Same `.field.flag` + `.flagnote` the invoice review uses, so a field the
+  // machine is unsure of looks identical on both screens. Only the purchase
+  // order form passes this today; the LR form leaves it undefined and the class
+  // never appears.
+  const cls = 'field' + (flagged ? ' flag' : '')
+  const flagnote = flagged
+    ? <div className="flagnote">⚠ needs review</div> : null
 
+  if (type === 'po') {
+    // Only confirmed orders are listed, because only those may have goods booked
+    // in against them — the server enforces the same rule, so this can never
+    // offer a choice that would then be refused on save.
+    //
+    // An order already cited but no longer in the open list (it was cancelled,
+    // or belongs to another warehouse) is added back as a disabled row. Dropping
+    // it silently would make the box look empty on a row that plainly has one,
+    // and the first thing anybody would do is pick a different order.
+    const open = lists.purchase_orders || []
+    const missing = v && !open.some((p) => String(p.id) === String(v))
+    return (
+      <div className={cls} style={style}>
+        <label>{label}{req}</label>
+        <select value={v} onChange={(e) => set(key, e.target.value)}>
+          <option value="">— select the order these goods are against —</option>
+          {missing && <option value={v} disabled>
+            order #{v} — not open here</option>}
+          {open.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.po_no} · {p.supplier_name || 'no supplier'}
+              {p.item ? ' · ' + p.item : ''}
+              {p.total ? ' · ₹' + Number(p.total).toLocaleString('en-IN') : ''}
+            </option>
+          ))}
+        </select>
+        <div className="small" style={{ marginTop: 3 }}>
+          {open.length
+            ? 'Confirmed orders only. Raise or confirm one in Purchase Orders.'
+            : 'No confirmed orders yet — raise one in Purchase Orders first.'}
+        </div>
+      </div>
+    )
+  }
   if (type === 'charge') {
     // checkbox + amount, as on their form. The box says the charge APPLIES at
     // all, which a zero amount can't express — nothing quoted yet vs quoted nil.
     return (
-      <div className="field" style={style}>
+      <div className={cls} style={style}>
         <label>{label}</label>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {/* unticking clears the amount: an amount saved under an unticked box
@@ -5658,7 +5702,7 @@ function LRField({ spec, form, set, opts, lists }) {
     )
   }
   return (
-    <div className="field" style={style}>
+    <div className={cls} style={style}>
       <label>{label}{req}</label>
       {type === 'ro'
         ? <input value={v || '— on save —'} disabled title="Allocated by the system when the entry is saved" />
@@ -5683,7 +5727,8 @@ function LRField({ spec, form, set, opts, lists }) {
                 : <input value={v} type="text"
                     inputMode={type === 'num' ? 'decimal' : undefined}
                     onChange={(e) => set(key, e.target.value)} />}
-      {o.hint && <div className="small" style={{ marginTop: 3 }}>{o.hint}</div>}
+      {flagnote}
+      {o.hint && !flagged && <div className="small" style={{ marginTop: 3 }}>{o.hint}</div>}
     </div>
   )
 }
@@ -5934,6 +5979,449 @@ const LR_REG_COLS = [
 // freight settlement — completed or corrected when the lorry actually delivers,
 // so these stay editable on already-saved rows
 const LR_SETTLE_COLS = LR_REG_COLS.filter((c) => c.edit).map((c) => c.k)
+
+// ==========================================================================
+//  Purchase Orders — what we asked for, before anything arrived
+//  ------------------------------------------------------------------------
+//  The first document in the chain, and the one this system did not have: intake
+//  began at the supplier's invoice, so nothing could say what was ORDERED.
+//
+//  The screen is shaped by the lifecycle rather than by the fields. An order is
+//  drafted, sent, agreed, and only then may goods be booked in against it — so
+//  the status is the first thing on every row, the actions available change with
+//  it, and a confirmed order shows as read-only rather than as a form with a
+//  save button that would be refused. See services/purchase_orders.py.
+// ==========================================================================
+
+//: Header fields, in the order the buying office fills them. Same two-column
+//: split the LR form uses, and the same field types, so the two screens are one
+//: thing to learn.
+const PO_FORM_LEFT = [
+  ['po_date', 'PO Date', 'date', { req: 1 }],
+  ['supplier_name', 'Supplier', 'combo', { req: 1, src: 'suppliers', wide: 1 }],
+  ['brand', 'Brand', 'text', {}],
+  ['item', 'Item', 'text', { wide: 1 }],
+  ['purchaser', 'Purchaser', 'combo', { list: 'purchase_manager' }],
+  ['agent', 'Agent', 'combo', { src: 'agents' }],
+]
+const PO_FORM_RIGHT = [
+  ['po_no', 'PO No', 'ro', {}],
+  ['company', 'Company', 'text', { wide: 1 }],
+  ['place', 'Place', 'text', {}],
+  ['transport', 'Transport', 'combo', { src: 'transports' }],
+  ['discount_pct', 'Discount %', 'num', { hint: 'comes off the line total' }],
+  ['notes', 'Notes', 'area', { wide: 1 }],
+]
+const PO_FORM_KEYS = [...PO_FORM_LEFT, ...PO_FORM_RIGHT]
+  .filter(([, , t]) => t !== 'ro').map(([k]) => k)
+
+//: The line grid. `amount` is derived from qty x rate as you type, but stays
+//: editable — a buyer who types an agreed line total has agreed that total, and
+//: the server keeps whatever is actually sent.
+const PO_LINE_COLS = [
+  { k: 'particulars', h: 'Particulars', w: 220 },
+  { k: 'size', h: 'Size', w: 110 },
+  { k: 'qty', h: 'Qty', w: 70, num: 1 },
+  { k: 'uom', h: 'UOM', w: 66 },
+  { k: 'rate', h: 'Rate', w: 84, num: 1 },
+  { k: 'amount', h: 'Amount', w: 96, num: 1 },
+]
+
+const blankPOLine = () => ({ particulars: '', size: '', qty: '', uom: '', rate: '', amount: '' })
+const blankPO = () => ({ po_date: today(), lines: [blankPOLine()] })
+
+//: What each state means, said in words. The badge carries the colour; this
+//: carries the sentence, because "pending" alone does not tell a new buyer
+//: whether they are waiting on themselves or on the supplier.
+const PO_STATUS_HINT = {
+  draft: 'Being written. Not sent to anyone yet.',
+  pending: 'Sent to the supplier, awaiting their confirmation.',
+  confirmed: 'Agreed. Goods may now be booked in against it.',
+  cancelled: 'Called off. Nothing can be received against it.',
+}
+
+function POLineGrid({ lines, setLines, readOnly, flags = {} }) {
+  const set = (i, k, v) => setLines(lines.map((l, n) => {
+    if (n !== i) return l
+    const row = { ...l, [k]: v }
+    // Keep the amount in step while the buyer is still typing qty and rate, but
+    // never overwrite one they have typed themselves — hence only when the box
+    // is empty or was itself derived.
+    if (k === 'qty' || k === 'rate') {
+      const q = parseFloat(k === 'qty' ? v : row.qty)
+      const r = parseFloat(k === 'rate' ? v : row.rate)
+      if (!isNaN(q) && !isNaN(r) && (!l.amount || l._derived)) {
+        row.amount = String(Math.round(q * r * 100) / 100)
+        row._derived = true
+      }
+    }
+    if (k === 'amount') row._derived = false
+    return row
+  }))
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="items entry">
+        <thead><tr>
+          {PO_LINE_COLS.map((c) => <th key={c.k} style={{ width: c.w, textAlign: c.num ? 'right' : 'left' }}>{c.h}</th>)}
+          {!readOnly && <th style={{ width: 34 }}></th>}
+        </tr></thead>
+        <tbody>
+          {lines.map((l, i) => (
+            <tr key={i}>
+              {PO_LINE_COLS.map((c) => {
+                // Paths come from the server as `lines.<row>.<field>` — the same
+                // dotted shape extraction/validate.py uses for invoice fields, so
+                // one convention covers both review screens.
+                const bad = !!flags[`lines.${i}.${c.k}`]
+                return (
+                  <td key={c.k} className={bad ? 'flagcell' : undefined}
+                    title={bad ? 'This did not add up — check it against the page' : undefined}>
+                    {readOnly
+                      ? <span style={{ display: 'block', textAlign: c.num ? 'right' : 'left' }}>
+                          {l[c.k] || <span className="small">—</span>}</span>
+                      : <input value={l[c.k] ?? ''} inputMode={c.num ? 'decimal' : undefined}
+                          style={{ textAlign: c.num ? 'right' : 'left' }}
+                          onChange={(e) => set(i, c.k, e.target.value)} />}
+                  </td>
+                )
+              })}
+              {!readOnly && (
+                <td>
+                  {/* The last line is never removable — a grid with no rows has
+                      nowhere to type, and "add a line" would be the only way back
+                      into a form somebody is in the middle of. */}
+                  <button className="rowdel" title="Remove this line"
+                    disabled={lines.length < 2}
+                    onClick={() => setLines(lines.filter((_, n) => n !== i))}>×</button>
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!readOnly && (
+        <button className="btn" style={{ marginTop: 8 }}
+          onClick={() => setLines([...lines, blankPOLine()])}>+ Add line</button>
+      )}
+    </div>
+  )
+}
+
+// A form's starting values: a saved order, a reading off a photograph, or empty.
+// One function so the three routes into this screen cannot drift — and so a
+// field added to `blankPO` reaches an extracted order too.
+const poInitial = (editing, extracted) => {
+  if (editing) return { ...editing }
+  if (extracted?.draft) return { ...blankPO(), ...extracted.draft,
+    document_id: extracted.document_id, entry_source: 'import' }
+  return blankPO()
+}
+const poInitialLines = (editing, extracted) => {
+  const src = editing?.lines?.length ? editing.lines : extracted?.draft?.lines
+  return src?.length ? src.map((l) => ({ ...l })) : [blankPOLine()]
+}
+
+function POForm({ editing, extracted, lists, opts, onDone, onCancel, toast }) {
+  const [form, setForm] = useState(() => poInitial(editing, extracted))
+  const [lines, setLines] = useState(() => poInitialLines(editing, extracted))
+  const [busy, setBusy] = useState(false)
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
+  useEffect(() => {
+    setForm(poInitial(editing, extracted))
+    setLines(poInitialLines(editing, extracted))
+  }, [editing, extracted])
+
+  // What the reading was unsure of. Only ever set on an extracted order — a
+  // hand-keyed one has nothing to be unsure about, and a form that flagged its
+  // own boxes would be inventing doubt.
+  const flags = extracted?.field_flags || {}
+  const warnings = extracted?.warnings || []
+
+  const readOnly = !!editing && editing.editable === false
+  // Shown live rather than only after a save, because the discount is the figure
+  // the office argues about and finding out what it came to on the next screen
+  // is finding out too late.
+  const subtotal = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
+  const discount = subtotal * (parseFloat(form.discount_pct) || 0) / 100
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const body = {}
+      PO_FORM_KEYS.forEach((k) => { if (form[k] !== undefined) body[k] = form[k] })
+      // Pins the saved order to the page it was read off, so it can always be
+      // checked against the paper. Only ever set on the extracted route.
+      if (form.document_id) { body.document_id = form.document_id; body.entry_source = 'import' }
+      body.lines = lines.map((l) => {
+        const { _derived, ...rest } = l                      // eslint-disable-line no-unused-vars
+        return rest
+      })
+      const saved = editing?.id ? await api.poUpdate(editing.id, body) : await api.poCreate(body)
+      toast(editing?.id ? `${saved.po_no} saved` : `${saved.po_no} raised`, 'ok')
+      onDone(saved)
+    } catch (e) {
+      toast(e.detail || 'Could not save the order', 'err')
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <Section id="po-form"
+      title={editing?.id ? `Order ${editing.po_no}`
+        : extracted ? 'Review what was read' : 'New purchase order'}
+      actions={<>
+        {!readOnly && <button className="btn primary" disabled={busy} onClick={save}>
+          {busy ? 'Saving…' : extracted ? 'Confirm & save' : 'Save'}</button>}
+        <button className="btn" onClick={onCancel}>Close</button>
+      </>}>
+      {extracted && (
+        // The whole point of the OCR path is that this screen exists. Nothing has
+        // been written yet — the banner says so outright, because a form that
+        // arrives pre-filled reads as a saved record unless it says otherwise.
+        <div className={'warnbox ' + (warnings.length ? '' : 'clean')} style={{ marginBottom: 16 }}>
+          <h4>
+            {warnings.length
+              ? `${warnings.length} thing(s) to check before saving`
+              : 'Read cleanly — check it and save'}
+            <span className="small" style={{ float: 'right' }}>
+              {extracted.provider === 'claude_vision' ? 'read by vision · confidence ' : ''}
+              {extracted.provider === 'claude_vision'
+                ? <b className={'conf ' + confClass(extracted.confidence)}>
+                    {Math.round((extracted.confidence ?? 0) * 100)}%</b>
+                : null}
+            </span>
+          </h4>
+          <p className="small" style={{ marginTop: 4 }}>
+            Nothing has been saved yet. Correct anything below, then press
+            <b> Confirm &amp; save</b>.{extracted.note ? ' · ' + extracted.note : ''}
+          </p>
+          {warnings.length ? <ul>{warnings.map((w, i) => <li key={i}>{w}</li>)}</ul> : null}
+        </div>
+      )}
+      {readOnly && (
+        <div className="warnbox" style={{ marginBottom: 16 }}>
+          <h4>This order is {editing.status} — it cannot be edited</h4>
+          <p className="small">{PO_STATUS_HINT[editing.status]}
+            {editing.status === 'confirmed' && ' To change it, cancel it and raise a replacement, so the change leaves a trail.'}</p>
+        </div>
+      )}
+      {/* Same two-column grid the LR form uses — see LREntryForm. Repeated here
+          rather than extracted, because pulling a shared layout wrapper out of a
+          working screen is a change to that screen for no gain to it. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(340px, 100%), 1fr))', gap: '0 28px' }}>
+        {[PO_FORM_LEFT, PO_FORM_RIGHT].map((col, ci) => (
+          <div key={ci} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 12px', alignContent: 'start' }}>
+            {col.map((spec) => <LRField key={spec[0]} spec={spec} form={form}
+              set={readOnly ? () => {} : set} opts={opts} lists={lists}
+              flagged={!!flags[spec[0]]} />)}
+          </div>
+        ))}
+      </div>
+      <h4 style={{ marginTop: 22 }}>Lines</h4>
+      <POLineGrid lines={lines} setLines={setLines} readOnly={readOnly} flags={flags} />
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 28, marginTop: 14,
+                    paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+        <div><span className="small">Subtotal</span><div style={{ textAlign: 'right' }}><b>{money(subtotal)}</b></div></div>
+        {!!discount && <div><span className="small">Discount {form.discount_pct}%</span>
+          <div style={{ textAlign: 'right' }}><b>− {money(discount)}</b></div></div>}
+        <div><span className="small">Total</span><div style={{ textAlign: 'right', fontSize: 16 }}>
+          <b>{money(subtotal - discount)}</b></div></div>
+      </div>
+    </Section>
+  )
+}
+
+function PurchaseOrdersView({ toast }) {
+  const [rows, setRows] = useState([])
+  const [status, setStatus] = useState('all')
+  const [query, setQuery] = useState('')
+  const [form, setForm] = useState(null)          // null = closed, {} = new, row = edit
+  const [extracted, setExtracted] = useState(null)   // a reading awaiting review
+  const [opts, setOpts] = useState({})
+  const [lists, setLists] = useState({})
+  const [busy, setBusy] = useState(false)
+  const [reading, setReading] = useState(false)      // a page is being read
+  const [canRead, setCanRead] = useState(null)       // null = not asked yet
+  const fileRef = useRef(null)
+
+  const refresh = useCallback(() => api.poList().then(setRows).catch(() => {}), [])
+  useEffect(() => { refresh() }, [refresh])
+  // Asked once, so the button can explain itself rather than fail on a press.
+  useEffect(() => {
+    api.poExtractStatus().then((s) => setCanRead(!!s.available)).catch(() => setCanRead(false))
+  }, [])
+
+  const readPage = async (file) => {
+    if (!file) return
+    setReading(true)
+    try {
+      const res = await api.poExtract(file)
+      // Even a failed read opens the form: the person is standing there with the
+      // page in their hand, and the fallback for "vision could not read this" is
+      // to type it, not to be sent back to an empty screen. `note` says what
+      // happened. This is §17's OCR-failure path.
+      setExtracted(res)
+      setForm({})
+      if (res.provider === 'claude_vision') {
+        toast(res.warnings?.length
+          ? `Read — ${res.warnings.length} thing(s) to check`
+          : 'Read cleanly — check it and save', res.warnings?.length ? 'warn' : 'ok')
+      } else {
+        toast(res.note || 'The page could not be read — key it in', 'warn')
+      }
+    } catch (e) {
+      toast(e.detail || 'That file could not be uploaded', 'err')
+    } finally {
+      setReading(false)
+      if (fileRef.current) fileRef.current.value = ''   // same file can be retried
+    }
+  }
+  useEffect(() => {
+    api.masterOptions().then(setOpts).catch(() => {})
+    Promise.all([api.listSuppliers(), api.agents(), api.transports()])
+      .then(([s, a, t]) => setLists({
+        suppliers: s.map((x) => x.name).filter(Boolean),
+        agents: a.map((x) => x.name).filter(Boolean),
+        transports: t.map((x) => x.name).filter(Boolean),
+      })).catch(() => {})
+  }, [])
+
+  const shown = rows
+    .filter((r) => status === 'all' || r.status === status)
+    .filter((r) => matches(r, query, ['po_no', 'supplier_name', 'item', 'brand', 'purchaser']))
+  const page = usePaged(shown, 25)
+
+  const openEdit = async (r) => {
+    try { setForm(await api.poGet(r.id)) } catch { toast('Could not open that order', 'err') }
+  }
+  const move = async (r, to) => {
+    setBusy(true)
+    try {
+      const saved = await api.poStatus(r.id, to)
+      toast(`${saved.po_no} is now ${to}`, 'ok')
+      refresh()
+      if (form?.id === r.id) setForm(saved)
+    } catch (e) { toast(e.detail || 'Could not change the status', 'err') }
+    finally { setBusy(false) }
+  }
+  const remove = async (e, r) => {
+    e.stopPropagation()
+    if (!window.confirm(`Delete draft ${r.po_no}? This cannot be undone.`)) return
+    try { await api.poDelete(r.id); toast(`${r.po_no} deleted`, 'ok'); refresh() }
+    catch (err) { toast(err.detail || 'Could not delete it', 'err') }
+  }
+
+  const count = (s) => rows.filter((r) => r.status === s).length
+
+  return (
+    // `screen` pins the header band and scrolls the body under it — the same
+    // structure every other single-column module uses. `main` would have been
+    // wrong: it is a horizontal flex row, for the screens that put an image
+    // beside their fields.
+    <div className="screen">
+      <div className="pagehead">
+        <h2>Purchase Orders</h2>
+        <span className="small pagesub">
+          Goods are booked in against a confirmed order.</span>
+        <div style={{ flex: 1 }} />
+        {/* Two ways in, as the LR register has: photograph the page, or type it.
+            `accept` covers both the desktop file picker and the phone, where
+            the browser offers the camera among the image sources — no separate
+            mobile control, and nothing to keep in step between two of them. */}
+        <input ref={fileRef} type="file" accept="image/*,.pdf" style={{ display: 'none' }}
+          onChange={(e) => readPage(e.target.files?.[0])} />
+        <button className="btn" disabled={reading || canRead === false}
+          title={canRead === false
+            ? 'Reading a photographed order needs the vision key — set it in Settings'
+            : 'Photograph or upload an order and have it read'}
+          onClick={() => fileRef.current?.click()}>
+          {reading ? 'Reading…' : '📷 Read an order'}
+        </button>
+        <button className="btn primary" onClick={() => { setExtracted(null); setForm({}) }}>
+          + New order</button>
+      </div>
+      <div className="screenbody">
+
+        {form && (
+          <POForm editing={form.id ? form : null} extracted={form.id ? null : extracted}
+            lists={lists} opts={opts} toast={toast}
+            onCancel={() => { setForm(null); setExtracted(null) }}
+            onDone={(saved) => { refresh(); setExtracted(null); setForm(saved) }} />
+        )}
+
+        <Section id="po-list" title={`Order book · ${shown.length}`}>
+          <div className="toolbar" style={{ gap: 10 }}>
+            <SearchBox value={query} onChange={setQuery}
+              placeholder="Search PO no, supplier, item…" />
+            <FilterChips value={status} onChange={setStatus} options={[
+              ['all', 'All', rows.length, 'Every order'],
+              ['draft', 'Draft', count('draft'), PO_STATUS_HINT.draft],
+              ['pending', 'Pending', count('pending'), PO_STATUS_HINT.pending],
+              ['confirmed', 'Confirmed', count('confirmed'), PO_STATUS_HINT.confirmed],
+              ['cancelled', 'Cancelled', count('cancelled'), PO_STATUS_HINT.cancelled],
+            ]} />
+          </div>
+
+          {rows.length === 0 && <div className="empty" style={{ marginTop: 24 }}>
+            No purchase orders yet. Click “New order” to raise the first one —
+            goods are booked in against a confirmed order.</div>}
+          {rows.length > 0 && shown.length === 0 && <div className="empty" style={{ marginTop: 24 }}>
+            Nothing matches. Try “All” or clear the search.</div>}
+
+          {shown.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="items">
+                <thead><tr>
+                  <th style={{ width: 110 }}>PO No</th>
+                  <th style={{ width: 96 }}>Date</th>
+                  <th>Supplier</th>
+                  <th style={{ width: 130 }}>Item</th>
+                  <th style={{ width: 60, textAlign: 'right' }}>Lines</th>
+                  <th style={{ width: 100, textAlign: 'right' }}>Total</th>
+                  <th style={{ width: 96 }}>Status</th>
+                  <th style={{ width: 190 }}>Actions</th>
+                </tr></thead>
+                <tbody>
+                  {page.slice.map((r) => (
+                    <tr key={r.id} style={{ cursor: 'pointer' }} onClick={() => openEdit(r)}>
+                      <td><b>{r.po_no}</b></td>
+                      <td>{readableDate(r.po_date)}</td>
+                      <td>{r.supplier_name || <span className="small">—</span>}</td>
+                      <td>{r.item || <span className="small">—</span>}</td>
+                      <td style={{ textAlign: 'right' }}>{r.line_count}</td>
+                      <td style={{ textAlign: 'right' }}>{money(r.total)}</td>
+                      <td><span className={'badge ' + r.status}>{r.status}</span></td>
+                      <td onClick={(e) => e.stopPropagation()}>
+                        {/* Only the moves this order can actually make. A button
+                            that is always drawn and sometimes refused teaches
+                            people to expect errors. */}
+                        {r.status === 'draft' && <button className="btn" disabled={busy}
+                          style={{ padding: '2px 8px', marginRight: 4 }}
+                          onClick={() => move(r, 'pending')}>Send</button>}
+                        {(r.status === 'draft' || r.status === 'pending') && (
+                          <button className="btn primary" disabled={busy}
+                            style={{ padding: '2px 8px', marginRight: 4 }}
+                            title={r.blockers?.length ? 'Needs ' + r.blockers.join(', ') : 'Agreed — allow goods against it'}
+                            onClick={() => move(r, 'confirmed')}>Confirm</button>
+                        )}
+                        {r.status !== 'cancelled' && <button className="btn" disabled={busy}
+                          style={{ padding: '2px 8px', marginRight: 4 }}
+                          onClick={() => move(r, 'cancelled')}>Cancel</button>}
+                        {r.status === 'draft' && <button className="rowdel"
+                          title="Delete this draft" onClick={(e) => remove(e, r)}>×</button>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <Pager {...page} noun="order" />
+            </div>
+          )}
+        </Section>
+      </div>
+    </div>
+  )
+}
+
 function LREntryView({ toast }) {
   const [rows, setRows] = useState([])
   const [docId, setDocId] = useState(null)
@@ -5961,11 +6449,18 @@ function LREntryView({ toast }) {
   const [lists, setLists] = useState({})         // masters with their own tables
   const loadOpts = useCallback(() => {
     api.masterOptions().then(setOpts).catch(() => {})
-    Promise.all([api.listSuppliers(), api.agents(), api.transports()])
-      .then(([s, a, t]) => setLists({
+    // The open orders come back as whole rows, not names: the form stores an id
+    // and shows a number, and a picker built on names alone could not tell two
+    // orders to the same supplier apart. `poOpen` returns only CONFIRMED ones,
+    // which is the same set the server will accept — so the form cannot offer a
+    // choice the save would then refuse.
+    Promise.all([api.listSuppliers(), api.agents(), api.transports(),
+                 api.poOpen().catch(() => [])])
+      .then(([s, a, t, po]) => setLists({
         suppliers: s.map((x) => x.name).filter(Boolean),
         agents: a.map((x) => x.name).filter(Boolean),
         transports: t.map((x) => x.name).filter(Boolean),
+        purchase_orders: po,
       })).catch(() => {})
   }, [])
   useEffect(() => { loadOpts() }, [loadOpts])
@@ -11958,6 +12453,9 @@ const MODULES = [
   // NavMenu items below, which hoists it out of this list. It stays HERE so it
   // is gated like every other module rather than being a special case.
   { key: 'central', icon: '🏦', label: 'Central Dashboard', blurb: 'Every warehouse at once — stock, value and what moved', min: 'admin' },
+  // First in the menu because it is first in the chain — the order is raised
+  // before the lorry is booked in, the invoice read, or the goods received.
+  { key: 'purchase_orders', icon: '📝', label: 'Purchase Orders', blurb: 'What we asked for — raise it, confirm it, and receive against it' },
   { key: 'lr', icon: '🚚', label: 'LR Entry', blurb: 'The transport register — consignments as they arrive' },
   { key: 'documents', icon: '🧾', label: 'Invoice Entry', blurb: 'Read a supplier invoice and review what came off it' },
   { key: 'purchases', icon: '📋', label: 'GRN', blurb: 'Receive against an invoice — count, claim shortages, post' },
@@ -13284,6 +13782,8 @@ export default function App() {
       ) : tab === 'dashboard' ? (
         <Dashboard modules={modules} go={setTab} company={status?.company?.name}
           docs={docs} refreshDocs={refresh} user={user} openDeadStock={openDeadStock} />
+      ) : tab === 'purchase_orders' ? (
+        <PurchaseOrdersView toast={toast} />
       ) : tab === 'lr' ? (
         <div className="body"><LREntryView toast={toast} /></div>
       ) : tab === 'documents' ? (

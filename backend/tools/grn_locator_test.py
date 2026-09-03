@@ -291,9 +291,18 @@ eq("an unknown tag is a 404, not a 500",
    client.get("/api/inventory/locate", params={"code": "NOT-A-TAG"}).status_code, 404)
 
 head("the stock holding period the age is measured against")
+# Goods are booked in against a confirmed purchase order — the default policy
+# since orders exist (config.REQUIRE_PO_FOR_LR). One is raised here so these
+# rows are created the way the form now creates them; the holding period is what
+# is actually under test below.
+_po = client.post("/api/purchase-orders", json={
+    "supplier_name": "KRISHA", "po_date": "2026-08-18",
+    "lines": [{"particulars": "MBJ frock", "qty": 23, "rate": 2140}]}).json()
+client.post("/api/purchase-orders/%d/status" % _po["id"], json={"status": "confirmed"})
 FULL = {"lr_mode": "Transport", "lr_date": "2026-08-18", "lr_entry_date": "2026-08-18",
         "supplier_name": "KRISHA", "agent": "GOLDEN TRANSPORT SERVICE",
-        "bundle": 1, "boxes": 1, "qty": 23, "amount": 49224}
+        "bundle": 1, "boxes": 1, "qty": 23, "amount": 49224,
+        "purchase_order_id": _po["id"]}
 made = client.post("/api/lr", json=dict(FULL, lr_no="MBJ-1")).json()
 eq("a new consignment carries ninety days without anybody typing it",
    made.get("stock_holding_days"), 90)

@@ -656,6 +656,79 @@ The general rule this leaves: mirror the reference screen to learn what the
 business records, then delete what it turns out never to fill. Matching a form
 field-for-field is a starting hypothesis, not the specification.
 
+## 8b. Purchase Orders: the document the chain was missing
+
+Intake began at the supplier's invoice. That was a deliberate starting point —
+the invoice is the document that carries the arithmetic — but it left the system
+unable to say what had been *ordered*, which is why three-way matching was
+impossible and why "Invoice Vs Purchase Order" had to be listed as absent.
+
+`PurchaseOrder` + `PurchaseOrderLine` (`services/purchase_orders.py`,
+`routers/purchase_orders.py`) close that gap. Four things are worth knowing.
+
+**It is not a `Purchase`.** A GRN is a receipt: raised against the supplier's own
+invoice, carrying their tax treatment, and posting it moves stock. An order is a
+statement of intent — raised by us, priced at what we were quoted, and living for
+weeks with no invoice anywhere. Folding the two together would mean one row whose
+meaning changed halfway through its life, and a `status` column doing the work of
+two tables. No stock, no valuation and no tax arithmetic live here.
+
+**The lifecycle is the feature.** `draft → pending → confirmed`, with `cancelled`
+reachable from any of them and terminal once reached. Only a **confirmed** order
+may have goods booked in against it, and that single rule is what makes "no LR
+without a confirmed PO" expressible instead of a convention somebody has to
+remember. Editing stops at `confirmed` for the same reason: if a confirmed order
+could still be amended, the guard would be checking a document that no longer
+says what it said when both sides agreed to it. Amending means cancelling and
+raising a replacement, which is also what leaves a trail.
+
+Status moves are their own route (`POST /{id}/status`) rather than a writable
+field, because a status that can be `PATCH`ed is a status whose rules can be
+skipped by anyone who sends the right JSON.
+
+**Cancelling is refused once a consignment cites the order.** The LR row points
+at it, and cancelling would leave that row citing a document that says it never
+happened. The refusal names how many consignments are holding it.
+
+**The guard is on the manual LR route only** (`config.REQUIRE_PO_FOR_LR`, and
+`runtime` so it can be changed from the settings screen rather than a redeploy).
+This is the same asymmetry `REQUIRED_MANUAL` already keeps and for the same
+reason: the import route reads a whole register page at once, and a transporter's
+register names no purchase order anywhere on it — holding those rows to this
+would reject twenty good consignments because the page they came off could not
+carry a field the office invented. Imported rows are **flagged** (`po_missing`)
+and tied to an order from the grid afterwards, through the same check the form
+uses, so the one route that exists to fix a missing link cannot create a bad one.
+
+It is a setting rather than a constant because it is a policy, not a fact: a
+business that buys on the phone and raises no orders would otherwise be unable to
+record a consignment at all, and the failure would read as a bug in the transport
+register rather than a rule it never agreed to.
+
+**Photographed orders** (`services/po_extract.py`) are the third document this
+app reads, after invoices and LR registers. It does **not** go through
+`extraction/engine.py`: that engine detects a supplier by GSTIN, loads their
+learned profile, and reconciles a tax block against printed totals — and an order
+has no tax block, no GSTIN of ours worth detecting, and no profile to learn from.
+It is closer to the LR register than to an invoice, so it follows `services/lr.py`
+— one prompt, one vision call, one shape back, the same Tamil sweep.
+
+Nothing is saved by the read. `POST /api/purchase-orders/extract` stores the
+*page* as a `Document` of type `purchase_order` and returns a **draft**; the form
+fills itself from it, a human corrects it, and the ordinary
+`POST /api/purchase-orders` is what writes the order — the same route a
+hand-keyed one takes. An OCR pass that wrote straight to the register would be a
+system that files its own mistakes, and no accuracy figure makes that the right
+shape.
+
+The arithmetic check is deliberately narrower than the invoice validator's: qty
+× rate against a printed amount, and nothing else. An invoice is dense with
+identities and the validator can be confident; an order is a request, its lines
+are round numbers agreed on the phone, and inventing disagreements on a document
+with no totals to tie to would only teach people to ignore the flags. Field paths
+come back in the same dotted `lines.0.amount` form the invoice review uses, so
+one highlighting convention serves both screens.
+
 ## 9. The remaining modules
 
 The same canonical shape and the inventory ledger extend to the rest of the
@@ -702,7 +775,6 @@ Each needs a data model before it can carry a number.
 |---|---|
 | Stock - Depreciation | No depreciation at all — no rate, method or asset register. Stock is held at weighted-average cost. |
 | Job Work Outward / Inward | No job-work concept: goods sent to a processor and returned are not modelled. |
-| Invoice Vs Purchase Order | No purchase orders. Intake begins at the supplier's invoice. |
 | Retail Stock Analysis | One warehouse. A dispatch reduces our stock; what the receiving store then holds is its own book. |
 | Purchase Return (Cancelled) | A return is draft or posted. Nothing is cancelled. |
 | Transport Payment Report | Freight owed is on the consignment; transport *payments* have no ledger. |
@@ -714,10 +786,15 @@ nothing can be marked settled. **Stock Movement - Locationwise** reports what ea
 destination was *sent*, not what it holds. Saying so on the report is better than
 letting someone infer it from a total that will not tie out.
 
-Recommended remaining order: (1) purchase orders (unlocks Invoice vs PO and turns
-receiving into three-way matching) → (2) destination stock (unlocks Retail Stock
-Analysis and closes the transfer loop) → (3) a transport payables ledger. Each
-consumes the canonical shape and the ledger these modules already guarantee.
+Purchase orders were the first of these and are now built — see §8b. *Invoice Vs
+Purchase Order* is therefore no longer absent for want of a data model; what it
+still needs is the matching itself, which is the next piece of work on that
+report rather than a missing table.
+
+Recommended remaining order: (1) three-way matching on receipt (the orders now
+exist to match against) → (2) destination stock (unlocks Retail Stock Analysis
+and closes the transfer loop) → (3) a transport payables ledger. Each consumes
+the canonical shape and the ledger these modules already guarantee.
 
 ## 10. Production hardening checklist
 

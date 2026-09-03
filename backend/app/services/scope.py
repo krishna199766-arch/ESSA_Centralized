@@ -89,6 +89,16 @@ def lr_entries(query, warehouse_id):
     return own(query, models.LREntry.warehouse_id, warehouse_id)
 
 
+def purchase_orders(query, warehouse_id):
+    """Orders raised here.
+
+    Scoped on its own column, like the GRN and the LR entry it sits in front of:
+    a buyer at one branch reading another branch's order book is the same failure
+    this module was written to stop, one document earlier in the chain.
+    """
+    return own(query, models.PurchaseOrder.warehouse_id, warehouse_id)
+
+
 def purchases(query, warehouse_id):
     """GRNs received here.
 

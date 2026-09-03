@@ -19,8 +19,12 @@ empty report reads as "nothing happened" when the truth is "nothing is recorded"
     method or asset register, and garments are held at weighted-average cost.
   * **Job Work Outward / Inward** — no job-work concept exists: goods sent to a
     processor and returned are not modelled at all.
-  * **Invoice Vs Purchase Order** — there are no purchase orders. Intake starts at
-    the supplier's invoice.
+  * **Invoice Vs Purchase Order** — purchase orders now exist (services/
+    purchase_orders.py), so this is no longer absent for want of a data model.
+    What it still lacks is the MATCHING: an order is linked to the consignment
+    that arrives against it (LREntry.purchase_order_id), not yet to the invoice
+    or the receipt, so there is no line-by-line ordered-vs-billed comparison to
+    report. Kept on this list until there is.
   * **Retail Stock Analysis** — stock is held at one warehouse. A dispatch reduces
     it; what the receiving store then holds is not tracked here.
   * **Purchase Return (Cancelled)** — a return is draft or posted. Nothing is

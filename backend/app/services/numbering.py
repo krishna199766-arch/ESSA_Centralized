@@ -45,6 +45,8 @@ from .. import models
 DOCS = {
     "sku":         {"label": "Product SKU",      "prefix": "ESSA-", "padding": 5,
                     "use_year": False},
+    "purchase_order": {"label": "Purchase Order", "prefix": "PO-",  "padding": 5,
+                       "use_year": False},
     "grn":         {"label": "GRN",              "prefix": "GRN-",  "padding": 5,
                     "use_year": True, "year_format": "calendar"},
     "lr":          {"label": "LR Entry",         "prefix": "LRE-",  "padding": 5,

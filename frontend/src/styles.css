@@ -565,6 +565,13 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .badge.confirmed { background: var(--ok-bg); color: var(--ok); }
 .badge.uploaded, .badge.draft { background: var(--panel-3); color: var(--text-2); }
 .badge.posted { background: var(--info-bg); color: var(--info); }
+/* A purchase order awaiting the supplier's word, and one called off. `pending`
+   borrows the warn tokens it shares a meaning with — something is outstanding —
+   and `cancelled` the danger ones. Both carry their own WORD as well as their
+   colour, here and everywhere they are drawn, so the state never depends on
+   telling two pastels apart. */
+.badge.pending { background: var(--warn-bg); color: var(--warn); }
+.badge.cancelled { background: var(--danger-bg); color: var(--danger); }
 /* The three access levels, ranked by weight rather than by hue: a super admin
    badge should read as "more" than an admin one at a glance, which a second
    arbitrary colour would not. */
@@ -670,8 +677,16 @@ a { color: var(--brand); text-underline-offset: 2px; }
   font-size: 12px; line-height: 1; opacity: .55; border-radius: var(--radius-sm); }
 .datebox .datebtn:hover { opacity: 1; background: var(--panel-2); }
 .field input[type=checkbox] { width: auto; padding: 0; accent-color: var(--brand); }
-.field.flag input { border-color: var(--warn); background: var(--warn-bg); }
+/* `select` as well as `input`: the purchase order review flags a dropdown too
+   (the order a consignment is against), and a flagged field whose control kept
+   its ordinary border is a warning nobody sees. */
+.field.flag input, .field.flag select { border-color: var(--warn); background: var(--warn-bg); }
 .field .flagnote { font-size: var(--fs-xs); color: var(--warn); margin-top: var(--sp-1); font-weight: 600; }
+/* One cell of a review grid that did not add up. The tint sits on the CELL
+   rather than the input so it still reads when the row is shown read-only —
+   a confirmed order is not editable and its flags must survive that. */
+td.flagcell { background: var(--warn-bg); box-shadow: inset 2px 0 0 var(--warn); }
+td.flagcell input { border-color: var(--warn); background: var(--panel); }
 .field.fromlr input { border-color: var(--info); background: var(--info-bg); }
 .field .srcnote { font-size: var(--fs-xs); color: var(--info); margin-top: var(--sp-1); font-weight: 600; }
 .section h4 .h4btn { float: right; text-transform: none; letter-spacing: 0; font-size: var(--fs-xs);

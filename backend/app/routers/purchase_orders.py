@@ -1,0 +1,272 @@
+"""Purchase Orders — the buying desk's register.
+
+The order is the first document in the chain and, until now, the one the system
+did not have. See services/purchase_orders for the lifecycle and why editing
+stops at `confirmed`.
+
+Shaped like the LR router next door on purpose: a list narrowed by the warehouse
+the call is made inside, a manual create, a PATCH that refuses once the document
+is committed, and status moves as their own routes rather than a writable
+`status` field. A status that can be PATCHed is a status whose rules can be
+skipped by anyone who sends the right JSON.
+"""
+import hashlib
+import os
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from .. import models
+from ..database import get_db
+from ..services import (dates, po_extract, purchase_orders as po_svc, scope,
+                        storage)
+
+router = APIRouter(prefix="/api/purchase-orders", tags=["purchase-orders"])
+
+
+class POLineIn(BaseModel):
+    """One row of the order grid. Everything optional — a line is often written
+    before its rate is agreed, and refusing to hold it until then is how the
+    working copy ends up on paper beside the screen."""
+    particulars: Optional[str] = None
+    size: Optional[str] = None
+    qty: Optional[float] = None
+    uom: Optional[str] = None
+    rate: Optional[float] = None
+    amount: Optional[float] = None
+    brand: Optional[str] = None
+    design_no: Optional[str] = None
+    hsn: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class POIn(BaseModel):
+    """A new order, or an amendment to one still open.
+
+    `lines` absent means "leave the grid alone"; `lines: []` means "clear it".
+    The two are different intentions and a screen sending a partial form must be
+    able to express the first without performing the second.
+    """
+    po_no: Optional[str] = None
+    po_date: Optional[str] = None
+    supplier_id: Optional[int] = None
+    supplier_name: Optional[str] = None
+    company: Optional[str] = None
+    brand: Optional[str] = None
+    item: Optional[str] = None
+    place: Optional[str] = None
+    transport: Optional[str] = None
+    agent: Optional[str] = None
+    purchaser: Optional[str] = None
+    discount_pct: Optional[float] = None
+    notes: Optional[str] = None
+    entry_source: Optional[str] = None
+    document_id: Optional[int] = None
+    lines: Optional[List[POLineIn]] = None
+
+
+class StatusIn(BaseModel):
+    status: str
+    by: Optional[str] = None
+    reason: Optional[str] = None
+
+
+def _payload(body: POIn) -> Dict[str, Any]:
+    """The body as a plain dict, with unset keys genuinely absent.
+
+    `exclude_unset` is the load-bearing part: without it every optional field
+    arrives as None and a PATCH of one box wipes the rest of the form.
+    """
+    data = body.model_dump(exclude_unset=True)
+    if data.get("lines") is not None:
+        data["lines"] = [dict(l) for l in data["lines"]]
+    return data
+
+
+# ---------------------------------------------------------------------------
+#  reading
+# ---------------------------------------------------------------------------
+@router.get("")
+def list_orders(status: str = "all", q: str = "", supplier: str = "",
+                date_from: str = "", date_to: str = "", limit: int = 500,
+                db: Session = Depends(get_db),
+                wid: Optional[int] = Depends(scope.current)):
+    """The order book, newest first, for the warehouse this call is inside.
+
+    Dates compare as strings because every date here is stored ISO, where lexical
+    order is chronological order — the same reason the LR search does it.
+    """
+    query = db.query(models.PurchaseOrder)
+    if status and status != "all":
+        if status not in po_svc.STATUSES:
+            raise HTTPException(400, f"'{status}' is not a purchase order status")
+        query = query.filter(models.PurchaseOrder.status == status)
+    if supplier:
+        query = query.filter(models.PurchaseOrder.supplier_name.ilike(f"%{supplier}%"))
+    if dates.to_iso(date_from):
+        query = query.filter(models.PurchaseOrder.po_date >= dates.to_iso(date_from))
+    if dates.to_iso(date_to):
+        query = query.filter(models.PurchaseOrder.po_date <= dates.to_iso(date_to))
+    if q:
+        like = f"%{q}%"
+        query = query.filter(
+            models.PurchaseOrder.po_no.ilike(like)
+            | models.PurchaseOrder.supplier_name.ilike(like)
+            | models.PurchaseOrder.item.ilike(like)
+            | models.PurchaseOrder.brand.ilike(like)
+            | models.PurchaseOrder.purchaser.ilike(like))
+    rows = (scope.purchase_orders(query, wid)
+            .order_by(models.PurchaseOrder.id.desc())
+            .limit(max(1, min(limit, 2000))).all())
+    return [po_svc.out(r, with_lines=False) for r in rows]
+
+
+@router.get("/open")
+def list_open(supplier_name: str = "", db: Session = Depends(get_db),
+              wid: Optional[int] = Depends(scope.current)):
+    """Confirmed orders — what the LR Entry form's PO picker offers.
+
+    Its own route rather than `?status=confirmed`, because "which orders may I
+    book goods in against" is a question with one right answer and the transport
+    desk should not be able to get a different one by changing a filter.
+    """
+    rows = po_svc.open_orders(db, warehouse_id=wid, supplier_name=supplier_name)
+    return [po_svc.out(r, with_lines=False) for r in rows]
+
+
+@router.get("/statuses")
+def statuses():
+    """The lifecycle, for the filter chips and the status control."""
+    return {"statuses": po_svc.STATUSES,
+            "transitions": {k: sorted(v) for k, v in po_svc.TRANSITIONS.items()},
+            "editable": sorted(po_svc.EDITABLE)}
+
+
+@router.get("/extract/status")
+def extract_status():
+    """Whether a photographed order can be read at all.
+
+    Asked before the button is offered, so an unconfigured deployment says so on
+    a settings page instead of failing after somebody has taken the photograph —
+    the same courtesy /api/voice/status pays the Tamil microphone.
+    """
+    return {"available": po_extract.available()}
+
+
+@router.post("/extract")
+async def extract_order(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Photograph or upload an order → read it → hand back a DRAFT for review.
+
+    NOTHING IS SAVED HERE, and that is the design rather than an omission. The
+    reply is a draft the form fills itself from; the person who photographed the
+    page corrects it and presses Save, which is the ordinary
+    `POST /api/purchase-orders` every hand-keyed order goes through. An OCR pass
+    that wrote straight to the register would be a system that files its own
+    mistakes, and no amount of accuracy makes that the right shape.
+
+    The page itself IS stored — as a `Document` of type `purchase_order`, the
+    third the app reads after invoices and LR registers — so the order can always
+    be checked against the paper it came off. `document_id` comes back and the
+    save carries it, which is what pins the two together.
+    """
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "that file is empty")
+    h = hashlib.sha256(raw).hexdigest()
+    ext = os.path.splitext(file.filename or "")[1] or ".bin"
+    stored = storage.save(raw, f"{h[:16]}{ext}")
+    doc = models.Document(filename=file.filename, stored_path=stored, content_hash=h,
+                          mime=file.content_type, status="uploaded",
+                          document_type="purchase_order")
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    res = po_extract.extract_po(storage.materialise(stored) or stored)
+    return {"document_id": doc.id, "entry_source": "import", **res}
+
+
+@router.get("/{po_id}")
+def get_order(po_id: int, db: Session = Depends(get_db)):
+    po = db.get(models.PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(404, "purchase order not found")
+    return po_svc.out(po, db)
+
+
+# ---------------------------------------------------------------------------
+#  writing
+# ---------------------------------------------------------------------------
+@router.post("")
+def create_order(body: POIn, db: Session = Depends(get_db),
+                 wid: Optional[int] = Depends(scope.current)):
+    """Raise an order. Starts as a draft — confirming it is a separate act."""
+    po = po_svc.create(db, _payload(body), warehouse_id=wid)
+
+    # A supplier typed on an order is a supplier this company buys from, so it
+    # joins the master exactly as one typed on an LR entry does. Without this the
+    # first order to a new vendor leaves their name on the document and nowhere
+    # else, and the invoice that follows cannot be matched to them.
+    name = (po.supplier_name or "").strip()
+    if name and not db.query(models.Supplier).filter(models.Supplier.name == name).first():
+        db.add(models.Supplier(name=name))
+
+    db.commit()
+    db.refresh(po)
+    return po_svc.out(po, db)
+
+
+@router.patch("/{po_id}")
+def update_order(po_id: int, body: POIn, db: Session = Depends(get_db)):
+    po = db.get(models.PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(404, "purchase order not found")
+    try:
+        po_svc.update(db, po, _payload(body))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.commit()
+    db.refresh(po)
+    return po_svc.out(po, db)
+
+
+@router.post("/{po_id}/status")
+def move_status(po_id: int, body: StatusIn, db: Session = Depends(get_db)):
+    """Confirm, send, or cancel an order.
+
+    One route for every move rather than a `/confirm` and a `/cancel`, so the
+    transition table in the service is the only place the rules live.
+    """
+    po = db.get(models.PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(404, "purchase order not found")
+    try:
+        po_svc.set_status(db, po, body.status, by=body.by, reason=body.reason)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.commit()
+    db.refresh(po)
+    return po_svc.out(po, db)
+
+
+@router.delete("/{po_id}")
+def delete_order(po_id: int, db: Session = Depends(get_db)):
+    """Remove an order outright.
+
+    Only a draft. Once an order has been sent or agreed it is a document the
+    supplier also holds, and the honest way to withdraw it is `cancelled` — which
+    leaves it on the register saying so, instead of leaving the other side
+    holding a document this system has no record of.
+    """
+    po = db.get(models.PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(404, "purchase order not found")
+    if po.status != "draft":
+        raise HTTPException(
+            400, f"a {po.status} order cannot be deleted — cancel it instead, so "
+                 f"it stays on the register with its reason")
+    db.delete(po)
+    db.commit()
+    return {"ok": True, "deleted": po_id}

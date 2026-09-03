@@ -116,6 +116,21 @@ VISION_MODEL = os.environ.get("ESSA_VISION_MODEL", "claude-3-5-sonnet-20241022")
 COMPANY_GSTIN = _env("ESSA_COMPANY_GSTIN", "33AADCE6591N1Z7")
 COMPANY_NAME = _env("ESSA_COMPANY_NAME", "Essa Garments Private Limited")
 
+# --- Buying against orders ---
+# Whether a consignment KEYED IN BY HAND must name a confirmed purchase order.
+# On by default: goods arrive against an order, and the form is where somebody
+# is sitting with the paperwork and can say which one.
+#
+# It is a setting rather than a constant because it is a policy, not a fact.
+# A business that buys on the phone and raises no orders would otherwise be
+# unable to record a consignment at all — and the failure would look like a bug
+# in the transport register rather than a rule it never agreed to.
+#
+# The IMPORT route is never held to this, whatever this says: a transporter's
+# register page names no purchase order anywhere on it. See routers/lr.
+REQUIRE_PO_FOR_LR = _env("ESSA_REQUIRE_PO_FOR_LR", "1").lower() not in (
+    "0", "false", "no", "off")
+
 # --- Login ---
 # Accounts live in the database (see models.User and services/users), not here.
 # Three ranked roles: user (the floor), admin (setup + money), superadmin (also

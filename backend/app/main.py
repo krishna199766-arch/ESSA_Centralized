@@ -11,7 +11,8 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from .database import Base, engine
 from . import models  # noqa: F401  (register tables)
-from .routers import (documents, suppliers, purchases, inventory, outward,
+from .routers import (documents, suppliers, purchases, purchase_orders,
+                      inventory, outward,
                       payments, returns, reports, settings, auth, masters, lr,
                       bundles, dashboard, master_data, labels, dead_stock,
                       notifications, voice, users, locations, catalogues)
@@ -586,6 +587,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
 
 app.include_router(documents.router)
 app.include_router(suppliers.router)
+app.include_router(purchase_orders.router)
 app.include_router(purchases.router)
 app.include_router(inventory.router)
 app.include_router(outward.router)

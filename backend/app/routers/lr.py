@@ -14,6 +14,7 @@ from ..services import lr_link
 from ..services import masters as masters_svc
 from ..services import dates
 from ..services import scope
+from .. import runtime
 
 router = APIRouter(prefix="/api/lr", tags=["lr-entry"])
 
@@ -29,9 +30,16 @@ WRITABLE = [
     "inv_no", "inv_date",
     "paid_topay", "freight_applicable", "freight_amount", "freight_total",
     "freight_charges", "item",
+    # The order this consignment is arriving against. Writable on both routes —
+    # an imported row can be tied to an order after the fact, from the grid —
+    # but only REQUIRED on the manual one; see REQUIRE_PO_ON_MANUAL.
+    "purchase_order_id",
 ]
 _NUMERIC = {"agent_commission", "stock_holding_days", "additional_margin",
             "bundle", "boxes", "qty", "amount", "freight_amount", "freight_total"}
+#: Foreign keys. Kept apart from _NUMERIC because a float row id is not an id —
+#: SQLite will happily store 12.0 in an INTEGER column and the join then misses.
+_INTEGER = {"purchase_order_id"}
 _BOOLEAN = {"freight_applicable"}
 # The named charge lines under the freight — {"H.C.": 10, "S.T. Charge": 20}. A
 # map rather than a column each, because every transporter prints a different set
@@ -69,8 +77,50 @@ REQUIRED_MANUAL = [
     ("bundle", "No Of Bundles"), ("boxes", "No Of Boxes"), ("qty", "No Of Pieces"),
 ]
 
+def require_po_on_manual():
+    """Whether a hand-keyed consignment must name a confirmed purchase order.
+
+    ON THE MANUAL ROUTE ONLY, and that asymmetry is the whole design. The
+    business rule is "goods arrive against an order", and the form is where
+    somebody is sitting with the paperwork and can say which one. The IMPORT
+    route is never held to it, whatever this returns: a transporter's register
+    page names no purchase order anywhere on it, so holding those rows to this
+    would reject twenty good consignments because the page they were
+    photographed from could not carry a field the office invented. Imported rows
+    are FLAGGED instead (`po_missing`) and tied to an order from the grid.
+
+    Read per call rather than captured at import, so turning the policy off from
+    the settings screen takes effect without a restart.
+    """
+    return bool(runtime.get("require_po_for_lr"))
+
+
 # lists that learn from what is typed on the form (see masters.OPEN_OPTIONS)
 _LEARNS = {"purchase_manager": "purchase_manager"}
+
+
+def check_purchase_order(db, po_id, required=False):
+    """The order this consignment cites, or None. Raises when it is not usable.
+
+    Three separate failures, told apart because the fix for each is different:
+    nothing cited, cited something that isn't there, and cited an order that is
+    not in a state goods may arrive against. A single "invalid purchase order"
+    would leave the transport desk guessing which.
+    """
+    if not po_id:
+        if required:
+            raise HTTPException(
+                400, "Required: a confirmed Purchase Order. Goods are booked in "
+                     "against an order — raise or confirm one first.")
+        return None
+    po = db.get(models.PurchaseOrder, int(po_id))
+    if not po:
+        raise HTTPException(400, f"purchase order {po_id} does not exist")
+    if po.status != "confirmed":
+        raise HTTPException(
+            400, f"{po.po_no} is {po.status} — only a confirmed order can have "
+                 f"goods booked in against it")
+    return po
 
 
 def _coerce(field, value):
@@ -97,6 +147,11 @@ def _coerce(field, value):
     if field in _NUMERIC:
         try:
             return float(value)
+        except (TypeError, ValueError):
+            return None
+    if field in _INTEGER:
+        try:
+            return int(value)
         except (TypeError, ValueError):
             return None
     if field in _DATES:
@@ -242,6 +297,11 @@ def create(body: LRIn, db: Session = Depends(get_db),
     missing = [label for f, label in REQUIRED_MANUAL if _coerce(f, data.get(f)) is None]
     if missing:
         raise HTTPException(400, "Required: " + ", ".join(missing))
+    # Checked before anything is written, so a rejected consignment leaves no
+    # half-made row and no supplier invented from its name.
+    check_purchase_order(db, _coerce("purchase_order_id",
+                                     data.get("purchase_order_id")),
+                         required=require_po_on_manual())
 
     # Booked in against the warehouse expecting the lorry — whichever one the
     # person keying it is working inside.
@@ -284,6 +344,14 @@ def _row_out(e: models.LREntry):
         "source_language": e.source_language,
         "original_values": e.original_values or {},
         "freight_applicable": bool(e.freight_applicable),
+        # The order this consignment came in against. `po_no` travels with the id
+        # so the register can name it without a second call per row, and
+        # `po_missing` is what the grid badges: a row read off a register page
+        # carries no order and has to be tied to one by hand, which is a job to
+        # be done rather than an error to be shown.
+        "po_no": e.purchase_order.po_no if e.purchase_order else None,
+        "po_status": e.purchase_order.status if e.purchase_order else None,
+        "po_missing": e.purchase_order_id is None,
         "attachments": [_att_out(a) for a in e.attachments],
     })
     return out
@@ -381,6 +449,13 @@ def update_entry(entry_id: int, body: LRUpdate, db: Session = Depends(get_db)):
     unknown = [k for k in data if k not in WRITABLE]
     if unknown:
         raise HTTPException(400, f"not editable: {', '.join(sorted(unknown))}")
+    # Tying an imported row to its order goes through the same check the form
+    # does, so the one route that exists to FIX a missing link cannot be the one
+    # that creates a bad one. Not `required` here: clearing the link is allowed,
+    # and a row that never had one is exactly what this route is for.
+    if "purchase_order_id" in data:
+        check_purchase_order(db, _coerce("purchase_order_id",
+                                         data["purchase_order_id"]))
     _apply(e, data, db, fields=[k for k in WRITABLE if k in data])
     db.commit()
     db.refresh(e)
