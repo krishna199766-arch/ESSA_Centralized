@@ -30,7 +30,7 @@ if __name__ == "__main__":
             print("Done. Default login: admin / admin123")
 
     print("\n" + "=" * 50)
-    print("  Taqua Silks is running")
+    print("  The store is running")
     print(f"  Open: http://localhost:{PORT}")
     print("  Login: admin / admin123")
     print("  Press Ctrl+C to stop")

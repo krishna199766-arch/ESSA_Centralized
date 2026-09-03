@@ -12800,9 +12800,12 @@ const MODULES = [
 ]
 
 // ==========================================================================
-//  POS — the retail shop, mounted at /pos
+//  Store — the retail side, mounted at /pos
 //  ------------------------------------------------------------------------
-//  The shop (Taqua Silks) is a finished Flask app with its own database and
+//  The URL stays /pos because it is the shop app's own mount point and its
+//  cookies and links are written against it; only what people READ says Store.
+//
+//  The store is a finished Flask app with its own database and
 //  its own login. It is served by this same backend, at this same origin, and
 //  shown here in a frame — not rewritten screen by screen into React. Same
 //  origin is the load-bearing part: on a second port its login cookie would be
@@ -12815,7 +12818,12 @@ const MODULES = [
 //  own navigation.
 // ==========================================================================
 
-const POS_HOME = { key: 'pos:home', icon: '🏠', label: 'Shop Dashboard', path: '/',
+// "Store", not "POS". A till is what the software is; a STORE is what the place
+// is, and it is the word the warehouse already uses for these rows
+// (models.Store, the Locations screen, the branch a consignment is forwarded
+// to). Calling the same place two names in two menus is how somebody comes to
+// believe they are two things.
+const POS_HOME = { key: 'pos:home', icon: '🏠', label: 'Store Dashboard', path: '/',
   blurb: "Today's sales, low stock and the last few bills" }
 
 // In the shop's own order — the same sequence as the navigation inside the
@@ -12827,8 +12835,8 @@ const POS_SCREENS = [
     blurb: 'Build a sale on the phone while walking the floor' },
   { key: 'pos:counter', icon: '🧮', label: 'Billing Counter', path: '/pos/',
     blurb: 'Scan, bill and take payment at the counter' },
-  { key: 'pos:inventory', icon: '📦', label: 'Shop Stock', path: '/inventory/',
-    blurb: 'What is on the shop floor, with the warehouse QR on every item' },
+  { key: 'pos:inventory', icon: '📦', label: 'Store Stock', path: '/inventory/',
+    blurb: 'What is on the store floor, with the warehouse QR on every item' },
   { key: 'pos:customers', icon: '🧍', label: 'Customers', path: '/customers/',
     blurb: 'Customer master, loyalty points and history' },
   { key: 'pos:invoices', icon: '🧾', label: 'Invoices', path: '/pos/invoices',
@@ -12839,7 +12847,7 @@ const POS_SCREENS = [
     blurb: 'Garments out for tailoring, and what each tailor is holding' },
   { key: 'pos:staff', icon: '👥', label: 'Staff', path: '/staff/',
     blurb: 'Attendance, roles and sales commission' },
-  { key: 'pos:reports', icon: '📈', label: 'Shop Reports', path: '/reports/',
+  { key: 'pos:reports', icon: '📈', label: 'Store Reports', path: '/reports/',
     blurb: 'Sales, tax and low-stock registers' },
 ]
 
@@ -13962,6 +13970,20 @@ export default function App() {
     if (!here && tab === 'central' && !canCentral) setTab('pickwh')
   }, [here, tab, canCentral, homeTab])
 
+  // The stores this warehouse supplies, so the menu can call them by the names
+  // somebody gave them. Re-read when the warehouse changes — a store belongs to
+  // one building, and carrying Erode's branch name into Karur's menu would name
+  // the wrong shop. Failures are swallowed: an unreachable list costs a name,
+  // and the menu falls back to the plain word rather than disappearing.
+  const [stores, setStores] = useState([])
+  useEffect(() => {
+    if (!here?.id) { setStores([]); return }
+    let live = true
+    api.stores(here.id).then((rows) => { if (live) setStores(rows || []) })
+      .catch(() => { if (live) setStores([]) })
+    return () => { live = false }
+  }, [here?.id])
+
   const refreshStatus = useCallback(() => api.status().then(setStatus), [])
   const refresh = useCallback(() => api.listDocuments().then(setDocs), [])
 
@@ -14132,6 +14154,18 @@ export default function App() {
   const wanted = MODULES.find((m) => m.key === tab)
   const denied = wanted && wanted.min && !atLeast(role, wanted.min) ? wanted : null
 
+  // What this warehouse's selling side is actually CALLED. A store is created
+  // with a name — "Taqua shop Tirupur 1" — and that name is the one the person
+  // who typed it will look for. Naming the menu "POS" instead tells them what
+  // the software is rather than which place they are opening, and a warehouse
+  // that supplies two branches needs to know which of them it is billing from.
+  //
+  // One store: it IS the name. Several: the count, because no single name is
+  // the honest answer. None: the plain word, so the entry still reads as a
+  // place rather than as a piece of equipment.
+  const storeLabel = stores.length === 1 ? stores[0].name
+    : stores.length > 1 ? `Stores · ${stores.length}` : 'Store'
+
   if (!authChecked) return <div className="login-wrap"><div className="login-bg" /></div>
   if (!authed) return <LoginScreen onLogin={handleLogin} />
 
@@ -14233,8 +14267,12 @@ export default function App() {
         {here && <>
           <span className="navsep" aria-hidden="true" />
           <NavMenu tab={tab} setTab={setTab} items={POS_ITEMS}
-            icon="🛍" label="POS"
-            hint={`The shops ${here.name} supplies — billing, floor sales and shop stock`} />
+            icon="🛍" label={storeLabel}
+            hint={stores.length === 1
+              ? `${stores[0].name} — billing, floor sales and store stock`
+              : stores.length > 1
+                ? `The ${stores.length} stores ${here.name} supplies — ${stores.map((s) => s.name).join(', ')}`
+                : `The stores ${here.name} supplies — billing, floor sales and store stock`} />
         </>}
       </div>
 

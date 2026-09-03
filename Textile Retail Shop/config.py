@@ -38,7 +38,18 @@ class Config:
     TEMPLATES_AUTO_RELOAD = True
 
     # Business / GST defaults
-    SHOP_NAME = os.environ.get("SHOP_NAME", "Taqua Silks")
+    # The shop's own name, shown on its login screen, its chrome and its bills.
+    #
+    # The default is the generic word, NOT a business name. It used to be "Taqua
+    # Silks", which is one particular shop — so every other install of this
+    # software greeted its staff with somebody else's brand, and printed it on
+    # the login page of a store that had been given a perfectly good name of its
+    # own when it was created.
+    #
+    # Where the shop runs mounted inside the warehouse app, the mount replaces
+    # this with the STORE's real name (see backend/app/pos_mount). The
+    # environment still wins over both, for a standalone install.
+    SHOP_NAME = os.environ.get("SHOP_NAME", "Store")
     SHOP_ADDRESS = os.environ.get("SHOP_ADDRESS", "Municipal Office Rd, Noyyal, Tiruppur, Tamil Nadu 641604")
     SHOP_PHONE = os.environ.get("SHOP_PHONE", "+91 98765 43210")
     SHOP_GSTIN = os.environ.get("SHOP_GSTIN", "33ABCDE1234F1Z5")

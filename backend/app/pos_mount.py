@@ -50,6 +50,33 @@ def _seed_if_empty(pkg) -> None:
 POS_SCHEMA = "shop"
 
 
+def _single_store_name():
+    """The store's name, when this company has exactly one — else None.
+
+    The shop shows one `SHOP_NAME` for the whole mount, so it can only be
+    answered honestly when there IS one store. With several, naming one of them
+    on every store's login screen would be worse than the generic word: it would
+    be wrong on all but one, and wrong in a way that reads as authoritative.
+    Which entity a bill is actually raised as is decided at the till, per
+    counter, by the shop's own places.py.
+
+    Never raises. A store name is a nicety; a database that cannot be read at
+    import time must not stop the shop mounting.
+    """
+    try:
+        from .database import SessionLocal
+        from . import models
+        db = SessionLocal()
+        try:
+            rows = db.query(models.Store.name).filter(
+                models.Store.active.is_(True)).limit(2).all()
+            return rows[0][0] if len(rows) == 1 else None
+        finally:
+            db.close()
+    except Exception:                            # noqa: BLE001 — a name, not a dependency
+        return None
+
+
 def _isolate_shop_schema() -> None:
     """Keep the shop's tables out of the warehouse's, on Postgres.
 
@@ -112,6 +139,11 @@ def load_pos_app():
     if not POS_DIR.is_dir():
         raise FileNotFoundError(f"POS module not found at {POS_DIR}")
 
+    # Read BEFORE the package swap below: after it, `app` is the shop's package
+    # and `from .models import Store` would reach into the wrong one. The same
+    # trap app/places.py documents about its own hoisted imports.
+    store_name = _single_store_name()
+
     _isolate_shop_schema()
 
     ours = {k: v for k, v in sys.modules.items() if _is_ours(k)}
@@ -121,6 +153,18 @@ def load_pos_app():
     try:
         pkg = importlib.import_module("app")        # the shop's package
         flask_app = pkg.create_app()
+        # The shop's own name, taken from the STORE the warehouse created rather
+        # than from the shop's config default. Set before anything renders, so
+        # the login screen greets people with the name they gave the place
+        # instead of the brand that happened to be in the file.
+        #
+        # Only when the answer is unambiguous. `SHOP_NAME` is one value for the
+        # whole mount, and a company with several stores has no single right
+        # answer for it — naming one of them on every store's login screen would
+        # be worse than the generic word. Per-store billing identity is settled
+        # properly at the till, by the shop's own places.py.
+        if store_name:
+            flask_app.config["SHOP_NAME"] = store_name
         with flask_app.app_context():
             pkg.db.create_all()                     # first run: build the schema
             # The shop's categories are the warehouse master's, and its catalogue

@@ -560,6 +560,11 @@ export const api = {
 
   locationTree: () => fetch('/api/locations')
     .then(r => { if (!r.ok) throw Object.assign(new Error(String(r.status)), { status: r.status }); return r.json() }),
+  // The stores one warehouse supplies. Used by the chrome to call the selling
+  // side by the name somebody gave it rather than "POS", so the menu names a
+  // place instead of a piece of equipment.
+  stores: (warehouse_id) => fetch('/api/locations/stores'
+    + qs(warehouse_id ? { warehouse_id } : {})).then(J),
   // The type vocabulary and the company list the location form picks from, read
   // from the server rather than repeated here — see the endpoint's own note.
   locationFormOptions: () => fetch('/api/locations/form-options').then(J),
