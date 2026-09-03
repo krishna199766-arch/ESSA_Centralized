@@ -206,6 +206,17 @@ a { color: var(--brand); text-underline-offset: 2px; }
    cost no layout and must not be reachable by tab key. */
 .tabpane { flex: 1; min-width: 0; min-height: 0; display: flex; }
 .tabpane[hidden] { display: none; }
+/* THE PANE MUST NOT LET ITS MODULE PUSH THE PAGE WIDE.
+   `.app` is a COLUMN flex, so a module used to be a cross-axis child and was
+   stretched to the window. Inside `.tabpane` it is a MAIN-axis child of a row,
+   where the default `min-width: auto` means "never shrink below your content" —
+   so one wide table (the invoice review's line grid) made `.body` wider than
+   the window and the whole page scrolled sideways, chrome and all.
+   `.body` sets no min-width of its own; it only hands one to its children
+   (see `.body > *:not(.sidebar)` further down). This is that same rule, one
+   level up, and it is what keeps wide content scrolling inside its own
+   container instead of taking the page with it. */
+.tabpane > * { min-width: 0; }
 /* On a narrow window the gutter is the first thing that should give: 22px of
    air either side of a 360px phone screen is 12% of the window spent on
    nothing. It shrinks, but it stays ONE number, so the screens stay aligned
