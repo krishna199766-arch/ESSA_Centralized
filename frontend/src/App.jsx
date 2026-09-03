@@ -13812,24 +13812,64 @@ export default function App() {
   // the open tab survives a reload — a warehouse screen is left on the module
   // someone works in, and losing it on every refresh is a small daily tax
   const [tab, setTabState] = useState(() => localStorage.getItem('essa_tab') || 'dashboard')
-  // Which keep-alive modules are open besides the active one. Remembered across
-  // a reload for the same reason the active tab is: someone with an order half
-  // typed and the till open should find both where they left them.
-  const [openTabs, setOpenTabs] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('essa_open_tabs') || '[]').filter(keepAlive) }
-    catch { return [] }
+  // ------------------------------------------------------------------------
+  //  Open tabs belong to ONE WAREHOUSE, and are kept per warehouse
+  //  ----------------------------------------------------------------------
+  //  Every screen a tab can hold is one building's work: an order raised at
+  //  Erode, a consignment booked in at Erode, a GRN counted at Erode. Carrying
+  //  that set of tabs into Karur would be offering somebody the shape of a job
+  //  they were doing somewhere else — and the tab would open empty anyway,
+  //  because the content is keyed on the warehouse and remounts when it changes.
+  //
+  //  So the store is a MAP, warehouse id -> open tabs, and each building keeps
+  //  its own strip. Walk out of Erode mid-order and into Karur and Karur's
+  //  strip is whatever Karur had; walk back and Erode's tabs are as they were.
+  //
+  //  Held as a map rather than one list per key so a single read and a single
+  //  write cover every warehouse — a key per building would need a migration
+  //  every time one was added, and would leak keys for buildings since closed.
+  const [openByWh, setOpenByWh] = useState(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('essa_open_tabs') || '{}')
+      // An earlier build stored a flat ARRAY for the whole session. There is no
+      // way to know which warehouse those tabs belonged to, and guessing would
+      // put one building's work in another's strip — the exact fault this shape
+      // fixes. Dropped instead: a tab costs one click to reopen.
+      if (!raw || Array.isArray(raw) || typeof raw !== 'object') return {}
+      const out = {}
+      for (const [wh, list] of Object.entries(raw)) {
+        if (Array.isArray(list)) out[wh] = list.filter(keepAlive)
+      }
+      return out
+    } catch { return {} }
   })
+  // Which warehouse this session is working INSIDE, or null for the whole
+  // company. Every API call carries it as a header (see api.js), so the screens
+  // below need no per-screen plumbing — but they DO need to refetch when it
+  // changes, which is what keying the content on `here.id` achieves: React
+  // remounts them and each one loads its own data again. Anything subtler would
+  // leave one screen showing the warehouse you just left.
+  const [here, setHere] = useState(() => warehouse.get())
+
+  //: Which building's strip is on screen. `company` is a real key rather than a
+  //: skipped case so the code has one shape — nothing keep-alive is reachable at
+  //: company level, so that list stays empty and the strip never draws there.
+  const whKey = here?.id ? String(here.id) : 'company'
+  const openTabs = openByWh[whKey] || []
   const rememberOpen = (list) => {
-    setOpenTabs(list)
-    try { localStorage.setItem('essa_open_tabs', JSON.stringify(list)) } catch { /* private mode */ }
+    const next = { ...openByWh, [whKey]: list }
+    if (!list.length) delete next[whKey]      // don't keep empty buildings around
+    setOpenByWh(next)
+    try { localStorage.setItem('essa_open_tabs', JSON.stringify(next)) }
+    catch { /* private mode */ }
   }
   const setTab = (t) => {
     setTabState(t)
     try { localStorage.setItem('essa_tab', t) } catch { /* private mode */ }
-    // Opening a keep-alive screen adds it to the strip. Everything else leaves
-    // the strip alone — a report opened between two half-finished jobs must not
-    // push either of them out or grow the strip with something nobody will
-    // return to.
+    // Opening a keep-alive screen adds it to THIS warehouse's strip. Everything
+    // else leaves the strip alone — a report opened between two half-finished
+    // jobs must not push either of them out or grow the strip with something
+    // nobody will return to.
     if (keepAlive(t) && !openTabs.includes(t)) rememberOpen([...openTabs, t])
   }
   // `alive` — which tabs are mounted right now — is computed BELOW, beside
@@ -13850,13 +13890,6 @@ export default function App() {
     // tab is the least surprising place; the dashboard when there is none.
     if (k === tab) setTab(left[left.length - 1] || (here ? 'dashboard' : homeTab))
   }
-  // Which warehouse this session is working INSIDE, or null for the whole
-  // company. Every API call carries it as a header (see api.js), so the screens
-  // below need no per-screen plumbing — but they DO need to refetch when it
-  // changes, which is what keying the content on `here.id` achieves: React
-  // remounts them and each one loads its own data again. Anything subtler would
-  // leave one screen showing the warehouse you just left.
-  const [here, setHere] = useState(() => warehouse.get())
   const enterWarehouse = (w) => {
     // The dashboard's rows key their id as `warehouse_id`, the Locations tree as
     // `id`. Normalised here so callers can hand over whichever row they have

@@ -853,10 +853,25 @@ are trained to click through the question.
 mobile answer: it stays one line whatever is open, so it cannot grow into the
 room the scanner, the camera and the forms need.
 
+**A strip belongs to a building.** Every screen a tab can hold is one
+warehouse's work — an order raised at Erode, a consignment booked in at Erode, a
+GRN counted at Erode — so the store is a map, warehouse id → open tabs, and each
+building keeps its own strip. Walk out of Erode mid-order into Karur and Karur's
+strip is whatever Karur had; walk back and Erode's tabs are as they were.
+Carrying one building's tabs into another would offer somebody the shape of a job
+they were doing somewhere else, and the tab would open empty anyway.
+
+At company level the strip does not draw at all, which falls out of the same
+rule rather than being a special case: `alive` is filtered through the very
+`modules` list the menu is built from, so it can never offer a screen the menu
+hides — including one this *account* is not granted. Nothing keep-alive is
+reachable above a warehouse, so the list up there is empty.
+
 What this does **not** do is preserve state across a warehouse change. Switching
 warehouses still remounts everything (§ the `key` on the content fragment), and
 that stays true: the screens are showing one building's work, and a kept tab
-across that boundary would be showing the warehouse you just left.
+across that boundary would be showing the warehouse you just left. The tabs come
+back; their contents are freshly loaded.
 
 ## 9. The remaining modules
 
