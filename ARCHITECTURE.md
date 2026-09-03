@@ -729,6 +729,34 @@ with no totals to tie to would only teach people to ignore the flags. Field path
 come back in the same dotted `lines.0.amount` form the invoice review uses, so
 one highlighting convention serves both screens.
 
+**Dictating an order.** The order form carries the same microphone the masters
+do, and for the same reason: a header is a dozen short values, and saying them in
+one breath beats tabbing through boxes. It reuses `MasterDictate` and
+`voicefill.js` whole — English is matched in the browser against the form's own
+labels, instantly and for nothing; Tamil goes to the server.
+
+What is new is that a purchase order is **not a master record** and was not given
+a fake one. `voice_form.fill_fields` takes an explicit field list, so the form
+hands over its own fields and the labels stay in exactly one place — it renders
+from them and dictates against them, and there is no second copy on the server to
+fall out of step the first time a field is renamed. Both routes end in
+`_understand`, so the prompt and the coercion cannot drift between the two
+screens.
+
+Three mappings in `poDictateDef` are load-bearing. A `combo` becomes **text**,
+not `select`: a select's value is dropped when it is not in the list, which would
+silently discard a new supplier's name — the very thing a combo exists to allow.
+A `date` is **absent**: picked, never dictated, because a misheard date is a
+plausible wrong date. And the read-only PO number is absent because it is
+allocated on save.
+
+One consequence is worth stating, because it is invisible until it bites:
+voicefill folds the transcript to lower case before matching, so a dictated value
+arrives lower case. The purchase order route therefore matches an existing
+supplier **case-insensitively** before creating one — otherwise a spoken
+"supplier matoshree" would file a second Matoshree beside the real one, and two
+spellings of one vendor is precisely what a supplier master exists to prevent.
+
 ## 9. The remaining modules
 
 The same canonical shape and the inventory ledger extend to the rest of the

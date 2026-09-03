@@ -6015,6 +6015,39 @@ const PO_FORM_RIGHT = [
 const PO_FORM_KEYS = [...PO_FORM_LEFT, ...PO_FORM_RIGHT]
   .filter(([, , t]) => t !== 'ro').map(([k]) => k)
 
+// The same form, described the way voicefill.js wants it — so one sentence can
+// fill several boxes ("supplier Matoshree brand ESSA item frocks discount 5").
+//
+// BUILT FROM THE FORM'S OWN SPECS, never written out again. That is the whole
+// mechanism voicefill.js relies on: the labels are the grammar, so a field
+// renamed on the form is renamed in the grammar at the same moment, and a field
+// added is dictatable the moment it exists.
+//
+// Three kinds are left out, each for a reason:
+//   * `ro` — the PO number is allocated on save; there is nothing to dictate.
+//   * `date` — picked, never dictated. The masters do the same, and for the same
+//     reason: a misheard date is a plausible wrong date, which is the worst kind.
+//   * `po` — the order picker on the LR form, which is an id, not a phrase.
+// A `combo` becomes `text`, not `select`: its list is a suggestion, and a select
+// whose value is not in the list is DROPPED — which would silently discard a new
+// supplier's name, the very thing a combo exists to allow.
+const poDictateDef = (opts, lists) => ({
+  key: 'purchase_order',
+  label: 'Purchase Order',
+  plainForm: true,
+  groups: [{
+    title: 'Order',
+    fields: [...PO_FORM_LEFT, ...PO_FORM_RIGHT]
+      .filter(([, , type]) => !['ro', 'date', 'po'].includes(type))
+      .map(([key, label, type, o = {}]) => {
+        const field = { key, label, type: type === 'combo' || type === 'area' ? 'text' : type }
+        const choices = o.fixed || (o.list ? (opts[o.list] || []) : (lists[o.src] || []))
+        if (type === 'select' && choices.length) field.options = choices
+        return field
+      }),
+  }],
+})
+
 //: The line grid. `amount` is derived from qty x rate as you type, but stays
 //: editable — a buyer who types an agreed line total has agreed that total, and
 //: the server keeps whatever is actually sent.
@@ -6136,6 +6169,9 @@ function POForm({ editing, extracted, lists, opts, onDone, onCancel, toast }) {
   // own boxes would be inventing doubt.
   const flags = extracted?.field_flags || {}
   const warnings = extracted?.warnings || []
+  // Rebuilt when the dropdown vocabularies arrive, so a supplier added a moment
+  // ago is a word the dictation knows.
+  const dictateDef = useMemo(() => poDictateDef(opts, lists), [opts, lists])
 
   const readOnly = !!editing && editing.editable === false
   // Shown live rather than only after a save, because the discount is the figure
@@ -6169,6 +6205,15 @@ function POForm({ editing, extracted, lists, opts, onDone, onCancel, toast }) {
       title={editing?.id ? `Order ${editing.po_no}`
         : extracted ? 'Review what was read' : 'New purchase order'}
       actions={<>
+        {/* Dictation fills boxes; it never saves. A spoken sentence lands in the
+            form and the person presses Save, exactly as the OCR path does — the
+            same rule, because both are input methods and neither is a decision. */}
+        {!readOnly && <MasterDictate def={dictateDef} data={form} toast={toast}
+          onFills={(fills) => setForm((f) => {
+            const next = { ...f }
+            fills.forEach(({ field, value }) => { next[field.key] = value })
+            return next
+          })} />}
         {!readOnly && <button className="btn primary" disabled={busy} onClick={save}>
           {busy ? 'Saving…' : extracted ? 'Confirm & save' : 'Save'}</button>}
         <button className="btn" onClick={onCancel}>Close</button>
@@ -7076,8 +7121,16 @@ function MasterDictate({ def, data, onFills, toast }) {
     setHeard({ text, working: true })
     setBusy(true)
     try {
-      const r = await api.voiceFill(def.key, text, null, spokenLang)
       const targets = dictationTargets(def)
+      // A form that is not a master record sends its OWN fields — see
+      // api.voiceFillForm. Everything after this line is identical for both,
+      // which is the point: one dictation control, one set of behaviours.
+      const r = def.plainForm
+        ? await api.voiceFillForm(
+            targets.map((f) => ({ key: f.key, label: f.label, type: f.type,
+                                  options: f.options })),
+            text, { label: def.label, language: spokenLang })
+        : await api.voiceFill(def.key, text, null, spokenLang)
       const fills = Object.entries(r.fills || {})
         .map(([key, value]) => ({ field: targets.find((f) => f.key === key), value }))
         .filter((x) => x.field)

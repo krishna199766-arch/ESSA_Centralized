@@ -726,6 +726,15 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ master, transcript, fields, language }) })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('v'), { detail: j.detail }); return j }),
+  // The same understanding, for a form that is not a master record — the
+  // purchase order. The form sends its OWN fields, which is what keeps the
+  // labels in one place: it renders from them and dictates against them, with no
+  // second copy on the server to drift the first time one is renamed.
+  voiceFillForm: (form_fields, transcript, { label, only, language } = {}) =>
+    fetch('/api/voice/fill-form', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ form_fields, transcript, label, only, language }) })
+      .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('v'), { detail: j.detail }); return j }),
 
   // reports. Each catalogue entry declares the filters it accepts (`params`);
   // the server drops anything a given report doesn't take, so both calls can

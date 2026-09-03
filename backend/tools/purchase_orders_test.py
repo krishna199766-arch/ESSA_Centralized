@@ -211,6 +211,26 @@ r = client.patch("/api/lr/%d" % imported[1]["id"], headers=H,
 eq("but not to an unconfirmed one, even from the grid", r.status_code, 400)
 
 # ===========================================================================
+head("a supplier named on an order joins the master, once")
+
+mk(supplier_name="Kamatchi Textiles")
+
+
+def suppliers_named(name):
+    return [s for s in client.get("/api/suppliers", headers=H).json()
+            if (s.get("name") or "").lower() == name.lower()]
+
+
+eq("a new supplier is filed from the order", len(suppliers_named("Kamatchi Textiles")), 1)
+mk(supplier_name="Kamatchi Textiles")
+eq("and not filed twice", len(suppliers_named("Kamatchi Textiles")), 1)
+# Voice hands back what it heard in lower case (see frontend voicefill.js), so
+# this is the spelling a dictated order actually arrives with.
+mk(supplier_name="kamatchi textiles")
+eq("nor again under a different case — one vendor, one row",
+   len(suppliers_named("Kamatchi Textiles")), 1)
+
+# ===========================================================================
 head("reading a photographed order — and NOT saving it")
 
 from backend.app.services import po_extract                       # noqa: E402

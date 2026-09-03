@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import models
@@ -209,9 +210,19 @@ def create_order(body: POIn, db: Session = Depends(get_db),
     # joins the master exactly as one typed on an LR entry does. Without this the
     # first order to a new vendor leaves their name on the document and nowhere
     # else, and the invoice that follows cannot be matched to them.
+    #
+    # Matched case-INSENSITIVELY, which an exact comparison would not do. The
+    # dictation path makes this concrete: voicefill hands back what was heard in
+    # lower case, so "supplier matoshree" spoken into the form would otherwise
+    # file a second Matoshree beside the one already there — and two spellings of
+    # one vendor is exactly what a supplier master exists to prevent. The name is
+    # stored as it was given; only the LOOKUP ignores case.
     name = (po.supplier_name or "").strip()
-    if name and not db.query(models.Supplier).filter(models.Supplier.name == name).first():
-        db.add(models.Supplier(name=name))
+    if name:
+        known = db.query(models.Supplier).filter(
+            func.lower(models.Supplier.name) == name.lower()).first()
+        if not known:
+            db.add(models.Supplier(name=name))
 
     db.commit()
     db.refresh(po)

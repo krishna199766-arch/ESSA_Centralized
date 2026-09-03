@@ -660,6 +660,7 @@ for production), `ESSA_COMPANY_GSTIN`, `ESSA_COMPANY_NAME`.
 | POST | `/api/purchase-orders` · PATCH `/{id}` | raise an order / amend one still open |
 | POST | `/api/purchase-orders/{id}/status` | draft → pending → confirmed, or cancel |
 | POST | `/api/purchase-orders/extract` | read a photographed order → **draft only**, saves nothing |
+| POST | `/api/voice/fill-form` | dictate into a form that is not a master record |
 | POST | `/api/documents/upload` | upload → detect supplier → extract → draft |
 | GET | `/api/documents` | list documents |
 | GET | `/api/documents/{id}` | document + extraction + history |

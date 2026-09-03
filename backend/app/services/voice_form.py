@@ -130,6 +130,65 @@ def _coerce(field, value):
     return text
 
 
+#: A field spec a caller may hand over directly, for a form that is not a master
+#: record. Anything outside this is dropped — the prompt is built from it, and a
+#: key nobody recognises would come back as a fill for a box that does not exist.
+_FORM_KEEP = ("key", "label", "type", "options")
+_FORM_TYPES = {"text", "num", "money", "select", "multiselect", "check", "area"}
+
+
+def clean_fields(fields):
+    """A client-supplied field list, reduced to what this module will act on.
+
+    The purchase order form is not a master record — it has no `MasterDefinition`
+    and never will, because it is not a list somebody maintains. Rather than
+    inventing a fake master for it, the form hands over its own fields and this
+    is where they are made safe: unknown types become text, options are strings,
+    and anything without a key and a label is dropped. Nothing here is written to
+    the database, so the worst a bad spec can do is produce a poor answer to the
+    caller that sent it.
+    """
+    out = []
+    for raw in (fields or []):
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or "").strip()
+        label = str(raw.get("label") or "").strip()
+        if not key or not label:
+            continue
+        ftype = str(raw.get("type") or "text").strip()
+        field = {"key": key, "label": label,
+                 "type": ftype if ftype in _FORM_TYPES else "text"}
+        opts = [str(o).strip() for o in (raw.get("options") or []) if str(o).strip()]
+        if opts:
+            field["options"] = opts[:200]     # a dropdown, not a whole master
+        out.append(field)
+    return out[:120]                          # a form, not a database dump
+
+
+def fill_fields(fields, transcript, only=None, label="Form"):
+    """The same understanding, over a field list the caller supplies.
+
+    This is what the purchase order form uses. `fill` below is the master-record
+    route and is unchanged; both end in `_understand`, so the prompt, the rules
+    and the coercion cannot drift between the two screens.
+    """
+    said = (transcript or "").strip()
+    if not said:
+        return {"fills": {}, "reason": "nothing was said"}
+    if not available():
+        return {"fills": {}, "reason": "no-key", "english": None, "unused": said}
+    spec_all = clean_fields(fields)
+    if not spec_all:
+        return {"fills": {}, "reason": "no dictatable fields"}
+    keep = set(only) if only else None
+    spec = [f for f in spec_all
+            if (keep is None or f["key"] in keep) and f["type"] != "date"]
+    if not spec:
+        return {"fills": {}, "reason": "no dictatable fields"}
+    return _understand(label, spec, {f["key"]: f for f in spec_all}, said, only)
+
+
 def fill(master_key, transcript, only=None):
     """{fills, english, unused, reason} for one spoken sentence.
 
@@ -150,11 +209,22 @@ def fill(master_key, transcript, only=None):
     if not spec:
         return {"fills": {}, "reason": "no dictatable fields"}
 
+    return _understand(master.get("label", master_key), spec,
+                       {f["key"]: f for f in master_defs.fields(master)}, said, only)
+
+
+def _understand(form_label, spec, by_key, said, only):
+    """One model call, and the coercion of what comes back.
+
+    Shared by both routes in deliberately: the rules in SYSTEM are the valuable
+    part, and a second copy of this loop is how the purchase order form would
+    quietly start behaving differently from the masters.
+    """
     client, model = translate._client()
     if client is None:
         return {"fills": {}, "reason": "no-key", "unused": said}
 
-    ask = (f"Form: {master.get('label', master_key)}\n"
+    ask = (f"Form: {form_label}\n"
            f"Fields:\n{json.dumps(spec, ensure_ascii=False)}\n\n"
            f"Spoken sentence:\n{said}")
     if only:
@@ -176,7 +246,6 @@ def fill(master_key, transcript, only=None):
         return {"fills": {}, "reason": f"could not be understood ({exc.__class__.__name__})",
                 "unused": said}
 
-    by_key = {f["key"]: f for f in master_defs.fields(master)}
     fills, dropped = {}, []
     for key, value in (data.get("fills") or {}).items():
         field = by_key.get(key)
