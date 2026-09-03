@@ -6474,6 +6474,241 @@ function PurchaseOrdersView({ toast }) {
   )
 }
 
+// ==========================================================================
+//  Stock Audit — the desk half of a count
+//  ------------------------------------------------------------------------
+//  The counting happens on a phone at the rack (backend/app/mobile), and this
+//  is deliberately NOT a second copy of that screen. A desk answers different
+//  questions: what did this count find, what is still missing, and what did the
+//  last one say. So the phone gets one big scan button and this gets the
+//  register — the running report of §8 and the history of §16.
+//
+//  It still takes a code, because a desk has a hardware scanner on a cable and
+//  a keyboard, and refusing the reading it can already produce would be a
+//  screen that watches other people work.
+//
+//  Nothing here moves stock. See services/stock_audit for why that is a rule.
+// ==========================================================================
+const AUDIT_TONE = { available: 'ok', not_available: 'danger', unknown: 'warn' }
+const AUDIT_BADGE = { available: 'confirmed', not_available: 'cancelled', unknown: 'pending' }
+
+function StockAuditView({ toast }) {
+  const [session, setSession] = useState(undefined)   // undefined = not asked yet
+  const [past, setPast] = useState([])
+  const [viewing, setViewing] = useState(null)        // a closed count being read
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [filter, setFilter] = useState('all')
+  const [last, setLast] = useState(null)
+  const box = useRef(null)
+
+  const loadPast = useCallback(() => api.auditList().then(setPast).catch(() => {}), [])
+  useEffect(() => {
+    api.auditCurrent().then(setSession).catch(() => setSession(null))
+    loadPast()
+  }, [loadPast])
+
+  const shown = viewing || session
+  const rows = (shown?.scans || []).filter((s) => filter === 'all' || s.result === filter)
+
+  const start = async () => {
+    setBusy(true)
+    try {
+      const s = await api.auditOpen()
+      setSession(s); setViewing(null); loadPast()
+      toast(`${s.code} open${s.warehouse ? ' · ' + s.warehouse : ''}`, 'ok')
+    } catch (e) { toast(e.detail || 'Could not start a count', 'err') }
+    finally { setBusy(false) }
+  }
+  const finish = async () => {
+    if (!session) return
+    if (!window.confirm(`Close ${session.code}? Its readings become a record and it takes no more scans.`)) return
+    try {
+      await api.auditClose(session.id)
+      setSession(null); loadPast(); toast('Count closed', 'ok')
+    } catch (e) { toast(e.detail || 'Could not close the count', 'err') }
+  }
+  const submit = async (raw) => {
+    const c = (raw ?? code).trim()
+    if (!c || !session) return
+    setCode('')
+    try {
+      const r = await api.auditScan(session.id, c)
+      setSession(await api.auditGet(session.id))
+      setLast({ ...r.scan, duplicate: r.duplicate })
+      // A hardware scanner fires one code after another; the box has to be ready
+      // for the next without anybody reaching for the mouse.
+      box.current?.focus()
+    } catch (e) { toast(e.detail || 'That scan could not be recorded', 'err') }
+  }
+  const drop = async (s) => {
+    if (!session) return
+    try {
+      await api.auditDropScan(session.id, s.id)
+      setSession(await api.auditGet(session.id))
+      if (last?.id === s.id) setLast(null)
+    } catch (e) { toast(e.detail || 'Could not remove that reading', 'err') }
+  }
+
+  const t = shown?.totals || {}
+  return (
+    <div className="screen">
+      <div className="pagehead">
+        <h2>Stock Audit</h2>
+        <span className="small pagesub">
+          What the shelf holds against what the books say. Counting never changes
+          stock — a correction is made deliberately, in Inventory.</span>
+        <div style={{ flex: 1 }} />
+        {session
+          ? <button className="btn" onClick={finish}>Close {session.code}</button>
+          : <button className="btn primary" disabled={busy} onClick={start}>+ Start a count</button>}
+      </div>
+      <div className="screenbody">
+        {session === undefined && <div className="empty">Reading the register…</div>}
+
+        {session && !viewing && (
+          <Section id="audit-scan" title={`${session.code} · counting${session.warehouse ? ' · ' + session.warehouse : ''}`}>
+            <div className="row" style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+              <div className="field" style={{ flex: 1, maxWidth: 420 }}>
+                <label>Scan or type a tag</label>
+                <input ref={box} value={code} autoFocus
+                  placeholder="product QR, piece code, carton label, barcode or SKU"
+                  onChange={(e) => setCode(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submit() }} />
+              </div>
+              <button className="btn primary" onClick={() => submit()}>Record</button>
+            </div>
+            {last && (
+              // The verdict on the reading just taken, coloured AND worded — the
+              // same rule the phone screen keeps, and for the same reason.
+              <div className={'warnbox ' + (last.result === 'available' ? 'clean' : '')}
+                style={{ marginTop: 14, borderLeft: `4px solid var(--${AUDIT_TONE[last.result]})` }}>
+                <h4 style={{ color: `var(--${AUDIT_TONE[last.result]})` }}>
+                  {last.result === 'available' ? '🟢' : last.result === 'not_available' ? '🔴' : '🟡'} {last.label}
+                  {last.duplicate && <span className="small" style={{ float: 'right' }}>
+                    already counted — not counted twice</span>}
+                </h4>
+                <p className="small" style={{ marginTop: 4 }}>
+                  {last.product_name || <span>Nothing matches <code>{last.code}</code>.</span>}
+                  {last.sku ? ` · ${last.sku}` : ''}
+                  {last.stock_qty != null ? ` · stock ${last.stock_qty}` : ''}
+                  {last.location ? ` · at ${last.location}` : ''}
+                  {last.result === 'unknown'
+                    && ' Product not found — check the physical stock or the product master.'}
+                </p>
+              </div>
+            )}
+          </Section>
+        )}
+
+        {!session && !viewing && (
+          <div className="empty" style={{ marginTop: 24, maxWidth: 560 }}>
+            No count in progress. Start one here, or scan from the phone — both
+            write to the same register, so a count begun at the rack is finished
+            at the desk.
+          </div>
+        )}
+
+        {shown && (
+          <Section id="audit-report"
+            title={`${viewing ? viewing.code + ' · closed' : 'Running report'} · ${t.scanned || 0} scanned`}
+            actions={viewing
+              ? <button className="btn" onClick={() => setViewing(null)}>Back</button>
+              : null}>
+            <div className="toolbar">
+              <FilterChips value={filter} onChange={setFilter} options={[
+                ['all', 'All', t.scanned || 0, 'Every reading in this count'],
+                ['available', 'Available', t.available || 0, 'Found on the shelf'],
+                ['not_available', 'Not available', t.not_available || 0, 'The system holds none here'],
+                ['unknown', 'Not found', t.unknown || 0, 'The tag matches no product — a master-data problem, not a shelf one'],
+              ]} />
+            </div>
+            {rows.length === 0
+              ? <div className="empty" style={{ marginTop: 20 }}>
+                  {t.scanned ? 'Nothing matches that filter.' : 'Nothing counted yet.'}</div>
+              : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="items">
+                    <thead><tr>
+                      <th style={{ width: 180 }}>QR / Code</th>
+                      <th>Product</th>
+                      <th style={{ width: 120 }}>SKU</th>
+                      <th style={{ width: 80, textAlign: 'right' }}>Stock</th>
+                      <th style={{ width: 110 }}>Location</th>
+                      <th style={{ width: 120 }}>Status</th>
+                      <th style={{ width: 90 }}>By</th>
+                      {!viewing && <th style={{ width: 34 }}></th>}
+                    </tr></thead>
+                    <tbody>
+                      {rows.map((s) => (
+                        <tr key={s.id}>
+                          <td><code>{s.code}</code>
+                            {(s.times_seen || 1) > 1 && <span className="small"> · seen {s.times_seen}×</span>}</td>
+                          <td>{s.product_name || <span className="small">— no product —</span>}</td>
+                          <td>{s.sku || <span className="small">—</span>}</td>
+                          <td style={{ textAlign: 'right' }}>{s.stock_qty ?? <span className="small">—</span>}</td>
+                          <td>{s.location || <span className="small">—</span>}</td>
+                          <td><span className={'badge ' + AUDIT_BADGE[s.result]}>{s.label}</span></td>
+                          <td className="small">{s.scanned_by || '—'}</td>
+                          {!viewing && (
+                            <td><button className="rowdel" title="Remove this reading"
+                              onClick={() => drop(s)}>×</button></td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+          </Section>
+        )}
+
+        <Section id="audit-history" title={`Past counts · ${past.length}`} defaultOpen={!session}>
+          {past.length === 0
+            ? <div className="empty" style={{ marginTop: 16 }}>No counts recorded yet.</div>
+            : (
+              <div style={{ overflowX: 'auto' }}>
+                <table className="items">
+                  <thead><tr>
+                    <th style={{ width: 110 }}>Count</th>
+                    <th style={{ width: 130 }}>Started</th>
+                    <th style={{ width: 110 }}>By</th>
+                    <th style={{ width: 80, textAlign: 'right' }}>Scanned</th>
+                    <th style={{ width: 90, textAlign: 'right' }}>Available</th>
+                    <th style={{ width: 110, textAlign: 'right' }}>Not available</th>
+                    <th style={{ width: 90 }}>Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {past.map((s) => (
+                      <tr key={s.id} style={{ cursor: 'pointer' }}
+                        onClick={async () => {
+                          try { setViewing(await api.auditGet(s.id)) }
+                          catch { toast('Could not open that count', 'err') }
+                        }}>
+                        <td><b>{s.code}</b></td>
+                        {/* fmtDate, not readableDate: started_at is a stored
+                            timestamp, and fmtDate is the one display helper that
+                            knows a date with a time bolted on is still a date. */}
+                        <td>{fmtDate(s.started_at)}</td>
+                        <td>{s.started_by || '—'}</td>
+                        <td style={{ textAlign: 'right' }}>{s.totals?.scanned ?? 0}</td>
+                        <td style={{ textAlign: 'right' }}>{s.totals?.available ?? 0}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          {(s.totals?.not_available ?? 0) + (s.totals?.unknown ?? 0)}</td>
+                        <td><span className={'badge ' + (s.status === 'open' ? 'pending' : 'posted')}>
+                          {s.status}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+        </Section>
+      </div>
+    </div>
+  )
+}
+
 function LREntryView({ toast }) {
   const [rows, setRows] = useState([])
   const [docId, setDocId] = useState(null)
@@ -12525,6 +12760,11 @@ const MODULES = [
   // Beside Inventory because it is a question about the same stock, asked from
   // the other end: not what we hold, but what THIS ONE is.
   { key: 'locator', icon: '🔎', label: 'Item Locator', blurb: 'Scan any tag — what it is, where it came from, where it is, where it went' },
+  // Beside the Locator because both start with a scanned tag. The Locator asks
+  // "what is this one thing"; the audit asks "is everything where we think it
+  // is" — one item against its whole history, or the whole shelf against the
+  // books. The counting itself is done on the phone at the rack.
+  { key: 'stock_audit', icon: '📋', label: 'Stock Audit', blurb: 'Count the shelf against the books — the running report and past counts' },
   { key: 'deadstock', icon: '🧊', label: 'Dead Stock & Clearance', blurb: 'Stock nobody is buying, the discount ladder, and whether the clearance worked', min: 'admin' },
   // Design and printing are two entries because they are two jobs, and they are
   // also two roles: the designer is opened when a new roll of label stock is
@@ -13504,10 +13744,16 @@ function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStoc
 //    lr                a consignment half keyed
 //    documents         an invoice being reviewed against its photograph
 //    purchases         a GRN being counted, with breakdowns entered
+//    stock_audit       a count in progress. The readings themselves are on the
+//                      server, so those survive regardless — what is kept here
+//                      is the filter and the place in a long register, which is
+//                      exactly what somebody loses by stepping away to the till
+//                      halfway through a rack.
 //
 //  Everything else — reports, masters, dashboards, locations — is read, acted
 //  on and left. Re-opening one costs a fetch, which is what it costs today.
-const KEEPALIVE = new Set(['purchase_orders', 'lr', 'documents', 'purchases'])
+const KEEPALIVE = new Set(['purchase_orders', 'lr', 'documents', 'purchases',
+                           'stock_audit'])
 const keepAlive = (k) => KEEPALIVE.has(k) || String(k).startsWith('pos:')
 
 // Which open tabs hold work somebody has not saved. A registry rather than a
@@ -14051,6 +14297,8 @@ export default function App() {
         <LabelDesigner toast={toast} role={role} />
       ) : k === 'locator' ? (
         <ItemLocator toast={toast} />
+      ) : k === 'stock_audit' ? (
+        <StockAuditView toast={toast} />
       ) : k === 'labelprint' ? (
         <LabelPrinting toast={toast} />
       ) : k === 'outward' ? (

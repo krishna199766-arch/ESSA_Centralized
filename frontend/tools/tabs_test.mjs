@@ -65,7 +65,7 @@ head('and only the ones that hold unfinished work');
 // Each of these is a screen somebody can be halfway through: an order half
 // typed, a consignment half keyed, an invoice being read against its
 // photograph, a receipt being counted.
-['purchase_orders', 'lr', 'documents', 'purchases'].forEach((k) => {
+['purchase_orders', 'lr', 'documents', 'purchases', 'stock_audit'].forEach((k) => {
   eq(`${k} is kept`, keepAlive(k), true);
 });
 

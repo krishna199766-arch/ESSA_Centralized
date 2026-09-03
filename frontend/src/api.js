@@ -619,6 +619,30 @@ export const api = {
   // nothing — the form fills itself from it, the person corrects it, and the
   // ordinary poCreate above is what writes the order. Asked about first, so the
   // button can say why it is not there rather than failing on a press.
+  // ------------------------------------------------------------------------
+  //  Stock audit — counting the shelf against the books
+  //  ----------------------------------------------------------------------
+  //  `auditScan` is one round trip on purpose: it returns the finding AND the
+  //  new tally, because the phone this is shared with runs on warehouse wifi
+  //  and a screen needing three calls per scan would feel broken long before it
+  //  actually was.
+  // ------------------------------------------------------------------------
+  auditCurrent: () => fetch('/api/stock-audit/current').then(J),
+  auditList: () => fetch('/api/stock-audit').then(J),
+  auditGet: (id) => fetch(`/api/stock-audit/${id}`).then(J),
+  auditOpen: (note) => fetch('/api/stock-audit/open', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: note || null }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('audit'), { detail: j.detail }); return j }),
+  auditScan: (id, code) => fetch(`/api/stock-audit/${id}/scan`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('audit'), { detail: j.detail }); return j }),
+  auditClose: (id) => fetch(`/api/stock-audit/${id}/close`, { method: 'POST' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('audit'), { detail: j.detail }); return j }),
+  auditDropScan: (id, scanId) => fetch(`/api/stock-audit/${id}/scans/${scanId}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('audit'), { detail: j.detail }); return j }),
+
   poExtractStatus: () => fetch('/api/purchase-orders/extract/status').then(J),
   poExtract: (file) => { const fd = new FormData(); fd.append('file', file)
     return fetch('/api/purchase-orders/extract', { method: 'POST', body: fd })

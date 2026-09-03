@@ -790,6 +790,16 @@ under warehouse lighting and must never depend on telling two pastels apart.
 repeat bumps `times_seen` and comes back flagged, so the screen says "already
 counted" instead of the register quietly growing a second row for one garment.
 
+**Two screens, two questions.** The counting happens on a phone at the rack; the
+desktop `StockAuditView` is deliberately not a second copy of it. A desk asks
+different things — what did this count find, what is still missing, what did the
+last one say — so the phone gets one thumb-sized scan button and the desk gets
+the register, its filters, and the history. It still accepts a typed or
+wedge-scanned code, because a desk has a scanner on a cable and refusing the
+reading it can already produce would be a screen that watches other people work.
+Both write to the same session, so a count begun at the rack is finished at the
+desk.
+
 **The scanner was already there.** `openScanner()` in the phone app has used the
 browser's `BarcodeDetector` since the GRN screens needed it — camera permission
 handling, an iOS fallback to typing, and no external library. The audit screen
