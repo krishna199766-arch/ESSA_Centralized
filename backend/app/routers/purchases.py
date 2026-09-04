@@ -512,12 +512,26 @@ def delete_purchase(pid: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{pid}/post")
-def post_purchase(pid: int, db: Session = Depends(get_db)):
+def post_purchase(pid: int, db: Session = Depends(get_db),
+                  wid: Optional[int] = Depends(scope.current)):
     """Commit the GRN to inventory: create new products, post inward stock
     movements, update quantities and weighted-average cost."""
     p = db.get(models.Purchase, pid)
     if not p:
         raise HTTPException(404, "purchase not found")
+    # WHERE the goods land, from the building this call is being made inside.
+    #
+    # A draft normally carries a warehouse already — it inherits one from the
+    # document it was built from. One raised before workspaces existed does not,
+    # and `post_grn` resolves a blank to the DEFAULT warehouse, which is a guess:
+    # goods unloaded at Karur would be credited to Erode's balance and roll into
+    # Erode's weighted average, with nothing on any screen saying so.
+    #
+    # The receiver is standing in the building. Stamping here says so, before a
+    # single movement is written. `scope.stamp` never overwrites, so a receipt
+    # that already names a warehouse — including one deliberately set through
+    # /warehouse below — is left exactly as it is.
+    scope.stamp(p, wid)
     result = inv.post_grn(db, p)
     if not result.get("ok"):
         db.rollback()

@@ -138,6 +138,17 @@ const S = { token: localStorage.getItem('essa_token')||'', user: localStorage.ge
             // effect the next time the phone opens rather than at the next
             // sign-in. See backend/app/services/users.py for what each means.
             role: localStorage.getItem('essa_role')||'',
+            // The building this handset is standing in. Every call carries it as
+            // a header — see api() — because the server narrows almost every
+            // screen on it (backend/app/services/scope.py). Without one, a list
+            // comes back company-wide and a count refuses to start at all.
+            //
+            // Same storage key and same shape as the desktop's own picker
+            // (frontend/src/api.js), so a phone and a browser on the same
+            // machine describe the building identically.
+            warehouse: (()=>{ try{ return JSON.parse(localStorage.getItem('essa_warehouse')||'null'); }
+                              catch(e){ return null; } })(),
+            warehouses:[],
             screen:'login', products:[], options:{}, status:'pending', q:'', barcode:'', selected:null, employee: localStorage.getItem('essa_emp')||'',
             // the notification centre — the same queues the desktop bell carries
             notifs:[], notifCounts:{},
@@ -168,6 +179,12 @@ const atLeast = (need) => (ROLE_RANK[S.role]||0) >= (ROLE_RANK[need]||0);
 async function api(path, opts){
   const h = Object.assign({'Content-Type':'application/json'}, (opts||{}).headers||{});
   if(S.token) h['X-Essa-Token'] = S.token;
+  // …and WHICH BUILDING it is being made inside. Set here, in the one funnel
+  // every call passes through, rather than threaded into the fifty places that
+  // make one: a screen that forgot would not look broken, it would look like
+  // another warehouse's work had appeared in yours. Endpoints that are
+  // company-wide by nature simply ignore it.
+  if(S.warehouse && S.warehouse.id) h['X-Essa-Warehouse'] = String(S.warehouse.id);
   const r = await fetch(path, Object.assign({}, opts||{}, {headers:h}));
   const j = await r.json().catch(()=>({}));
   if(!r.ok){
@@ -193,10 +210,14 @@ async function upload(path, file, name){
   // tell the vision API what it is being sent — a blob posted nameless arrives
   // as ".bin" and is described to the API as a guess
   fd.append('file', file, name || file.name || 'upload.jpg');
-  // The token still goes up: only Content-Type is left to the browser here, and
-  // an upload is as much a write as anything api() sends.
-  const r=await fetch(path,{method:'POST',body:fd,
-    headers: S.token ? {'X-Essa-Token': S.token} : {}});
+  // The token and the warehouse still go up: only Content-Type is left to the
+  // browser here, and an upload is as much a write as anything api() sends — an
+  // LR copy photographed on the dock is filed against the building it was
+  // photographed in.
+  const h = {};
+  if(S.token) h['X-Essa-Token'] = S.token;
+  if(S.warehouse && S.warehouse.id) h['X-Essa-Warehouse'] = String(S.warehouse.id);
+  const r=await fetch(path,{method:'POST',body:fd,headers:h});
   const j=await r.json().catch(()=>({}));
   if(!r.ok){
     if(r.status===401) signedOut();
@@ -463,11 +484,101 @@ function setSession(r){
   localStorage.setItem('essa_role', S.role||'');
 }
 
+// ---------- which building this handset is in ----------
+// Read from the server rather than trusted from storage: a warehouse can be
+// closed, renamed, or taken off this account's allotment while the phone is in
+// somebody's pocket, and the answer must change the next time it opens rather
+// than at the next sign-in — the same reason `role` is re-read on every verify.
+//
+// /api/locations/warehouses already returns ONLY the buildings this account may
+// enter (routers/locations.list_warehouses narrows on the allotment), it reads at
+// floor rank, and it is deliberately not one of the warehouse-scoped screens in
+// security.WAREHOUSE_SCOPED — so it stays reachable when no warehouse is chosen
+// yet, which is exactly what a picker needs.
+async function loadWarehouses(){
+  try{ S.warehouses = (await api('/api/locations/warehouses')).filter(w=>w.active!==false); }
+  catch(e){ S.warehouses = []; }
+  return S.warehouses;
+}
+
+function setWarehouse(w){
+  // Only what identifies the building travels — the rest of the payload is a
+  // postal address the phone never prints. Same four keys the desktop stores.
+  S.warehouse = w ? {id:w.id, name:w.name, code:w.code, catalogue:w.catalogue} : null;
+  if(S.warehouse) localStorage.setItem('essa_warehouse', JSON.stringify(S.warehouse));
+  else localStorage.removeItem('essa_warehouse');
+  // Everything loaded belongs to the building just left. Dropping it here rather
+  // than at each screen is what stops Karur's consignments sitting under an Erode
+  // header until somebody happens to pull to refresh.
+  S.products=[]; S.lr=[]; S.grns=[]; S.bundles=[]; S.locations=[];
+  S.grn=null; S.bundle=null; S.lrSel=null; S.selected=null;
+  S.audit=undefined; S.lastScan=null;
+}
+
+// Where to go once signed in. One warehouse means there is no question to ask —
+// asking it would be a form with one answer — so it is adopted silently. Two or
+// more and the picker comes first: everything behind it files work against a
+// building, and a handset that guessed would be wrong roughly half the time.
+async function afterSignIn(){
+  await loadWarehouses();
+  const here = S.warehouse && S.warehouses.find(w=>w.id===S.warehouse.id);
+  if(here){ setWarehouse(here); }                 // refresh a renamed building
+  else if(S.warehouses.length===1) setWarehouse(S.warehouses[0]);
+  else { setWarehouse(null); S.screen='warehouse'; return render(); }
+  S.screen='list'; await loadOptions(); render();
+}
+
+function renderWarehouse(){
+  const first = !S.warehouse;
+  app.innerHTML = `<div class="topbar">
+      ${first?'':'<button class="link" id="back">‹ Back</button>'}
+      <h1>Which warehouse?</h1></div>
+    <div class="detwrap">
+      <div class="hint" style="margin-bottom:14px">Everything on this phone —
+        consignments, receipts, cartons, counts — belongs to the building you are
+        standing in. Pick it once; it stays until you change it.</div>
+      ${S.warehouses.length ? S.warehouses.map(w=>`
+        <div class="prow" data-wh="${w.id}" style="${S.warehouse&&S.warehouse.id===w.id
+          ?'border-color:var(--accent);border-width:2px':''}">
+          <div style="flex:1;min-width:0">
+            <div class="t">${esc(w.name)}</div>
+            <div class="m">${esc([w.code, w.city, w.catalogue].filter(Boolean).join(' · '))||'&nbsp;'}</div>
+          </div>
+          ${S.warehouse&&S.warehouse.id===w.id
+            ?'<span class="badge bdone">here</span>':''}
+        </div>`).join('')
+        : `<div class="card" style="max-width:none">
+             <b>No warehouse available</b>
+             <div class="hint" style="margin-top:6px">This account is not allotted
+               any warehouse, or none has been added yet. A super admin sets both
+               on the desktop app.</div>
+           </div>`}
+      <div style="height:20px"></div>
+      <button class="btn sec" id="lo">Sign out</button>
+      <div style="height:30px"></div>
+    </div>`;
+  document.getElementById('lo').onclick = logout;
+  const b = document.getElementById('back');
+  if(b) b.onclick = ()=>{ S.screen='list'; render(); };
+  app.querySelectorAll('[data-wh]').forEach(row=>row.onclick = async ()=>{
+    const w = S.warehouses.find(x=>x.id===+row.dataset.wh);
+    if(!w) return;
+    setWarehouse(w);
+    S.screen='list';
+    // Re-read with the new header on: the option lists a detail form offers come
+    // from the receiving warehouse's own catalogue, and a silk building's
+    // categories are not a garment building's.
+    await loadOptions();
+    render();
+    toast('Now in '+w.name);
+  });
+}
+
 (async function boot(){
   if(S.token){
     try{
       const v = await api('/api/auth/verify?token='+encodeURIComponent(S.token));
-      if(v.ok){ setSession(v); S.screen='list'; await loadOptions(); return render(); }
+      if(v.ok){ setSession(v); return afterSignIn(); }
     }catch(e){}
   }
   S.screen='login'; render();
@@ -493,6 +604,7 @@ function startAlertPoll(){
 // ---------- render ----------
 function render(){
   if(S.screen==='login') return renderLogin();
+  if(S.screen==='warehouse') return renderWarehouse();
   if(S.screen==='detail') return renderDetail();
   if(S.screen==='notifs') return renderNotifs();
   if(S.screen==='diag') return renderDiag();
@@ -532,16 +644,35 @@ function tabs(active){
 // was left signed in as — so the answer belongs on the screen, not two taps
 // away. The level is here for the same reason it is on the desktop: it is the
 // answer to "why can I not do that from the phone", without asking anyone.
+// …and WHICH BUILDING it is filing against. On the same line as the name and for
+// the same reason: every consignment received, carton put away and count opened
+// from this handset belongs to a warehouse, and a phone that did not say which
+// would let somebody work a whole morning into the wrong one. Tappable, because
+// the answer to "am I in the right building" has to be followed by "change it"
+// without hunting through a menu.
 function whoami(){
   if(!S.user) return '';
   const label = ROLE_LABEL[S.role] || S.role || '';
   const extra = atLeast('admin')
     ? ' · masters, reports and payments are on the desktop app'
     : '';
+  const where = S.warehouse
+    ? `<b style="color:var(--accent)">${esc(S.warehouse.name)}</b>`
+    : `<b style="color:var(--warn)">no warehouse chosen</b>`;
   return `<div class="hint" style="margin-top:6px">
+      <button class="link" id="whswitch" style="padding:0;font-size:11px">📍 ${where} ${
+        (S.warehouses.length>1||!S.warehouse)?'· change':''}</button>
+    </div>
+    <div class="hint" style="margin-top:2px">
     Signed in as <b>${esc(S.user)}</b>${label?` · ${esc(label)}`:''}${extra}</div>`;
 }
 function wireTabs(){
+  // The warehouse line sits inside every tab strip, so it is wired here too. The
+  // list is re-read on the way in rather than trusted: a building added or taken
+  // off this account's allotment on the desktop should appear the moment somebody
+  // looks, not at the next sign-in.
+  const sw = document.getElementById('whswitch');
+  if(sw) sw.onclick = async ()=>{ await loadWarehouses(); S.screen='warehouse'; render(); };
   app.querySelectorAll('.chip[data-tab]').forEach(c=>c.onclick=()=>{
     if(S.screen===c.dataset.tab) return;
     // The count lives on the server, and another handset may have started or
@@ -568,7 +699,7 @@ function renderLogin(){
     document.getElementById('go').disabled=true; document.getElementById('err').textContent='';
     try{ const r= await api('/api/auth/login',{method:'POST',body:JSON.stringify({username:u,password:p})});
       setSession(r);
-      await loadOptions(); S.screen='list'; render();
+      await afterSignIn();
     }catch(e){ document.getElementById('err').textContent=e.message; document.getElementById('go').disabled=false; }
   };
 }
@@ -895,10 +1026,15 @@ const blankRow=(rate,cat)=>Object.assign(
 // clears the cookie the token is mirrored into — without that call the cookie
 // outlives the sign-out, and the next person to pick the phone up can still pull
 // invoice images out of it.
+// The WAREHOUSE is deliberately not cleared. A handset is a physical object that
+// lives in one building and gets picked up by whoever is on shift; forgetting
+// where it is standing every time somebody signs out would ask the same question
+// four times a day. It is re-validated against the next person's allotment on
+// sign-in (afterSignIn), so an account that may not enter it is not left in it.
 const logout=()=>{
   api('/api/auth/logout',{method:'POST'}).catch(()=>{});
   localStorage.removeItem('essa_token'); localStorage.removeItem('essa_role');
-  S.token=''; S.role=''; S.screen='login'; render();
+  S.token=''; S.role=''; S.warehouses=[]; S.screen='login'; render();
 };
 
 async function loadCats(){ try{ const c=await api('/api/masters/categories'); S.cats=(c.items||[]).map(i=>i.name); }catch(e){ S.cats=[]; } }
