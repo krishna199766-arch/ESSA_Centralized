@@ -96,6 +96,25 @@
   --tile-adjust-bar: #8A4A7D; --tile-adjust-val: #743E69; --tile-adjust-hover: #EEDCEA;
 
   --radius: 10px; --radius-sm: 7px; --radius-lg: 14px;
+
+  /* --- density -------------------------------------------------------------
+     This is data-entry software: the same form is filled in dozens of times a
+     day, so a screen shows more when the controls are one step smaller than the
+     ones Bootstrap ships for a marketing page.
+
+     --page-max stops a form growing with the monitor. Every screen sits in a
+     container-fluid, so on a 1920 display a col-md-3 was 430px wide and a
+     four-digit price had 380px of nothing after it. Capped and centred, the
+     same column is ~320px and the whole app keeps one left edge.
+
+     --field-short is the other half of that: a price, a quantity or a date is
+     never long, and a box far wider than its value reads as a missing field
+     rather than a full one. Applied by input TYPE below, so it needs nothing
+     from the templates. */
+  --page-max: 1360px;
+  --field-short: 175px;
+  --ctl-pad-y: .3rem;  --ctl-pad-x: .6rem;
+  --ctl-pad-y-sm: .2rem; --ctl-pad-x-sm: .45rem;
   --shadow-1: 0 1px 2px rgba(42,35,32,.06), 0 1px 3px rgba(42,35,32,.05);
   --shadow-2: 0 4px 14px rgba(42,35,32,.10);
   --focus: 0 0 0 3px rgba(90,52,40,.18);
@@ -129,6 +148,16 @@
   --bs-heading-color: #2A2320;
   --bs-focus-ring-color: rgba(90,52,40,.18);
   --bs-code-color: #7A4C3D;
+
+  /* 14px, matching the warehouse's own 13-14px scale next door. Bootstrap sizes
+     most things off this one variable; the components that hardcode 1rem are
+     brought down with it in the density block near the end of this file. */
+  --bs-body-font-size: .875rem;
+  /* corners: the tokens above rather than Bootstrap's .375rem, so an input and
+     the card it sits in are not two different radii */
+  --bs-border-radius: var(--radius-sm);
+  --bs-border-radius-sm: 5px;
+  --bs-border-radius-lg: var(--radius);
 }
 
 body { background: var(--bg); color: var(--text);
@@ -274,6 +303,92 @@ body { background: var(--bg); color: var(--text);
 .input-group-text { background: var(--panel-2); border-color: var(--line-strong);
   color: var(--text-2); }
 
+/* ---------- density ----------
+   One place, once, for how big everything is. The alternative — writing
+   form-control-sm into forty templates — is the same decision taken forty times,
+   and the two screens somebody forgets are the ones that look wrong.
+
+   Bootstrap hardcodes `1rem` on the controls rather than reading
+   --bs-body-font-size, so each of them is named here; everything that already
+   sizes in em or off that variable follows on its own. */
+
+/* the page stops growing with the monitor, and the bar keeps its left edge */
+.navbar > .container-fluid,
+main.container-fluid { max-width: var(--page-max); margin-inline: auto; }
+
+/* controls: ~32px tall instead of Bootstrap's 38 */
+.form-control, .form-select, .input-group-text {
+  padding: var(--ctl-pad-y) var(--ctl-pad-x); font-size: .875rem;
+  line-height: 1.45; }
+.form-select { padding-right: 1.9rem; background-position: right .55rem center; }
+.form-control-sm, .form-select-sm, .input-group-sm > .form-control,
+.input-group-sm > .form-select, .input-group-sm > .input-group-text,
+.input-group-sm > .btn {
+  padding: var(--ctl-pad-y-sm) var(--ctl-pad-x-sm); font-size: .8125rem; }
+.form-select-sm { padding-right: 1.75rem; }
+.btn { --bs-btn-padding-y: var(--ctl-pad-y); --bs-btn-padding-x: .75rem;
+  --bs-btn-font-size: .875rem; --bs-btn-line-height: 1.45; }
+.btn-sm { --bs-btn-padding-y: var(--ctl-pad-y-sm); --bs-btn-padding-x: .55rem;
+  --bs-btn-font-size: .8125rem; }
+.form-label { margin-bottom: .2rem; font-size: .8rem; font-weight: 600;
+  color: var(--text-2); letter-spacing: .1px; }
+/* Several forms write `form-label small`, which was a fair thing to ask of a
+   16px label and is not one now — .small is .875em, so it would compound down to
+   11px. The label IS the small text on this scale; the extra class stops here. */
+.form-label.small { font-size: .8rem; }
+.form-text { font-size: .75rem; }
+
+/* The -lg controls belong to the floor and delivery screens, which are worked
+   one-handed on a phone: they are big because a thumb needs them to be, and they
+   keep the exact size they have always had.
+   They have to be RE-STATED rather than simply left alone. This file loads after
+   Bootstrap, so the plain `.form-control` and `.btn` rules above — same
+   specificity, later in the cascade — would otherwise beat Bootstrap's own -lg
+   and quietly shrink a scan box down to 32px. The values below are Bootstrap's,
+   unchanged; they are in rem off the ROOT, which the 14px body does not touch. */
+.form-control-lg, .form-select-lg,
+.input-group-lg > .form-control, .input-group-lg > .form-select,
+.input-group-lg > .input-group-text, .input-group-lg > .btn {
+  padding: .5rem 1rem; font-size: 1.25rem; line-height: 1.5;
+  border-radius: var(--radius); }
+.form-select-lg { padding-right: 3rem; }
+.btn-lg, .input-group-lg > .btn {
+  --bs-btn-padding-y: .5rem; --bs-btn-padding-x: 1rem;
+  --bs-btn-font-size: 1.25rem; --bs-btn-line-height: 1.5; }
+
+/* A short value gets a short box. Text and textareas are left alone — a name, a
+   remark or a search box has no natural width and should fill its column. */
+.form-control[type=number], .form-control[type=date], .form-control[type=time],
+.form-control[type=month], .form-control[type=tel] { max-width: var(--field-short); }
+/* …except where the width is not the input's to decide: an input-group is one
+   joined control, and a table cell is already as wide as its column. */
+.input-group > .form-control, .input-group > .form-select,
+td .form-control, td .form-select { max-width: none; }
+
+/* headings, brought back in proportion to a 14px body */
+h1, .h1 { font-size: 1.6rem; }
+h2, .h2 { font-size: 1.4rem; }
+h3, .h3 { font-size: 1.2rem; }
+h4, .h4 { font-size: 1.1rem; }
+h5, .h5 { font-size: 1rem; }
+h6, .h6 { font-size: .875rem; }
+h1, h2, h3, h4, h5, h6 { font-weight: 600; }
+
+/* surfaces and rows follow the same step down, so the space around the content
+   shrinks with the content rather than leaving it rattling in its card */
+.card { --bs-card-spacer-y: .85rem; --bs-card-spacer-x: .85rem;
+  --bs-card-cap-padding-y: .55rem; --bs-card-cap-padding-x: .85rem; }
+.table { --bs-table-cell-padding-y: .4rem; --bs-table-cell-padding-x: .5rem; }
+.table-sm { --bs-table-cell-padding-y: .25rem; --bs-table-cell-padding-x: .4rem; }
+.alert { --bs-alert-padding-y: .6rem; --bs-alert-padding-x: .85rem; }
+.dropdown-menu { --bs-dropdown-font-size: .875rem;
+  --bs-dropdown-item-padding-y: .3rem; --bs-dropdown-item-padding-x: .8rem; }
+.list-group { --bs-list-group-item-padding-y: .45rem;
+  --bs-list-group-item-padding-x: .75rem; }
+.brand-nav { --bs-navbar-brand-font-size: 1.05rem;
+  --bs-navbar-padding-y: .35rem; --bs-navbar-nav-link-padding-x: .7rem; }
+.nav-link { font-size: .875rem; }
+
 /* ---------- flashes ---------- */
 .alert-success { --bs-alert-color: var(--ok); --bs-alert-bg: var(--ok-bg);
   --bs-alert-border-color: var(--ok-line); }
@@ -302,7 +417,7 @@ body { background: var(--bg); color: var(--text);
 @media print {
   .no-print, nav, .alert { display: none !important; }
   body { background: #fff; }
-  .container-fluid { padding: 0; }
+  .container-fluid { padding: 0; max-width: none; margin: 0; }
 }
 
 .invoice-print { max-width: 800px; margin: 0 auto; padding: 20px; background: #fff; }
@@ -319,4 +434,13 @@ body { background: var(--bg); color: var(--text);
 @media (max-width: 768px) {
   .stat-card .value { font-size: 1.3rem; }
   .pos-product-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  /* The desktop step-down buys screen space, which a phone does not have to
+     spare in the first place — and a 32px control is below what a thumb can hit
+     reliably. Density is a mouse-and-monitor decision, so it stops here. */
+  :root { --ctl-pad-y: .45rem; --ctl-pad-x: .7rem;
+          --ctl-pad-y-sm: .3rem; --ctl-pad-x-sm: .5rem; }
+  .btn { --bs-btn-padding-x: .85rem; }
+  /* one column wide, so a capped price box would just look truncated */
+  .form-control[type=number], .form-control[type=date], .form-control[type=time],
+  .form-control[type=month], .form-control[type=tel] { max-width: none; }
 }
