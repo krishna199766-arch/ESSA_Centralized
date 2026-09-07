@@ -1236,16 +1236,30 @@ function LineItems({ items, setItems }) {
     const kind = ITEM_FILL[key]
     return (
       <div className={'fillbox' + (kind === 'text' ? ' text' : '')}>
-        <input value={fill[key] || ''} list={ITEM_LISTED[key] ? 'essa-item-' + key : undefined}
+        {/* size=1 on every box in this grid, and it is load-bearing. An input
+            with no size reports a ~177px INTRINSIC width, and in an auto-layout
+            table that becomes the column's floor — so `HSN`, declared 80px wide
+            in ITEM_COLS, came out at 265 and a six-digit code sat in a bar four
+            times its own length. CSS width:100% cannot undo that: a percentage
+            is treated as auto while the column is being measured. The attribute
+            is what the measurement reads, and the CSS width still fills whatever
+            column the table settles on. */}
+        <input size={1} value={fill[key] || ''} list={ITEM_LISTED[key] ? 'essa-item-' + key : undefined}
           inputMode={kind === 'text' ? undefined : 'decimal'}
           placeholder={kind === 'pct' ? '%' : 'all'}
           title={`Set ${label} on every line of this invoice`}
           onChange={(e) => setFill({ ...fill, [key]: e.target.value })}
           onKeyDown={(e) => { if (e.key === 'Enter') applyFill(key) }} />
-        <button className="btn" disabled={!fillReady(key)}
+        {/* ↓ rather than "Apply all", and the reason is the column width above:
+            the words were 60px of button in a header cell that governs an 80px
+            column, so every fillable column was widened to hold a label. The
+            arrow is the spreadsheet's own fill-down, it sits beside a box whose
+            placeholder already reads "all", and the title says it in full. */}
+        <button className="btn fill-go" disabled={!fillReady(key)}
           onClick={() => applyFill(key)}
+          aria-label={`Apply ${label} to every line of this invoice`}
           title={`Apply ${fill[key] || '…'}${kind === 'pct' ? '%' : ''} to all ${items.length} line(s)`}>
-          Apply all</button>
+          ↓</button>
       </div>
     )
   }
@@ -1374,7 +1388,7 @@ function LineItems({ items, setItems }) {
                           {grouped ? `≡ ${g.to - g.from}` : runFor === i ? '×' : '≡'}</button>
                       </div>
                     ) : (
-                      <input value={cell(it, k)} list={ITEM_LISTED[k] ? 'essa-item-' + k : undefined}
+                      <input size={1} value={cell(it, k)} list={ITEM_LISTED[k] ? 'essa-item-' + k : undefined}
                         onChange={(e) => upd(i, k, e.target.value)} />
                     )}
                   </td>
@@ -2521,14 +2535,15 @@ function Purchases({ selId, setSelId, toast }) {
   }
   const fillAttr = (k, label) => (
     <div className="fillbox text">
-      <input list={k === 'category' ? 'essa-cats' : 'essa-opt-' + k}
+      <input size={1} list={k === 'category' ? 'essa-cats' : 'essa-opt-' + k}
         value={sfill[k] || ''} placeholder="all"
         title={`Set ${label} on every row of this breakdown`}
         onChange={(e) => setSfill({ ...sfill, [k]: e.target.value })}
         onKeyDown={(e) => { if (e.key === 'Enter') applySfill(k) }} />
-      <button className="btn" disabled={!(sfill[k] || '').trim()}
+      <button className="btn fill-go" disabled={!(sfill[k] || '').trim()}
         onClick={() => applySfill(k)}
-        title={`Apply ${sfill[k] || '…'} to all ${srows.length} row(s)`}>Apply all</button>
+        aria-label={`Apply ${label} to every row of this breakdown`}
+        title={`Apply ${sfill[k] || '…'} to all ${srows.length} row(s)`}>↓</button>
     </div>
   )
   const splitSum = srows.reduce((s, r) => s + (+r.qty || 0), 0)
@@ -2647,17 +2662,18 @@ function Purchases({ selId, setSelId, toast }) {
             ))}
           </select>
         ) : (
-          <input value={gfill[k] ?? ''} list={k === 'category' ? 'essa-cats' : undefined}
+          <input size={1} value={gfill[k] ?? ''} list={k === 'category' ? 'essa-cats' : undefined}
             inputMode={GFILL_PRICE.has(k) ? 'decimal' : undefined}
             placeholder={GFILL_PRICE.has(k) ? (k === 'sale_discount_pct' ? '%' : 'all') : 'all'}
             title={`Set ${label} on every line of this receipt`}
             onChange={(e) => setGfill({ ...gfill, [k]: e.target.value })}
             onKeyDown={(e) => { if (e.key === 'Enter') applyGfill(k) }} />
         )}
-        <button className="btn" disabled={!gfillReady(k) || !!filling}
+        <button className="btn fill-go" disabled={!gfillReady(k) || !!filling}
           onClick={() => applyGfill(k)}
+          aria-label={`Apply ${label} to every line of this receipt`}
           title={`Apply ${gfill[k] || '…'} to all ${(grn?.lines || []).length} line(s)`}>
-          {busyHere ? '…' : 'Apply all'}</button>
+          {busyHere ? '…' : '↓'}</button>
       </div>
     )
   }
@@ -2842,7 +2858,7 @@ function Purchases({ selId, setSelId, toast }) {
                             landing "unmapped" for someone to fix product by product */}
                         <td>{editable ? (
                           <>
-                            <input list="essa-cats" className="mono" style={{ fontSize: 11 }}
+                            <input size={1} list="essa-cats" className="mono" style={{ fontSize: 11 }}
                               placeholder={l.category_suggestion?.best || 'unmapped'}
                               value={pcat[l.id] ?? l.category ?? ''}
                               onChange={(e) => setPcat({ ...pcat, [l.id]: e.target.value })}
@@ -3208,15 +3224,15 @@ function Purchases({ selId, setSelId, toast }) {
                                 <tbody>{srows.map((r, i) => (
                                   <tr key={i}>
                                     {SPLIT_ATTRS.map(([k]) => (
-                                      <td key={k}><input list={'essa-opt-' + k} value={r[k]}
+                                      <td key={k}><input size={1} list={'essa-opt-' + k} value={r[k]}
                                         onChange={(e) => updSrow(i, k, e.target.value)} /></td>
                                     ))}
-                                    <td><input list="essa-cats" className="mono" style={{ fontSize: 11 }}
+                                    <td><input size={1} list="essa-cats" className="mono" style={{ fontSize: 11 }}
                                       placeholder={l.category || 'auto'} value={r.category}
                                       onChange={(e) => updSrow(i, 'category', e.target.value)} /></td>
                                     {SPLIT_QTY.map(([k]) => (
                                       <td key={k} className="num">
-                                        <input value={r[k]}
+                                        <input size={1} value={r[k]}
                                           onChange={(e) => updSrow(i, k, e.target.value)} /></td>
                                     ))}
                                     <td><button className="btn" style={{ padding: '2px 7px' }} title="Remove this row"
