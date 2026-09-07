@@ -63,10 +63,10 @@
 {% endif %}
 
 <div class="row g-3 mb-3">
-  <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Total sales</div><div class="value">{{ total_sales|inr }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Invoices</div><div class="value">{{ invoice_count }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Avg bill</div><div class="value">{{ avg_bill|inr }}</div></div></div>
-  <div class="col-6 col-md-3"><div class="stat-card card p-3"><div class="label">Tax collected</div><div class="value">{{ total_tax|inr }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="stat-card card p-3 t-money"><div class="label">Total sales</div><div class="value">{{ total_sales|inr }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="stat-card card p-3 t-count"><div class="label">Invoices</div><div class="value">{{ invoice_count }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="stat-card card p-3 t-money"><div class="label">Avg bill</div><div class="value">{{ avg_bill|inr }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="stat-card card p-3 t-adjust"><div class="label">Tax collected</div><div class="value">{{ total_tax|inr }}</div></div></div>
 </div>
 
 {# The question this page is usually opened to answer: what did each branch and

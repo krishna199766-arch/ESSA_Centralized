@@ -51,25 +51,32 @@
 
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3">
-    <div class="stat-card card p-3">
+    {# Three takings figures in a row, so all three are the money green: the
+       colour says what the figure is ABOUT, and reading them as one family is
+       the point — they are the same number over three windows. Low Stock is a
+       count of items and is not money, so it is not green. #}
+    <div class="stat-card card p-3 t-money">
       <div class="label"><i class="bi bi-currency-rupee"></i> Today</div>
       <div class="value">{{ today_sales|inr }}</div>
     </div>
   </div>
   <div class="col-6 col-md-3">
-    <div class="stat-card card p-3">
+    <div class="stat-card card p-3 t-money">
       <div class="label"><i class="bi bi-calendar-week"></i> 7 Days</div>
       <div class="value">{{ week_sales|inr }}</div>
     </div>
   </div>
   <div class="col-6 col-md-3">
-    <div class="stat-card card p-3">
+    <div class="stat-card card p-3 t-money">
       <div class="label"><i class="bi bi-calendar-month"></i> 30 Days</div>
       <div class="value">{{ month_sales|inr }}</div>
     </div>
   </div>
   <div class="col-6 col-md-3">
-    <div class="stat-card card p-3">
+    {# Stock, not amber. Low stock is a standing count that is usually non-zero,
+       and a card that wears the attention colour every day of the year stops
+       being read as attention — the triangle on the label carries the warning. #}
+    <div class="stat-card card p-3 t-stock">
       <div class="label"><i class="bi bi-exclamation-triangle text-warning"></i> Low Stock</div>
       <div class="value">{{ low_stock }}</div>
     </div>

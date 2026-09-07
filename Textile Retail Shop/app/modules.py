@@ -19,6 +19,10 @@ MODULES = [
      "label": "Billing Counter", "owns": ["pos.counter", "pos.checkout"], "manager": False,
      "blurb": "Scan, bill and take payment at the counter"},
 
+    {"key": "delivery", "endpoint": "delivery.index", "icon": "bi-bag-check",
+     "label": "Delivery", "owns": ["delivery."], "manager": False,
+     "blurb": "Scan the bill, scan each garment, hand the goods over"},
+
     {"key": "inventory", "endpoint": "inventory.list_products", "icon": "bi-box-seam",
      "label": "Inventory", "owns": ["inventory."], "manager": False,
      "blurb": "What the shop holds, with the warehouse QR on every item"},

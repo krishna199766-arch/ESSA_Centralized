@@ -118,6 +118,43 @@
   --danger: #C0392B;    --danger-bg: #FBEBE9;  --danger-line: #F0C7C1;
   --info: #1F6FB2;      --info-bg: #E9F2FA;    --info-line: #C3DBF0;
 
+  /* --- tile accents: what a figure is ABOUT ---
+     A dashboard is a wall of near-identical boxes, and colour is the cheapest way
+     to make one findable at a glance. These are the families a tile belongs to,
+     assigned by MEANING and never by position: money is always green, goods
+     coming back are always rose. A tile that changed colour depending on where it
+     sat in the row would teach nobody anything — the whole return on this is that
+     somebody learns the colours once and then reads every screen faster.
+
+     AMBER IS DELIBERATELY ABSENT, and that is the load-bearing decision here.
+     --warn is the one thing on these screens that means *act on this*, and a tile
+     wears it only when there is something to do. A decorative amber family would
+     put the attention colour on tiles at rest, and the signal would be worth
+     nothing within a week. So the accent families stay clear of it and `.dtile.warn`
+     is ordered after them, which is why attention still wins on a coloured tile.
+
+     Every pair below was measured rather than picked (frontend/tools/
+     tile_palette_test.mjs, run it after any edit here): the value clears 4.5:1 on
+     its own tint, the accent bar clears 3:1 as a UI boundary, the bars are ≥20 ΔE
+     apart so the families cannot be confused, and every tint is ≥8 ΔE from
+     --warn-bg so no resting tile can be mistaken for one that needs someone.
+
+     Labels on a tinted tile use --text-2, not --muted: --muted is 4.1–4.3:1 on
+     these washes and fails AA at 11px. On the untinted default tile it is 4.9:1
+     and stays. */
+  --tile-count-bg: #E3EDF9; --tile-count-line: #C3D8F0;
+  --tile-count-bar: #2A5FA8; --tile-count-val: #1B4E80; --tile-count-hover: #D7E5F6;
+  --tile-stock-bg: #ECE7F8; --tile-stock-line: #D3C9EE;
+  --tile-stock-bar: #5B49B5; --tile-stock-val: #4A3AA7; --tile-stock-hover: #E2DAF4;
+  --tile-move-bg: #DCEDF3; --tile-move-line: #B3D9E6;
+  --tile-move-bar: #0E7C9B; --tile-move-val: #0B5F76; --tile-move-hover: #CFE6EF;
+  --tile-money-bg: #DCEFE4; --tile-money-line: #B6DEC5;
+  --tile-money-bar: #1E7A4D; --tile-money-val: #14663F; --tile-money-hover: #CFE9DA;
+  --tile-back-bg: #FAE6E9; --tile-back-line: #F0CBD0;
+  --tile-back-bar: #B93A48; --tile-back-val: #9E2B39; --tile-back-hover: #F6DADE;
+  --tile-adjust-bg: #F4E8F1; --tile-adjust-line: #E3CBDD;
+  --tile-adjust-bar: #8A4A7D; --tile-adjust-val: #743E69; --tile-adjust-hover: #EEDCEA;
+
   /* legacy aliases — older rules and inline styles still name these */
   --accent: var(--brand);
   --accent-2: var(--brand-500);
@@ -395,14 +432,46 @@ a { color: var(--brand); text-underline-offset: 2px; }
 /* The left bar is what turns twelve boxes into one row that reads: gold for a
    figure at rest, amber the moment it needs someone. --gold-line, not --gold —
    on this fill gold measures 2.01:1 and the bar disappears. */
-.dtile { display: flex; flex-direction: column; gap: 2px; text-align: left;
-  background: var(--panel-2); border: 1px solid var(--line);
-  border-left: 3px solid var(--gold-line); border-radius: var(--radius-lg);
+/* One mechanism, six families: a tile's class sets these four variables and
+   nothing else, so a family is four values rather than four rules — and the warn
+   state overrides the same variables further down, which is what makes attention
+   win on a coloured tile without a single !important. */
+.dtile { --tile-bg: var(--panel-2); --tile-line: var(--line);
+  --tile-bar: var(--gold-line); --tile-val: var(--brand);
+  --tile-lbl: var(--muted); --tile-hover: var(--brand-50);
+  /* The border a hover draws. Its own variable because the untinted tile wants
+     --brand here and its accent bar stays gold — collapsing the two onto
+     --tile-bar would quietly repaint the default tile's hover gold. A family
+     points it at its own bar, so a coloured tile firms up in its own colour. */
+  --tile-line-hover: var(--brand);
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  background: var(--tile-bg); border: 1px solid var(--tile-line);
+  border-left: 3px solid var(--tile-bar); border-radius: var(--radius-lg);
   padding: var(--sp-3) var(--sp-4); color: var(--text);
   transition: border-color .12s, background .12s, box-shadow .14s, transform .14s; }
-.dtile:hover { border-color: var(--brand); border-left-color: var(--gold-line);
-  background: var(--brand-50); box-shadow: var(--shadow-2); transform: translateY(-2px); }
-.dtile .lbl { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase;
+/* border-left-color is restated after border-color throughout, for the reason
+   given at .dtile.warn below: the shorthand would repaint the accent bar. */
+.dtile:hover { border-color: var(--tile-line-hover); border-left-color: var(--tile-bar);
+  background: var(--tile-hover); box-shadow: var(--shadow-2); transform: translateY(-2px); }
+.dtile.t-count  { --tile-bg: var(--tile-count-bg);  --tile-line: var(--tile-count-line);
+  --tile-bar: var(--tile-count-bar);  --tile-val: var(--tile-count-val);
+  --tile-hover: var(--tile-count-hover);  --tile-lbl: var(--text-2); --tile-line-hover: var(--tile-count-bar); }
+.dtile.t-stock  { --tile-bg: var(--tile-stock-bg);  --tile-line: var(--tile-stock-line);
+  --tile-bar: var(--tile-stock-bar);  --tile-val: var(--tile-stock-val);
+  --tile-hover: var(--tile-stock-hover);  --tile-lbl: var(--text-2); --tile-line-hover: var(--tile-stock-bar); }
+.dtile.t-move   { --tile-bg: var(--tile-move-bg);   --tile-line: var(--tile-move-line);
+  --tile-bar: var(--tile-move-bar);   --tile-val: var(--tile-move-val);
+  --tile-hover: var(--tile-move-hover);   --tile-lbl: var(--text-2); --tile-line-hover: var(--tile-move-bar); }
+.dtile.t-money  { --tile-bg: var(--tile-money-bg);  --tile-line: var(--tile-money-line);
+  --tile-bar: var(--tile-money-bar);  --tile-val: var(--tile-money-val);
+  --tile-hover: var(--tile-money-hover);  --tile-lbl: var(--text-2); --tile-line-hover: var(--tile-money-bar); }
+.dtile.t-back   { --tile-bg: var(--tile-back-bg);   --tile-line: var(--tile-back-line);
+  --tile-bar: var(--tile-back-bar);   --tile-val: var(--tile-back-val);
+  --tile-hover: var(--tile-back-hover);   --tile-lbl: var(--text-2); --tile-line-hover: var(--tile-back-bar); }
+.dtile.t-adjust { --tile-bg: var(--tile-adjust-bg); --tile-line: var(--tile-adjust-line);
+  --tile-bar: var(--tile-adjust-bar); --tile-val: var(--tile-adjust-val);
+  --tile-hover: var(--tile-adjust-hover); --tile-lbl: var(--text-2); --tile-line-hover: var(--tile-adjust-bar); }
+.dtile .lbl { font-size: var(--fs-xs); color: var(--tile-lbl); text-transform: uppercase;
   letter-spacing: .5px; font-weight: 700; }
 /* The figure is the reason the tile exists, so it is sized like it. Tabular and
    tightened — a row of headline numbers that do not line up cannot be compared,
@@ -410,20 +479,39 @@ a { color: var(--brand); text-underline-offset: 2px; }
 .dtile .val, .stat .val { white-space: nowrap; }
 /* a rupee total gets one size down so it stays on its line — see longValue() */
 .dtile .val.long, .stat .val.long { font-size: var(--fs-2xl); letter-spacing: -.4px; }
-.dtile .val { font-size: var(--fs-3xl); font-weight: 700; color: var(--brand);
+.dtile .val { font-size: var(--fs-3xl); font-weight: 700; color: var(--tile-val);
   font-variant-numeric: tabular-nums; line-height: 1.1; letter-spacing: -.6px; }
-.dtile .sub { font-size: var(--fs-xs); color: var(--muted); line-height: 1.35;
+.dtile .sub { font-size: var(--fs-xs); color: var(--tile-lbl); line-height: 1.35;
   min-height: 15px; }
 /* amber only where there is something to do. A tile that shouts at zero teaches
-   people to stop reading tiles. */
+   people to stop reading tiles.
+
+   Ordered AFTER the accent families on purpose: a tile that is decoratively
+   green because it counts money still has to go amber the moment it needs
+   somebody, and the later rule is what makes that happen. This is the one state
+   allowed to overrule a family's colour, which is also why no family may look
+   like it — see the tile accent block in the tokens. */
 /* border-left-color is restated after border-color on purpose — the shorthand
    would repaint the accent bar --warn-line (1.x:1 here), losing it. */
-.dtile.warn { background: var(--warn-bg); border-color: var(--warn-line);
-  border-left-color: var(--warn); }
-.dtile.warn .val { color: var(--warn); }
-.dtile.warn .sub { color: var(--text-2); }
+.dtile.warn { --tile-bg: var(--warn-bg); --tile-line: var(--warn-line);
+  --tile-bar: var(--warn); --tile-val: var(--warn); --tile-lbl: var(--text-2);
+  --tile-hover: #FBEBD2;
+  background: var(--tile-bg); border-color: var(--tile-line);
+  border-left-color: var(--tile-bar); }
 .dtile.warn:hover { border-color: var(--warn); border-left-color: var(--warn);
-  background: #FBEBD2; }
+  background: var(--tile-hover); }
+/* Settled, and worth saying so. `tone="ok"` was already passed by the inward and
+   outward tiles and matched no rule at all, so a day with movement on it looked
+   exactly like a day with none — the tone was written, rendered as a class, and
+   styled by nothing. Green here is the same green as the money family because it
+   means the same thing to a reader: this figure is fine. */
+.dtile.ok { --tile-bg: var(--ok-bg); --tile-line: var(--ok-line);
+  --tile-bar: var(--ok); --tile-val: var(--ok); --tile-lbl: var(--text-2);
+  --tile-hover: #DCEDE3;
+  background: var(--tile-bg); border-color: var(--tile-line);
+  border-left-color: var(--tile-bar); }
+.dtile.ok:hover { border-color: var(--ok); border-left-color: var(--ok);
+  background: var(--tile-hover); }
 
 .modgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr));
   gap: var(--sp-3); }
@@ -1238,13 +1326,33 @@ table.items.reg td.mono .cellsub { font-family: inherit; }
    Same accent bar and same figure treatment as the dashboard's tiles. These sit
    on Inventory and Stock Inward, and a headline number should not be a different
    object on a different screen. */
-.stat { flex: 1; background: var(--panel); border: 1px solid var(--line);
-  border-left: 3px solid var(--gold-line); border-radius: var(--radius-lg);
+/* The inline stat strip carries the same families as the dashboard tiles, by the
+   same mechanism — a class sets the variables and nothing else. "Stock value"
+   has to be the same green in a strip as it is on a dashboard, or the colours
+   are per-screen decoration rather than a vocabulary.
+   It sits on --panel (white) rather than --panel-2, so the tint does the work of
+   the fill here and the shadow keeps the card edge. */
+.stat { --tile-bg: var(--panel); --tile-line: var(--line);
+  --tile-bar: var(--gold-line); --tile-val: var(--brand); --tile-lbl: var(--muted);
+  flex: 1; background: var(--tile-bg); border: 1px solid var(--tile-line);
+  border-left: 3px solid var(--tile-bar); border-radius: var(--radius-lg);
   padding: var(--sp-4); box-shadow: var(--shadow-1); }
-.stat .lbl { font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase;
+.stat.t-count  { --tile-bg: var(--tile-count-bg);  --tile-line: var(--tile-count-line);
+  --tile-bar: var(--tile-count-bar);  --tile-val: var(--tile-count-val);  --tile-lbl: var(--text-2); }
+.stat.t-stock  { --tile-bg: var(--tile-stock-bg);  --tile-line: var(--tile-stock-line);
+  --tile-bar: var(--tile-stock-bar);  --tile-val: var(--tile-stock-val);  --tile-lbl: var(--text-2); }
+.stat.t-move   { --tile-bg: var(--tile-move-bg);   --tile-line: var(--tile-move-line);
+  --tile-bar: var(--tile-move-bar);   --tile-val: var(--tile-move-val);   --tile-lbl: var(--text-2); }
+.stat.t-money  { --tile-bg: var(--tile-money-bg);  --tile-line: var(--tile-money-line);
+  --tile-bar: var(--tile-money-bar);  --tile-val: var(--tile-money-val);  --tile-lbl: var(--text-2); }
+.stat.t-back   { --tile-bg: var(--tile-back-bg);   --tile-line: var(--tile-back-line);
+  --tile-bar: var(--tile-back-bar);   --tile-val: var(--tile-back-val);   --tile-lbl: var(--text-2); }
+.stat.t-adjust { --tile-bg: var(--tile-adjust-bg); --tile-line: var(--tile-adjust-line);
+  --tile-bar: var(--tile-adjust-bar); --tile-val: var(--tile-adjust-val); --tile-lbl: var(--text-2); }
+.stat .lbl { font-size: var(--fs-xs); color: var(--tile-lbl); text-transform: uppercase;
   letter-spacing: .5px; font-weight: 700; }
 .stat .val { font-size: var(--fs-3xl); font-weight: 700; margin-top: var(--sp-1);
-  color: var(--brand); font-variant-numeric: tabular-nums; line-height: 1.1;
+  color: var(--tile-val); font-variant-numeric: tabular-nums; line-height: 1.1;
   letter-spacing: -.6px; }
 
 /* ---------- per-piece codes ---------- */

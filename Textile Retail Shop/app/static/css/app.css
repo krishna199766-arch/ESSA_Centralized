@@ -70,6 +70,31 @@
   --danger: #C0392B;    --danger-bg: #FBEBE9;  --danger-line: #F0C7C1;
   --info: #1F6FB2;      --info-bg: #E9F2FA;    --info-line: #C3DBF0;
 
+  /* --- tile accents: what a figure is ABOUT ---
+     Essa's, copied verbatim from frontend/src/styles.css like everything else in
+     this block, so a stat card means the same colour in the shop as it does in
+     the warehouse. frontend/tools/tile_palette_test.mjs reads BOTH files and
+     fails if they drift - two copies of a palette is exactly the kind of thing
+     that rots quietly, and a shop whose "money" green is a shade off is the
+     mount reading as two products again.
+
+     Assigned by meaning, never by position: money is green, goods coming back
+     are rose. Amber is deliberately absent - it belongs to --warn, which means
+     *act on this*, and a decorative amber would spend that signal on tiles at
+     rest. */
+  --tile-count-bg: #E3EDF9; --tile-count-line: #C3D8F0;
+  --tile-count-bar: #2A5FA8; --tile-count-val: #1B4E80; --tile-count-hover: #D7E5F6;
+  --tile-stock-bg: #ECE7F8; --tile-stock-line: #D3C9EE;
+  --tile-stock-bar: #5B49B5; --tile-stock-val: #4A3AA7; --tile-stock-hover: #E2DAF4;
+  --tile-move-bg: #DCEDF3; --tile-move-line: #B3D9E6;
+  --tile-move-bar: #0E7C9B; --tile-move-val: #0B5F76; --tile-move-hover: #CFE6EF;
+  --tile-money-bg: #DCEFE4; --tile-money-line: #B6DEC5;
+  --tile-money-bar: #1E7A4D; --tile-money-val: #14663F; --tile-money-hover: #CFE9DA;
+  --tile-back-bg: #FAE6E9; --tile-back-line: #F0CBD0;
+  --tile-back-bar: #B93A48; --tile-back-val: #9E2B39; --tile-back-hover: #F6DADE;
+  --tile-adjust-bg: #F4E8F1; --tile-adjust-line: #E3CBDD;
+  --tile-adjust-bar: #8A4A7D; --tile-adjust-val: #743E69; --tile-adjust-hover: #EEDCEA;
+
   --radius: 10px; --radius-sm: 7px; --radius-lg: 14px;
   --shadow-1: 0 1px 2px rgba(42,35,32,.06), 0 1px 3px rgba(42,35,32,.05);
   --shadow-2: 0 4px 14px rgba(42,35,32,.10);
@@ -150,10 +175,30 @@ body { background: var(--bg); color: var(--text);
 .card { border: 0; border-radius: var(--radius); box-shadow: var(--shadow-1); }
 .card-header { background: var(--panel); border-bottom: 1px solid var(--line);
   font-weight: 600; color: var(--text); }
-.stat-card { border: 0; border-radius: var(--radius-lg); overflow: hidden;
-  box-shadow: var(--shadow-2); }
-.stat-card .value { font-size: 1.6rem; font-weight: 700; color: var(--brand); }
-.stat-card .label { color: var(--muted); font-size: .85rem;
+/* One mechanism, six families - a class sets these variables and nothing else,
+   the same way .dtile does in the warehouse. A card with no family keeps exactly
+   the look it had, so an unclassed .stat-card anywhere in the shop is unchanged. */
+.stat-card { --tile-bg: var(--panel); --tile-line: var(--line);
+  --tile-bar: transparent; --tile-val: var(--brand); --tile-lbl: var(--muted);
+  border: 0; border-left: 3px solid var(--tile-bar); border-radius: var(--radius-lg);
+  overflow: hidden; background: var(--tile-bg); box-shadow: var(--shadow-2); }
+.stat-card.t-count  { --tile-bg: var(--tile-count-bg);  --tile-bar: var(--tile-count-bar);
+  --tile-val: var(--tile-count-val);  --tile-lbl: var(--text-2); }
+.stat-card.t-stock  { --tile-bg: var(--tile-stock-bg);  --tile-bar: var(--tile-stock-bar);
+  --tile-val: var(--tile-stock-val);  --tile-lbl: var(--text-2); }
+.stat-card.t-move   { --tile-bg: var(--tile-move-bg);   --tile-bar: var(--tile-move-bar);
+  --tile-val: var(--tile-move-val);   --tile-lbl: var(--text-2); }
+.stat-card.t-money  { --tile-bg: var(--tile-money-bg);  --tile-bar: var(--tile-money-bar);
+  --tile-val: var(--tile-money-val);  --tile-lbl: var(--text-2); }
+.stat-card.t-back   { --tile-bg: var(--tile-back-bg);   --tile-bar: var(--tile-back-bar);
+  --tile-val: var(--tile-back-val);   --tile-lbl: var(--text-2); }
+.stat-card.t-adjust { --tile-bg: var(--tile-adjust-bg); --tile-bar: var(--tile-adjust-bar);
+  --tile-val: var(--tile-adjust-val); --tile-lbl: var(--text-2); }
+/* Bootstrap paints .card's background from its own variable, which would sit on
+   top of the tint. Re-pointed rather than fought with !important. */
+.stat-card.card { --bs-card-bg: var(--tile-bg); --bs-card-border-width: 0; }
+.stat-card .value { font-size: 1.6rem; font-weight: 700; color: var(--tile-val); }
+.stat-card .label { color: var(--tile-lbl); font-size: .85rem;
   text-transform: uppercase; letter-spacing: .5px; }
 .list-group { --bs-list-group-border-color: var(--line);
   --bs-list-group-action-hover-bg: var(--brand-50);

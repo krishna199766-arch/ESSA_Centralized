@@ -3437,10 +3437,10 @@ function Inventory({ toast }) {
       </div>
       <div className="screenbody">
         <div style={{ display: 'flex', gap: 14, marginBottom: 20 }}>
-          <Stat label="Products" value={summary?.product_count ?? '—'} />
-          <Stat label="Units in stock" value={summary ? summary.total_units.toLocaleString('en-IN') : '—'} />
-          <Stat label="Stock value (avg cost)" value={summary ? '₹ ' + money(summary.total_stock_value) : '—'} />
-          <Stat label="Detailed (mobile)" value={summary ? `${summary.detailed ?? 0} / ${summary.product_count}` : '—'} />
+          <Stat label="Products" value={summary?.product_count ?? '—'} accent="count" />
+          <Stat label="Units in stock" value={summary ? summary.total_units.toLocaleString('en-IN') : '—'} accent="stock" />
+          <Stat label="Stock value (avg cost)" value={summary ? '₹ ' + money(summary.total_stock_value) : '—'} accent="money" />
+          <Stat label="Detailed (mobile)" value={summary ? `${summary.detailed ?? 0} / ${summary.product_count}` : '—'} accent="count" />
         </div>
         <div className="toolbar">
           <SearchBox value={q} onChange={setQ} placeholder="Search SKU, barcode, description, HSN, supplier…"
@@ -4664,9 +4664,11 @@ function StockInward({ toast }) {
     </div>
   )
 }
-function Stat({ label, value }) {
+// Same `accent` families as DashTile, so a figure keeps its colour whether it is
+// shown in a strip or on a dashboard.
+function Stat({ label, value, accent }) {
   return (
-    <div className="stat">
+    <div className={'stat' + (accent ? ' t-' + accent : '')}>
       <div className="lbl">{label}</div>
       {/* same length-aware step-down the dashboard tiles use */}
       <div className={'val' + (longValue(value) ? ' long' : '')}>{value}</div>
@@ -4735,8 +4737,8 @@ function Payments({ toast }) {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div className="editor">
             {ledger && <div style={{ display: 'flex', gap: 14, marginBottom: 18 }}>
-              <Stat label="Outstanding" value={'₹ ' + money(ledger.outstanding)} />
-              <Stat label="Pending bills" value={bills.length} />
+              <Stat label="Outstanding" value={'₹ ' + money(ledger.outstanding)} accent="money" />
+              <Stat label="Pending bills" value={bills.length} accent="count" />
             </div>}
             <Section id="pay.pending-bills" title="Pending bills — select, then set cash / discount / TDS / debit">
               {bills.length === 0 ? <p className="small">No outstanding invoices for this supplier.</p> : (
@@ -9407,7 +9409,7 @@ function DsTiles({ tiles }) {
     <div className="dgrid">
       {tiles.map((t, i) => (
         <DashTile key={i} label={t.label} value={t.value} sub={t.sub} tone={t.tone}
-          hint={t.hint} onClick={t.onClick || (() => {})} />
+          accent={t.accent} hint={t.hint} onClick={t.onClick || (() => {})} />
       ))}
     </div>
   )
@@ -9528,22 +9530,23 @@ function DeadStock({ toast, go, intent, onIntentUsed }) {
             <Section id="ds-tiles" title="Dead stock at a glance"
               summary={`${c.dead_total.lines} line(s) past ${c.thresholds.dead} days`}>
               <DsTiles tiles={[
-                { label: 'Dead stock', value: c.dead_total.qty + ' pcs',
+                { label: 'Dead stock', value: c.dead_total.qty + ' pcs', accent: 'stock',
                   sub: `${c.dead_total.lines} product line(s) with no movement for ${c.thresholds.dead}+ days`,
                   tone: c.dead_total.lines ? 'warn' : '', onClick: () => openRegister('dead'),
                   hint: 'Open the register filtered to dead stock' },
-                { label: 'Stock value', value: rupees(t.stock_value),
+                { label: 'Stock value', value: rupees(t.stock_value), accent: 'money',
                   sub: 'capital sitting on the shelf', tone: c.dead_total.lines ? 'warn' : '',
                   onClick: () => setTab('cash') },
-                { label: 'Expected cash', value: rupees(t.expected_realisation),
+                { label: 'Expected cash', value: rupees(t.expected_realisation), accent: 'money',
                   sub: 'if every line clears at its ladder price', onClick: () => setTab('cash') },
                 { label: 'Recovery', value: t.recovery_pct == null ? '—' : t.recovery_pct + '%',
+                  accent: 'adjust',
                   sub: 'expected cash against what it cost', onClick: () => setTab('cash') },
-                { label: 'Approaching', value: c.approaching.qty + ' pcs',
+                { label: 'Approaching', value: c.approaching.qty + ' pcs', accent: 'stock',
                   sub: `${c.approaching.lines} line(s) quiet for ${c.thresholds.approaching}+ days — dead in under a month`,
                   tone: c.approaching.lines ? 'warn' : '', onClick: () => openRegister('approaching'),
                   hint: 'Open the register filtered to what is about to go dead' },
-                { label: 'Critical', value: c.critical.qty + ' pcs',
+                { label: 'Critical', value: c.critical.qty + ' pcs', accent: 'stock',
                   sub: `${c.critical.lines} line(s) unsold for ${c.thresholds.critical}+ days`,
                   tone: c.critical.lines ? 'warn' : '', onClick: () => openRegister('critical') },
               ]} />
@@ -9890,15 +9893,15 @@ function DsWorksheets({ toast }) {
         summary={`${open.status} · ${open.line_count} line(s)`}
         actions={<button className="btn" onClick={() => { setOpen(null); load() }}>‹ All worksheets</button>}>
         <div className="dgrid" style={{ marginBottom: 14 }}>
-          <DashTile label="Products" value={t.qty + ' pcs'} sub={`${open.line_count} line(s) in the campaign`} />
-          <DashTile label="Stock cost" value={rupees(t.stock_cost)} sub="what these pieces cost us" />
-          <DashTile label="Expected" value={rupees(t.expected_realisation)} sub="at the approved clearance prices" />
-          <DashTile label="Actually sold" value={t.sold_qty + ' pcs'}
+          <DashTile label="Products" value={t.qty + ' pcs'} accent="stock" sub={`${open.line_count} line(s) in the campaign`} />
+          <DashTile label="Stock cost" value={rupees(t.stock_cost)} accent="money" sub="what these pieces cost us" />
+          <DashTile label="Expected" value={rupees(t.expected_realisation)} accent="money" sub="at the approved clearance prices" />
+          <DashTile label="Actually sold" value={t.sold_qty + ' pcs'} accent="move"
             sub={t.sell_through_pct == null ? 'nothing yet' : `${t.sell_through_pct}% sell-through`}
             tone={t.sold_qty ? '' : 'warn'} />
-          <DashTile label="Actually realised" value={rupees(t.actual_realisation)}
+          <DashTile label="Actually realised" value={rupees(t.actual_realisation)} accent="money"
             sub={t.realisation_pct == null ? 'read from the till' : `${t.realisation_pct}% of expected`} />
-          <DashTile label="Remaining" value={t.remaining_qty + ' pcs'} sub="still on the shelf" />
+          <DashTile label="Remaining" value={t.remaining_qty + ' pcs'} accent="stock" sub="still on the shelf" />
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 14 }}>
           <div className="field" style={{ minWidth: 220 }}><label>Campaign name</label>
@@ -10008,11 +10011,11 @@ function DsSummary({ sum }) {
     <>
       <Section id="ds-sum-tiles" title="Dead stock summary" summary={`${t.lines} line(s)`}>
         <DsTiles tiles={[
-          { label: 'Dead stock', value: t.qty + ' pcs', sub: `${t.lines} product line(s)` },
-          { label: 'Stock value', value: rupees(t.stock_value), sub: 'at weighted-average cost' },
-          { label: 'Expected cash', value: rupees(t.expected_realisation), sub: 'at ladder prices' },
+          { label: 'Dead stock', value: t.qty + ' pcs', accent: 'stock', sub: `${t.lines} product line(s)` },
+          { label: 'Stock value', value: rupees(t.stock_value), accent: 'money', sub: 'at weighted-average cost' },
+          { label: 'Expected cash', value: rupees(t.expected_realisation), accent: 'money', sub: 'at ladder prices' },
           { label: 'Recovery', value: t.recovery_pct == null ? '—' : t.recovery_pct + '%',
-            sub: 'expected cash ÷ stock cost' },
+            accent: 'adjust', sub: 'expected cash ÷ stock cost' },
         ]} />
       </Section>
 
@@ -10086,16 +10089,16 @@ function DsCash({ sum, toast, onSaved }) {
     <>
       <Section id="ds-cash" title="Cash impact" summary="what the shelf is holding, and what it would return">
         <DsTiles tiles={[
-          { label: 'Capital locked', value: rupees(c.capital_locked),
+          { label: 'Capital locked', value: rupees(c.capital_locked), accent: 'money',
             sub: 'cost of stock that has stopped moving', tone: c.capital_locked ? 'warn' : '' },
-          { label: 'Expected cash', value: rupees(c.expected_cash),
+          { label: 'Expected cash', value: rupees(c.expected_cash), accent: 'money',
             sub: 'if every dead line clears at its ladder price' },
           { label: 'Expected recovery', value: c.recovery_pct == null ? '—' : c.recovery_pct + '%',
-            sub: 'cash out against cost in' },
+            accent: 'adjust', sub: 'cash out against cost in' },
           { label: 'Annual revenue potential', value: rupees(c.annual_revenue_potential),
-            sub: `that cash turned over ${c.stock_turns}× a year` },
+            accent: 'money', sub: `that cash turned over ${c.stock_turns}× a year` },
           { label: 'Annual gross profit', value: rupees(c.annual_gross_profit),
-            sub: `at ${c.gross_margin_pct}% gross margin` },
+            accent: 'money', sub: `at ${c.gross_margin_pct}% gross margin` },
         ]} />
         <div className="small" style={{ color: 'var(--text-2)', marginTop: 12, maxWidth: 760, lineHeight: 1.6 }}>
           The first three figures are facts about stock that exists. The last two are a
@@ -11857,27 +11860,27 @@ function CentralDashboard({ toast, go, onEnter }) {
           <>
             <div className="dgrid" style={{ marginBottom: 'var(--sp-4)' }}>
               <DashTile label="Total Warehouses" value={t.warehouses ?? 0}
-                sub={scoped ? scoped.name : 'active'}
+                accent="count" sub={scoped ? scoped.name : 'active'}
                 hint="Warehouses that are open. A closed one keeps its history and stops being offered."
                 onClick={() => go && go('locations')} />
               <DashTile label="Total Stores / POS" value={t.stores ?? 0}
-                sub={scope ? 'supplied by this warehouse' : 'active'}
+                accent="count" sub={scope ? 'supplied by this warehouse' : 'active'}
                 hint="Stores that sell. Their stock lives in the shop's own till database."
                 onClick={() => go && go('locations')} />
               <DashTile label="Total Inventory (Qty)" value={fmtQty(t.qty)}
-                sub={`${t.items ?? 0} distinct item(s)`}
+                accent="stock" sub={`${t.items ?? 0} distinct item(s)`}
                 hint="Units on hand, counted in each product's own unit."
                 onClick={() => go && go('inventory')} />
               <DashTile label="Total Value" value={'₹ ' + money(t.value)}
-                sub="at weighted-average cost"
+                accent="money" sub="at weighted-average cost"
                 hint="Quantity × the warehouse's own average cost, summed."
                 onClick={() => go && go('inventory')} />
               <DashTile label="Today's Inward" value={fmtQty(ov.today?.inward)}
-                sub="units received" tone={ov.today?.inward ? 'ok' : ''}
+                accent="move" sub="units received" tone={ov.today?.inward ? 'ok' : ''}
                 hint="Everything that added stock today — receipts and transfers in."
                 onClick={() => go && go('purchases')} />
               <DashTile label="Today's Outward" value={fmtQty(ov.today?.outward)}
-                sub="units dispatched" tone={ov.today?.outward ? 'ok' : ''}
+                accent="move" sub="units dispatched" tone={ov.today?.outward ? 'ok' : ''}
                 hint="Everything that removed stock today — dispatches, transfers out, returns."
                 onClick={() => go && go('outward')} />
             </div>
@@ -12001,15 +12004,15 @@ function CentralDashboard({ toast, go, onEnter }) {
                   <>
                     <div className="dgrid" style={{ marginBottom: 'var(--sp-3)' }}>
                       <DashTile label="Net Sales" value={'₹ ' + money(sales.totals?.net)}
-                        sub={`last ${days} days`}
+                        accent="money" sub={`last ${days} days`}
                         hint="Billed less returns, across every shop." />
                       <DashTile label="Bills" value={sales.totals?.bills ?? 0}
-                        sub={`${sales.totals?.stores ?? 0} store(s) selling`}
+                        accent="count" sub={`${sales.totals?.stores ?? 0} store(s) selling`}
                         hint="Bills raised at a branch in this window." />
                       <DashTile label="Units Sold" value={fmtQty(sales.totals?.units)}
-                        sub="net of returns" />
+                        accent="move" sub="net of returns" />
                       <DashTile label="Returns" value={'₹ ' + money(sales.totals?.returns)}
-                        tone={sales.totals?.returns ? 'warn' : ''}
+                        accent="back" tone={sales.totals?.returns ? 'warn' : ''}
                         sub="credit notes" />
                     </div>
                     <div className="tablewrap">
@@ -12073,18 +12076,18 @@ function CentralDashboard({ toast, go, onEnter }) {
                 title="Open the Stock Transfer Register report">Report →</button>}>
               <div className="dgrid" style={{ marginBottom: 'var(--sp-3)' }}>
                 <DashTile label="Warehouse Transfers" value={tf.totals?.transfers ?? 0}
-                  sub={`last ${s?.days || days} days`}
+                  accent="count" sub={`last ${s?.days || days} days`}
                   hint="Movements between two of your own warehouses."
                   onClick={() => go && go('outward')} />
                 <DashTile label="Sent to Stores" value={tf.totals?.to_store ?? 0}
-                  sub="dispatch notes"
+                  accent="count" sub="dispatch notes"
                   hint="Goods sent to a shop. Its own till database owns them from there."
                   onClick={() => go && go('outward')} />
                 <DashTile label="Units Moved" value={fmtQty(tf.totals?.qty_moved)}
-                  sub="dispatched in the window"
+                  accent="move" sub="dispatched in the window"
                   hint="Everything that actually left a warehouse — drafts excluded." />
                 <DashTile label="In Transit" value={fmtQty(tf.totals?.in_transit)}
-                  tone={tf.totals?.in_transit ? 'warn' : ''}
+                  accent="move" tone={tf.totals?.in_transit ? 'warn' : ''}
                   sub="not yet counted in"
                   hint="Dispatched between warehouses and not yet accepted at the far end — standing in neither building."
                   onClick={() => go && go('inward')} />
@@ -12835,6 +12838,8 @@ const POS_SCREENS = [
     blurb: 'Build a sale on the phone while walking the floor' },
   { key: 'pos:counter', icon: '🧮', label: 'Billing Counter', path: '/pos/',
     blurb: 'Scan, bill and take payment at the counter' },
+  { key: 'pos:delivery', icon: '🛍', label: 'Delivery', path: '/delivery/',
+    blurb: 'Scan the bill, scan each garment, hand the goods over' },
   { key: 'pos:inventory', icon: '📦', label: 'Store Stock', path: '/inventory/',
     blurb: 'What is on the store floor, with the warehouse QR on every item' },
   { key: 'pos:customers', icon: '🧍', label: 'Customers', path: '/customers/',
@@ -13282,10 +13287,19 @@ function Donut({ rows, unit }) {
 
 // A figure and the screen that clears it. `tone` is 'warn' only when there is
 // something to do — a tile that shouts at zero teaches people to ignore it.
-function DashTile({ label, value, sub, tone, hint, onClick }) {
+// `accent` is what the figure is ABOUT and never changes; `tone` is how it is
+// DOING and changes with the data. They are separate props because those are
+// separate questions: a tile counting money stays green whatever the number, and
+// goes amber only when that number needs somebody. Both land as classes, and the
+// CSS orders `.warn` after the families so attention always wins.
+//
+// Families: count · stock · move · money · back · adjust. What each means, and
+// why amber is deliberately not among them, is in the tile accent block in
+// styles.css.
+function DashTile({ label, value, sub, tone, accent, hint, onClick }) {
   return (
-    <button className={'dtile' + (tone ? ' ' + tone : '')} onClick={onClick}
-      title={hint || `Open ${label}`}>
+    <button className={'dtile' + (accent ? ' t-' + accent : '') + (tone ? ' ' + tone : '')}
+      onClick={onClick} title={hint || `Open ${label}`}>
       <span className="lbl">{label}</span>
       <span className={'val' + (longValue(value) ? ' long' : '')}>{value}</span>
       <span className="sub">{sub || ' '}</span>
@@ -13426,29 +13440,29 @@ function DashDeadStock({ sum, open }) {
       </div>
 
       <div className="dgrid">
-        <DashTile label="Dead stock" value={dead.qty + ' pcs'} tone="warn"
+        <DashTile label="Dead stock" value={dead.qty + ' pcs'} accent="stock" tone="warn"
           sub={`${t.skus} SKU${t.skus === 1 ? '' : 's'} with no sale for ${c.thresholds.dead}+ days`}
           hint="Open the Dead Stock Register"
           onClick={() => open({ tab: 'register', status: 'dead' })} />
-        <DashTile label="Stock value" value={rupees(t.stock_value)} tone="warn"
+        <DashTile label="Stock value" value={rupees(t.stock_value)} accent="money" tone="warn"
           sub="locked — capital sitting on the shelf"
           hint="Open the products holding it"
           onClick={() => open({ tab: 'register', status: 'dead' })} />
-        <DashTile label="Clearance" value={rupees(t.expected_realisation)}
+        <DashTile label="Clearance" value={rupees(t.expected_realisation)} accent="money"
           sub="expected at the ladder's prices"
           hint="Open the Clearance Worksheet"
           onClick={() => open({ tab: 'worksheet' })} />
         <DashTile label="Recovery" value={t.recovery_pct == null ? '—' : t.recovery_pct + '%'}
-          sub="expected cash against what it cost"
+          accent="adjust" sub="expected cash against what it cost"
           hint="Open the Cash Impact"
           onClick={() => open({ tab: 'cash' })} />
-        <DashTile label="Critical" value={critical.lines} tone={critical.lines ? 'warn' : ''}
+        <DashTile label="Critical" value={critical.lines} accent="stock" tone={critical.lines ? 'warn' : ''}
           sub={critical.lines
             ? `unsold for ${c.thresholds.critical}+ days — ${rupees(critical.stock_value)}`
             : 'nothing past the critical line'}
           hint="Open the register filtered to the worst of it"
           onClick={() => open({ tab: 'register', status: 'critical' })} />
-        <DashTile label="Approaching" value={c.approaching.lines}
+        <DashTile label="Approaching" value={c.approaching.lines} accent="stock"
           tone={c.approaching.lines ? 'warn' : ''}
           sub={c.approaching.lines
             ? `quiet ${c.thresholds.approaching}+ days — dead within a month`
@@ -13556,26 +13570,31 @@ function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStoc
 
   const attention = [
     { key: 'documents', label: 'Invoices to review', value: toReview, tone: toReview ? 'warn' : '',
+      accent: 'count',
       sub: toReview ? 'read, but something did not reconcile' : 'nothing waiting',
       hint: 'Open Invoice Entry — documents extracted but not yet confirmed' },
     { key: 'purchases', label: 'GRNs in draft', value: grnDrafts.length, tone: grnDrafts.length ? 'warn' : '',
+      accent: 'count',
       sub: grnDrafts.length ? `₹ ${money(sum(grnDrafts, (g) => g.grand_total))} not yet in stock` : 'all receipts posted',
       hint: 'Open GRN — receipts counted but not posted, so the goods are not stock yet' },
     { key: 'inward', label: 'Transfers in transit', value: d.transit.length, tone: d.transit.length ? 'warn' : '',
+      accent: 'move',
       sub: d.transit.length ? `${transitQty} pcs dispatched, not accepted` : 'nothing on the road',
       hint: 'Open Stock Inward — dispatched transfers no destination has checked in' },
     { key: 'lr', label: 'Consignments not received', value: lrPending, tone: lrPending ? 'warn' : '',
+      accent: 'move',
       sub: lrPending ? 'in the register, not taken in' : 'register is clear',
       hint: 'Open LR Entry — consignments booked but nobody has signed for them' },
     { key: 'purchases', label: 'Open shortage claims', value: shortLines, tone: shortLines ? 'warn' : '',
+      accent: 'back',
       sub: shortLines ? `₹ ${money(shortValue)} billed and not delivered` : 'no open claims',
       hint: 'Open GRN — goods billed that the boxes did not hold, not yet waived or claimed' },
     { key: 'payments', label: 'Payable to suppliers', value: '₹ ' + money(payable),
-      tone: overdue.length ? 'warn' : '',
+      tone: overdue.length ? 'warn' : '', accent: 'money',
       sub: d.bills.length ? `${d.bills.length} bill${d.bills.length === 1 ? '' : 's'}${overdue.length ? ` · ${overdue.length} over 30 days` : ''}` : 'nothing outstanding',
       hint: 'Open Payments — unpaid supplier invoices' },
     { key: 'deadstock', label: 'Dead stock', value: deadLines,
-      tone: deadLines ? 'warn' : '',
+      tone: deadLines ? 'warn' : '', accent: 'stock',
       sub: deadLines
         ? `₹ ${money(deadValue)} of capital asleep${criticalLines ? ` · ${criticalLines} line(s) critical` : ''}`
         : 'every stocked line is still moving',
@@ -13650,7 +13669,7 @@ function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStoc
           <div className="dgrid">
             {attention.map((a, i) => (
               <DashTile key={i} label={a.label} value={a.value} sub={a.sub} tone={a.tone}
-                hint={a.hint} onClick={() => go(a.key)} />
+                accent={a.accent} hint={a.hint} onClick={() => go(a.key)} />
             ))}
           </div>
         </Section>
@@ -13667,25 +13686,25 @@ function Dashboard({ modules, go, company, docs, refreshDocs, user, openDeadStoc
           summary={`${d.stock.product_count || 0} records · ₹ ${money(d.stock.total_stock_value)}`}>
           <div className="dgrid">
             <DashTile label="Stock value" value={'₹ ' + money(d.stock.total_stock_value)}
-              sub="at purchase cost, posted receipts only" onClick={() => go('inventory')}
+              accent="money" sub="at purchase cost, posted receipts only" onClick={() => go('inventory')}
               hint="Open Inventory — only records a posted GRN created are counted" />
             <DashTile label="Pieces on hand" value={(d.stock.total_units || 0).toLocaleString('en-IN')}
-              sub={`${d.stock.product_count || 0} inventory records`} onClick={() => go('inventory')} />
+              accent="stock" sub={`${d.stock.product_count || 0} inventory records`} onClick={() => go('inventory')} />
             <DashTile label="Awaiting physical detail" value={pendingDetail}
-              tone={pendingDetail ? 'warn' : ''}
+              accent="count" tone={pendingDetail ? 'warn' : ''}
               sub={pendingDetail ? 'colour, size and fit not recorded yet' : 'every item detailed'}
               hint="Open Inventory — items received but never looked at on the phone"
               onClick={() => go('inventory')} />
             <DashTile label="Purchase returns in draft" value={retDrafts}
-              tone={retDrafts ? 'warn' : ''}
+              accent="back" tone={retDrafts ? 'warn' : ''}
               sub={retDrafts ? 'debit notes not yet raised' : 'no open debit notes'}
               onClick={() => go('returns')} />
             <DashTile label="Outward drafts" value={d.outDrafts.length}
-              tone={d.outDrafts.length ? 'warn' : ''}
+              accent="move" tone={d.outDrafts.length ? 'warn' : ''}
               sub={d.outDrafts.length ? 'packed but not dispatched' : 'nothing packed'}
               onClick={() => go('outward')} />
             <DashTile label="LR rows without an invoice" value={lrUnlinked}
-              sub={lrUnlinked ? 'no invoice matched to them yet' : 'every row is linked'}
+              accent="count" sub={lrUnlinked ? 'no invoice matched to them yet' : 'every row is linked'}
               hint="Open LR Entry — register rows no invoice has been matched against"
               onClick={() => go('lr')} />
           </div>

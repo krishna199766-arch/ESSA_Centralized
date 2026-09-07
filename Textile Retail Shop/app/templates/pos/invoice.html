@@ -26,6 +26,25 @@
     <div class="text-end">
       <h5>TAX INVOICE</h5>
       <div><strong>{{ inv.invoice_number }}</strong></div>
+      {# The bill number as a symbol, so the delivery desk reads it off the paper
+         instead of typing it. Deliberately the bare number and nothing else: it
+         is scanned by people, at a counter, against a bill they are holding, and
+         a payload carrying customer or amount would be handing that to anyone who
+         photographs the slip. The number alone resolves to everything the desk
+         needs, from behind a login.
+
+         The Code 128 fallback is not decoration. `qr_svg` returns an empty string
+         when segno is not installed — which is fine for a garment label, since it
+         still prints its SKU for a person to read, but not here: a bill with no
+         machine-readable number silently disables the whole point of the delivery
+         desk, and the only symptom is staff typing bill numbers and assuming that
+         is how it works. The barcode renderer is pure Python and cannot be
+         missing, so the bill always carries something a reader can take. #}
+      {% set bill_qr = inv.invoice_number | qr(scale=3) %}
+      <div class="d-inline-block mt-1" style="width:96px">
+        {% if bill_qr %}{{ bill_qr }}
+        {% else %}{{ inv.invoice_number | barcode(module=1, height=34, with_text=False) }}{% endif %}
+      </div>
       <div>{{ inv.invoice_date.strftime('%d %b %Y %I:%M %p') }}</div>
       {# Who served it, and — when it isn't the same person — who rang it up. #}
       {% if inv.staff %}
@@ -64,7 +83,17 @@
           <span class="small">Change {{ inv.change_given|inr }}</span><br>
         {% endif %}
       {% endif %}
-      <strong>Status:</strong> <span class="badge bg-success">{{ inv.payment_status }}</span>
+      <strong>Status:</strong> <span class="badge bg-success">{{ inv.payment_status }}</span><br>
+      {# Paid and collected are two different questions, and a bill that answers
+         only the first is how goods sit behind a counter unnoticed. #}
+      <strong>Goods:</strong>
+      {% if inv.delivery_status == 'delivered' %}
+        <span class="badge bg-success">collected</span>
+      {% elif inv.delivery_status == 'part' %}
+        <span class="badge bg-warning text-dark">{{ inv.pending_qty }} still to collect</span>
+      {% else %}
+        <span class="badge bg-secondary">not collected</span>
+      {% endif %}
     </div>
   </div>
 

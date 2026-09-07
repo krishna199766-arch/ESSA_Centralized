@@ -345,6 +345,39 @@ class Invoice(db.Model):
         return round(sum(max(0.0, (p.tendered or p.amount or 0) - (p.amount or 0))
                          for p in self.payments if p.method == "cash"), 2)
 
+    @property
+    def total_qty(self):
+        """Pieces on this bill, which is what a delivery counter counts in."""
+        return round(sum(i.quantity for i in self.items), 3)
+
+    @property
+    def delivered_qty(self):
+        """Pieces the customer has actually carried out.
+
+        Counted, not inferred from `total_qty - pending_qty`: that subtraction
+        also picks up anything returned on a credit note, and would report goods
+        the customer handed BACK as goods they collected.
+        """
+        return round(sum(i.delivered_qty for i in self.items), 3)
+
+    @property
+    def pending_qty(self):
+        """Pieces still to be collected. 0 once the customer has everything."""
+        return round(sum(i.pending_qty for i in self.items), 3)
+
+    @property
+    def delivery_status(self):
+        """`pending` · `part` · `delivered` — what the counter still owes.
+
+        Derived, never stored. A stored flag is a second answer to a question the
+        delivery lines already answer, and the two would disagree the first time
+        a credit note changed what was owed.
+        """
+        pending = self.pending_qty
+        if pending <= 0:
+            return "delivered"
+        return "part" if any(i.delivered_qty for i in self.items) else "pending"
+
 
 class InvoicePayment(db.Model):
     """One tender against one bill — ₹2,000 cash, ₹1,340 on a card.
@@ -406,6 +439,29 @@ class InvoiceItem(db.Model):
         """What is still left to return — nothing can come back twice."""
         return max(0.0, round(self.quantity - self.returned_qty, 3))
 
+    @property
+    def delivered_qty(self):
+        """How much of this line the customer has physically collected."""
+        return round(sum(d.quantity for d in self.delivery_lines), 3)
+
+    @property
+    def pending_qty(self):
+        """What the shop still owes the customer on this line.
+
+        Goods that came back on a credit note are subtracted, and that is a
+        judgement rather than an identity: nothing records whether a returned
+        piece had been collected first. A return of something already collected
+        leaves this UNDER-stating what is owed by that amount; not subtracting
+        would leave it over-stating on a return raised at the delivery counter
+        before the goods ever moved.
+
+        Under-stating is the one to live with. It shows up as a customer at the
+        counter with a bill and a discrepancy a person then looks at; the other
+        way round hands over goods that have already been refunded, silently.
+        """
+        return max(0.0, round(self.quantity - self.delivered_qty
+                              - self.returned_qty, 3))
+
 
 # ---------- Returns ----------
 class CreditNote(db.Model):
@@ -465,6 +521,180 @@ class CreditNoteItem(db.Model):
 
     product = db.relationship("Product")
     invoice_item = db.relationship("InvoiceItem", backref="credit_lines")
+
+
+# ---------- Delivery ----------
+class Delivery(db.Model):
+    """Goods physically handed to the customer, against the bills they paid on.
+
+    Billing and collection are two counters and two moments. The till already
+    took the money and took the stock off the shelf; what nothing recorded until
+    now is whether the customer actually walked out with the garments. In a shop
+    where a bill is paid at one desk and the pieces are packed at another, that
+    gap is where goods go missing and where "I paid for three and got two" has no
+    answer either way.
+
+    So this touches NO stock and NO money — the sale did both. It records
+    custody, exactly as an `Alteration` does: who handed over what, from which
+    bills, verified against the tag on each garment.
+
+    **One delivery, several bills.** A customer buying at two counters leaves
+    with one bundle, and the handover is that bundle, not each bill separately.
+    That is what `DeliveryBill` is for, and it is why the reference screen's
+    left-hand table has a Total under it. This document IS the settlement the
+    reference ERP scans — the shop has no separate settlement or voucher record,
+    and inventing an empty one to hold a number would be a document that never
+    says anything.
+    """
+    __tablename__ = "deliveries"
+    id = db.Column(db.Integer, primary_key=True)
+    number = db.Column(db.String(32), unique=True, nullable=False)
+    # Who it was handed to. Copied from the bills rather than typed, and null for
+    # a walk-in, exactly as an invoice is.
+    customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), index=True)
+    # Two people again, and the same split the invoice makes: `staff_id` handed
+    # the goods over and is who a query about this delivery goes to; `cashier_id`
+    # is the login that was open at the delivery desk.
+    staff_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    cashier_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    # Where the handover happened. The delivery desk is not always the till that
+    # billed it, so this is the desk's own choice and not copied off the invoice.
+    company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), index=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    counter_id = db.Column(db.Integer, db.ForeignKey("counters.id"), index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    notes = db.Column(db.String(256))
+
+    customer = db.relationship("Customer")
+    staff = db.relationship("User", foreign_keys=[staff_id])
+    cashier = db.relationship("User", foreign_keys=[cashier_id])
+    company = db.relationship("Company")
+    location = db.relationship("Location")
+    counter = db.relationship("Counter")
+    bills = db.relationship("DeliveryBill", backref="delivery", lazy=True,
+                            cascade="all, delete-orphan")
+    lines = db.relationship("DeliveryLine", backref="delivery", lazy=True,
+                            cascade="all, delete-orphan")
+
+    @property
+    def total_qty(self):
+        """Pieces handed over on this delivery."""
+        return round(sum(l.quantity for l in self.lines), 3)
+
+    @property
+    def scanned_qty(self):
+        """How many of them were read off a tag rather than ticked by hand."""
+        return round(sum(l.scanned for l in self.lines), 3)
+
+    @property
+    def overridden_qty(self):
+        """Pieces a manager passed without a scan. 0 on an ordinary delivery."""
+        return round(self.total_qty - self.scanned_qty, 3)
+
+    @property
+    def total_amount(self):
+        """What the goods in this handover were billed at."""
+        return round(sum(l.amount for l in self.lines), 2)
+
+
+class DeliveryBill(db.Model):
+    """One bill covered by one handover.
+
+    A plain link row and nothing more: the quantities live on `DeliveryLine`,
+    which points at the invoice LINE. Holding a per-bill quantity here as well
+    would be the same figure in two places, free to drift the moment a delivery
+    is corrected.
+    """
+    __tablename__ = "delivery_bills"
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_id = db.Column(db.Integer, db.ForeignKey("deliveries.id"),
+                            nullable=False, index=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey("invoices.id"),
+                           nullable=False, index=True)
+    invoice = db.relationship("Invoice",
+                              backref=db.backref("delivery_bills", lazy=True))
+    __table_args__ = (db.UniqueConstraint("delivery_id", "invoice_id",
+                                          name="uq_delivery_bill"),)
+
+
+class DeliveryLine(db.Model):
+    """How much of one invoice line went out on one delivery.
+
+    Keyed on the invoice ITEM, not the product, for the reason a credit note is:
+    a bill carrying the same garment twice at two prices has two lines, and the
+    customer collecting one of them has collected a specific one.
+
+    `scanned` is how many of `quantity` were verified against a tag. It is a
+    count rather than a flag because a line of five can be four scans and one
+    piece whose label came off in a bag, and a delivery that could only say
+    "verified" or "not" would have to lie about which.
+    """
+    __tablename__ = "delivery_lines"
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_id = db.Column(db.Integer, db.ForeignKey("deliveries.id"),
+                            nullable=False, index=True)
+    invoice_item_id = db.Column(db.Integer, db.ForeignKey("invoice_items.id"),
+                                nullable=False, index=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    scanned = db.Column(db.Float, default=0.0)
+    # Why anything on this line went out unscanned, and who allowed it. Both null
+    # on a line that was scanned in full, which is the ordinary case.
+    override_reason = db.Column(db.String(256))
+    overridden_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+
+    product = db.relationship("Product")
+    overridden_by = db.relationship("User")
+    invoice_item = db.relationship("InvoiceItem",
+                                   backref=db.backref("delivery_lines", lazy=True))
+    scans = db.relationship("DeliveryScan", backref="line", lazy=True,
+                            cascade="all, delete-orphan")
+
+    @property
+    def unit_price(self):
+        """What this was billed at. Read through, never copied.
+
+        A posted invoice's rate cannot change, so a second copy here could only
+        ever be the same number or a wrong one.
+        """
+        return (self.invoice_item.unit_price if self.invoice_item else 0.0) or 0.0
+
+    @property
+    def amount(self):
+        return round(self.quantity * self.unit_price, 2)
+
+    @property
+    def overridden(self):
+        """Pieces on this line that no tag was read for."""
+        return round(self.quantity - (self.scanned or 0), 3)
+
+
+class DeliveryScan(db.Model):
+    """One tag actually read at the delivery desk.
+
+    The evidence behind `DeliveryLine.scanned`, kept rather than counted away,
+    because "which of these went out" is the whole reason the warehouse mints a
+    code per garment (see the piece labels in the warehouse's ARCHITECTURE §7).
+    A line that says 3 and three codes that say which three are different
+    records, and only the second one settles a dispute.
+
+    `piece_code` is filled only when the tag identified an individual garment —
+    a `EU1|…` payload or a bare `ESSA-00002-007`. A plain SKU tag is printed
+    identically on every piece of that item, so it carries no identity and
+    scanning it three times for a line of three is correct. That distinction is
+    what `delivery.piece_of()` decides, and it is the whole of the
+    double-scan guard: a piece code may be read once, a SKU tag as often as the
+    line has pieces.
+    """
+    __tablename__ = "delivery_scans"
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_line_id = db.Column(db.Integer, db.ForeignKey("delivery_lines.id"),
+                                 nullable=False, index=True)
+    #: exactly what the reader produced, unparsed
+    code = db.Column(db.Text)
+    #: the individual garment, when the tag named one
+    piece_code = db.Column(db.String(64), index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 # ---------- Alterations ----------

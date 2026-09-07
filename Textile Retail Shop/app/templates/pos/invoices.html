@@ -55,9 +55,9 @@
 </form>
 
 <div class="row g-3 mb-3">
-  <div class="col-6 col-md-4"><div class="stat-card card p-3"><div class="label">Matching invoices</div><div class="value">{{ summary.count }}</div></div></div>
-  <div class="col-6 col-md-4"><div class="stat-card card p-3"><div class="label">Total value</div><div class="value">{{ summary.total|inr }}</div></div></div>
-  <div class="col-12 col-md-4"><div class="stat-card card p-3"><div class="label">GST collected</div><div class="value">{{ summary.tax|inr }}</div></div></div>
+  <div class="col-6 col-md-4"><div class="stat-card card p-3 t-count"><div class="label">Matching invoices</div><div class="value">{{ summary.count }}</div></div></div>
+  <div class="col-6 col-md-4"><div class="stat-card card p-3 t-money"><div class="label">Total value</div><div class="value">{{ summary.total|inr }}</div></div></div>
+  <div class="col-12 col-md-4"><div class="stat-card card p-3 t-adjust"><div class="label">GST collected</div><div class="value">{{ summary.tax|inr }}</div></div></div>
 </div>
 
 <div class="card">

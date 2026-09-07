@@ -19,9 +19,9 @@
 </div>
 
 <div class="row g-3 mb-3">
-  <div class="col-md-4"><div class="stat-card card p-3"><div class="label">Loyalty balance</div><div class="value">{{ '%.0f' % customer.loyalty_points }} pts</div></div></div>
-  <div class="col-md-4"><div class="stat-card card p-3"><div class="label">Total spent</div><div class="value">{{ customer.total_spent|inr }}</div></div></div>
-  <div class="col-md-4"><div class="stat-card card p-3"><div class="label">Invoices</div><div class="value">{{ invoices|length }}</div></div></div>
+  <div class="col-md-4"><div class="stat-card card p-3 t-adjust"><div class="label">Loyalty balance</div><div class="value">{{ '%.0f' % customer.loyalty_points }} pts</div></div></div>
+  <div class="col-md-4"><div class="stat-card card p-3 t-money"><div class="label">Total spent</div><div class="value">{{ customer.total_spent|inr }}</div></div></div>
+  <div class="col-md-4"><div class="stat-card card p-3 t-count"><div class="label">Invoices</div><div class="value">{{ invoices|length }}</div></div></div>
 </div>
 
 <div class="card mb-3">

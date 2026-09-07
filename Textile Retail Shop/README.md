@@ -5,6 +5,7 @@ A complete Flask-based retail management system for Taqua Silks with GST-complia
 ## Features
 
 - **POS / Billing** — cart-based sales, SKU search/scan, GST split (CGST/SGST/IGST auto-detected by state), printable tax invoice with HSN codes and GSTIN.
+- **Delivery** — the collection desk. Scan the bill (QR or number), scan every garment as it goes in the bag, and the handover is recorded against the bills it covers. Part collection is a first-class answer, so the balance stays owed and shows on a "still to collect" list; a piece tag can only go out once; and a piece nobody can scan needs a manager and a reason, both printed on the delivery note. Moves no stock and no money — the sale already did both.
 - **Inventory** — products with categories, fabric/color/size, HSN codes, GST rate, cost/selling price, stock, reorder levels, low-stock highlighting, full stock-movement audit log.
 - **Customers (CRM)** — profiles, purchase history, GSTIN support for B2B, loyalty points ledger with configurable earn rate + redemption.
 - **Suppliers & Purchase Orders** — supplier records, create POs, one-click "Receive" that adds to stock and updates cost price.
