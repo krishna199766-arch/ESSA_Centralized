@@ -1,21 +1,32 @@
-"""Floors and tills — the master that decides what a bill is called.
+"""Floors and tills — what each till bills as, and where that was decided.
 
-Configuration, not code. The brief names four storeys and four prefixes for one
-shop; what is built here is a table of storeys with prefixes on it, so a fifth
-floor, a second store, or a different set of letters is somebody typing rather
-than somebody deploying.
+MOSTLY A WINDOW, NOT A MASTER. The chain warehouse → store → floor → till is
+maintained in the warehouse's own Locations screen, and the shop mirrors it (see
+app/places.sync_places). That is the same rule app/places.py sets out for stores
+and app/master_categories.py for categories, and it is not a style preference: a
+shop keeping its own second list of floors would be asked "what will this
+counter's bills be called" and be able to answer differently from the system
+that issued the counter.
 
-Two things are deliberately NOT editable here.
+So a row that came from the warehouse is shown here and edited THERE. This
+screen refuses to change one rather than letting somebody set a prefix that the
+next sync would silently put back — a change that appears to work and then
+un-happens is worse than one that is refused with a reason.
 
-**Stores** come from the warehouse and are kept in step with it (see
-app/places.sync_locations) — a shop that renamed its own copy of a branch could
-not be asked what was sent there and what sold. So this screen lists them and
-hangs floors off them.
+What it does own is the shop running ALONE, with no warehouse to read: an
+install with its own SQLite file and no Essa beside it still needs floors, and
+those are created here and marked `local` so a sync that later finds a warehouse
+does not retire them. Same flag, same reason, as Location.local.
+
+Two things nothing here can change:
+
+**Stores.** They come from the warehouse and are matched by name. This screen
+lists them and hangs floors off them.
 
 **A prefix on a bill that has already been raised.** Changing a floor's prefix
 changes what its NEXT bill is called and nothing else; every bill already
-printed keeps the number it went out with, and keeps its own copy of the prefix
-and sequence it was built from (see Invoice.bill_prefix). A master that rewrote
+printed keeps the number it went out with, and its own copy of the prefix and
+sequence it was built from (see Invoice.bill_prefix). A master that rewrote
 history to tidy itself up would be a master that loses the audit.
 """
 from flask import (Blueprint, flash, jsonify, redirect, render_template,
@@ -23,7 +34,7 @@ from flask import (Blueprint, flash, jsonify, redirect, render_template,
 from flask_login import login_required
 from sqlalchemy import func
 
-from app import billing_numbers, db, places
+from app import billing_numbers, db, places, warehouse_items
 from app.models import BillSequence, Counter, Floor, Invoice, Location
 from app.utils import role_required
 
@@ -83,6 +94,12 @@ def index():
         "stores/index.html", locations=locations, counts=counts, series=series,
         year=year, shared={k: v for k, v in shared.items() if len(v) > 1},
         standard=billing_numbers.STANDARD_FLOORS,
+        # Whether there is a warehouse to read at all. Where there is, this
+        # screen points at it rather than offering to create a second set of
+        # floors that the warehouse does not know about; where there is not —
+        # the shop running on its own — it is the only place floors can come
+        # from, and everything here is editable.
+        wh_available=warehouse_items.available(),
         unassigned=Counter.query.filter(Counter.floor_id.is_(None),
                                         Counter.active.is_(True)).count(),
         example=billing_numbers.format_number("TG", year, 1))
@@ -106,9 +123,11 @@ def new_floor():
         flash(f"{location.name} already has a floor called “{name}”.", "warning")
         return redirect(url_for("stores.index"))
 
+    # `local` — this shop made it, so a sync that later finds a warehouse must
+    # leave it alone rather than retiring a floor it never issued.
     db.session.add(Floor(location_id=location.id, name=name, prefix=prefix,
                          sort_order=request.form.get("sort_order", type=int) or 0,
-                         active=True))
+                         local=True, active=True))
     db.session.commit()
     flash(f"{name} added at {location.name} — its bills will be "
           f"{billing_numbers.format_number(prefix, billing_numbers.financial_year(), 1)}.",
@@ -133,7 +152,7 @@ def standard_floors():
         if Floor.query.filter_by(location_id=location.id, name=name).first():
             continue
         db.session.add(Floor(location_id=location.id, name=name, prefix=prefix,
-                             sort_order=order, active=True))
+                             sort_order=order, local=True, active=True))
         made.append(f"{name} ({prefix})")
     db.session.commit()
     flash(f"Added at {location.name}: {', '.join(made)}." if made
@@ -142,11 +161,29 @@ def standard_floors():
     return redirect(url_for("stores.index"))
 
 
+def _mirrored(row, what):
+    """Refuse to edit something the warehouse owns, and say where to go.
+
+    Returned as a message rather than raised, so each caller can flash it and
+    send the person back to the same screen. A silent no-op here would be worse
+    than the edit: it would look saved until the next sync.
+    """
+    if getattr(row, "wh_id", None):
+        return (f"“{row.name}” comes from the warehouse's Locations screen — "
+                f"change the {what} there and it will follow through here on the "
+                f"next sync. Editing it here would be undone.")
+    return None
+
+
 @stores_bp.route("/floors/<int:fid>", methods=["POST"])
 @login_required
 @role_required("admin", "manager")
 def edit_floor(fid):
     storey = Floor.query.get_or_404(fid)
+    blocked = _mirrored(storey, "floor")
+    if blocked:
+        flash(blocked, "warning")
+        return redirect(url_for("stores.index"))
     name = (request.form.get("name") or "").strip()
     try:
         prefix = _clean_prefix(request.form.get("prefix"))
@@ -181,6 +218,10 @@ def edit_floor(fid):
 def assign_counter(cid):
     """Put a till on a storey — the mapping the bill prefix comes from."""
     till = Counter.query.get_or_404(cid)
+    blocked = _mirrored(till, "till's floor")
+    if blocked:
+        flash(blocked, "warning")
+        return redirect(url_for("stores.index"))
     raw = request.form.get("floor_id")
     if not raw:
         till.floor_id = None

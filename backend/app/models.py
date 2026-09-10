@@ -2036,8 +2036,50 @@ class Store(LocationProfile, Base):
     created_at = Column(DateTime, default=now)
 
     warehouse = relationship("Warehouse", back_populates="stores")
+    floors = relationship("Floor", back_populates="store",
+                          order_by="Floor.sort_order, Floor.name")
     terminals = relationship("PosTerminal", back_populates="store",
                              order_by="PosTerminal.name")
+
+
+class Floor(Base):
+    """A storey of a store, and the bill series billed from it.
+
+    Between the store and the till because that is where it is in the building:
+    a store has floors, a floor has tills. It exists as a row rather than as a
+    label on the terminal because it carries something the tills share — the
+    **bill prefix**. A shop numbering its ground-floor bills TG26-001 and its
+    first-floor bills TF26-001 is keeping separate registers, and which register
+    a bill lands in is decided by where the till stands, not by the till.
+
+    A floor is NOT a stock location, for the same reason a terminal is not (see
+    PosTerminal): the store owns the stock. Giving a floor its own holding would
+    mean a garment on a shelf belonging to the first floor and a sale on the
+    ground floor failing for stock in the same building.
+
+    `prefix` is the whole point and doubles as this level's code, so there is no
+    separate `code` column — two identifiers for one row is how they come to
+    disagree. It is what the retail app reads to number a bill; see the shop's
+    app/billing_numbers.py, which mirrors these rows and never invents one.
+    """
+    __tablename__ = "floors"
+    id = Column(Integer, primary_key=True)
+    store_id = Column(Integer, ForeignKey("stores.id"), index=True, nullable=False)
+    name = Column(String, nullable=False)
+    #: TG / TF / TS / TT — "Taqua Ground", "Taqua First", and so on. Upper case
+    #: and alphanumeric, because it is the front of a document number that has to
+    #: read back cleanly.
+    prefix = Column(String, index=True)
+    #: The order the storeys are listed in — ground floor first, not "First"
+    #: before "Ground" because F sorts before G.
+    sort_order = Column(Integer, default=0)
+    # Deactivated rather than deleted, like every other level here: a floor that
+    # closed still has last year's bills numbered from it.
+    active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=now)
+
+    store = relationship("Store", back_populates="floors")
+    terminals = relationship("PosTerminal", back_populates="floor")
 
 
 class PosTerminal(LocationProfile, Base):
@@ -2061,6 +2103,12 @@ class PosTerminal(LocationProfile, Base):
     name = Column(String, nullable=False)
     code = Column(String, unique=True, index=True)
     business_id = Column(Integer, ForeignKey("businesses.id"), index=True)
+    #: Which storey this till stands on, and therefore which bill series it
+    #: draws from. Nullable, and that is not an oversight: every till that
+    #: existed before floors did has no answer, and a till nobody has placed yet
+    #: must keep selling — on the shop's plain bill series — rather than
+    #: refusing a customer over an incomplete master.
+    floor_id = Column(Integer, ForeignKey("floors.id"), index=True)
     active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime, default=now)
     #: When this till was last switched off, and None while it is open.
@@ -2078,6 +2126,7 @@ class PosTerminal(LocationProfile, Base):
     deactivated_at = Column(DateTime)
 
     store = relationship("Store", back_populates="terminals")
+    floor = relationship("Floor", back_populates="terminals")
 
     # Two tills at one store are two drawers and must be told apart; the same
     # till name at two different stores is ordinary ("Counter 1" everywhere).

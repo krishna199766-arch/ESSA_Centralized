@@ -45,17 +45,20 @@ def head(t):
 
 
 # ---------------------------------------------------------------------------
-head("the four names that collide are still four names that collide")
+head("the names that collide are still the names we know about")
 # If this ever stops being true the whole mechanism can go — so it is asserted
-# rather than assumed, and it will say so on the day somebody renames one.
+# rather than assumed, and it will say so on the day somebody renames one, or
+# adds a fifth. `floors` was exactly that: the shop grew one for its bill
+# numbering and the warehouse grew one for the same storeys a week later, which
+# is precisely the sort of quiet addition this line exists to notice.
 import re                                                        # noqa: E402
 
 wh = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
 shop_models = (SHOP / "app" / "models.py").read_text(encoding="utf-8")
 names = lambda src: set(re.findall(r'__tablename__\s*=\s*"([^"]+)"', src))
 shared = names(wh) & names(shop_models)
-eq("the same four", sorted(shared),
-   ["categories", "products", "stock_movements", "users"])
+eq("the same five", sorted(shared),
+   ["categories", "floors", "products", "stock_movements", "users"])
 
 head("and the shop puts its schema in the STATEMENT, not the session")
 if not SHOP.is_dir():

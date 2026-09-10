@@ -233,6 +233,15 @@ class Floor(db.Model):
     #: TG / TF / TS / TT — "Taqua Ground", "Taqua First", and so on.
     prefix = db.Column(db.String(8), nullable=False, index=True)
     sort_order = db.Column(db.Integer, default=0)
+    #: True for a floor this shop added itself, running with no warehouse to
+    #: read. False for one mirrored from the warehouse's Locations master, which
+    #: is where floors belong — see app/places.sync_places. The flag is what
+    #: stops a sync retiring a row it never created, exactly as on Location.
+    local = db.Column(db.Boolean, default=False)
+    #: `floors.id` in the warehouse, for the row this mirrors. Matching on the id
+    #: rather than the name is what lets a floor be RENAMED upstairs without the
+    #: shop making a second one and leaving the tills pointing at the old.
+    wh_id = db.Column(db.Integer, index=True)
     active = db.Column(db.Boolean, default=True, index=True)
 
     location = db.relationship("Location",
@@ -255,6 +264,10 @@ class Counter(db.Model):
     #: nobody has mapped yet must keep billing — on the shop's plain INV- series
     #: — rather than refusing a customer because a master is incomplete.
     floor_id = db.Column(db.Integer, db.ForeignKey("floors.id"), index=True)
+    #: `pos_terminals.id` in the warehouse, for the till this mirrors. Null for
+    #: the "Counter 1" this shop creates for a branch the warehouse has not
+    #: given a till of its own — see app/places.sync_places.
+    wh_id = db.Column(db.Integer, index=True)
     active = db.Column(db.Boolean, default=True, index=True)
     __table_args__ = (db.UniqueConstraint("location_id", "name",
                                           name="uq_counter_location_name"),)

@@ -68,11 +68,21 @@ No test framework and no test dependency — each file is a script that builds w
 it needs, asserts in plain prose, and runs against a throwaway database.
 
 ```bash
+python test_mounted.py         # every screen still builds when `app` isn't ours
 python test_bill_numbers.py    # floor series, and 20 tills billing at once
 python test_promotions.py      # the promotion engine, end to end
 python test_delivery.py        # goods leave only when handed over
 python test_warehouse_sync.py  # needs a warehouse database beside the shop
 ```
+
+**Run `test_mounted.py` after touching any route.** The shop is deployed inside
+the Essa warehouse, which owns the name `app` by the time a request arrives — so
+an `import` written *inside* a view reaches into the wrong package and 500s that
+screen for everyone, while every other suite passes because they all run the shop
+standalone. That shipped once. This one swaps the package away exactly as the
+mount does and then asks for every screen, so it cannot ship again. Every
+`from app…` in this codebase belongs at module level; see `app/places.py` and
+`backend/app/pos_mount.py` for the long version.
 
 ## Floor-wise bill numbers
 
@@ -86,13 +96,31 @@ counts `TG26-001, TG26-002, …` while the first floor is independently on
 `TF26-001`. A cashier never types a bill number and there is no field on the
 screen that could change one.
 
-**The mapping is data.** A floor is a row with a prefix on it, under **Floors &
-tills**; a till is put on a floor there, and that is what decides the prefix. A
-fifth floor, a second store, or a different set of letters is typing, not
-deploying — nothing in the billing path knows the words "Ground" or "TG". A store
-with no floors set up yet gets a one-click **Add the four standard floors**
-(Ground TG · First TF · Second TS · Third TT), which writes exactly the rows
-somebody would have typed.
+**The mapping is data, and it is created in the warehouse.** The chain
+
+```
+Business → Warehouse → Store → Floor → POS terminal
+```
+
+is one master, kept in the Essa warehouse's **Locations** screen — add a floor
+under a store, give it a prefix, put a till on it — and this shop **mirrors** it,
+exactly as it mirrors the stores themselves and the category master. A fifth
+floor, a second store, or a different set of letters is typing, not deploying;
+nothing in the billing path knows the words "Ground" or "TG".
+
+The shop's **Floors & tills** screen is the window onto that: rows from upstairs
+are marked `warehouse` and are read-only here, because a prefix changed on this
+side would be silently put back by the next sync, and a change that un-happens is
+worse than one that is refused. What the screen *does* own is a shop running
+**alone**, with no warehouse to read — floors created there are marked `local`, a
+sync leaves them alone, and a store with none gets a one-click **Add the four
+standard floors** (Ground TG · First TF · Second TS · Third TT).
+
+Mirrored rows are matched on the warehouse's own row id, not on their name, so a
+floor renamed upstairs is renamed here rather than duplicated with the tills left
+pointing at the old one. A row the warehouse stops listing is switched off, never
+deleted — its prefix is on bills that are still read back — and a till this shop
+created for itself is never retired by a sync at all.
 
 **The financial year is the year it started in** — April to March, so a bill rung
 in September 2026 reads `26` and still does the following March. On 1 April it

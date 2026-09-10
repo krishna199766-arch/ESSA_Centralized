@@ -80,9 +80,10 @@ def _single_store_name():
 def _isolate_shop_schema() -> None:
     """Keep the shop's tables out of the warehouse's, on Postgres.
 
-    The two codebases were written against separate SQLite FILES, and four of
-    their table names are the same: categories, products, stock_movements and
-    users. A file each made that harmless. One Postgres database does not —
+    The two codebases were written against separate SQLite FILES, and five of
+    their table names are the same: categories, floors, products,
+    stock_movements and users. A file each made that harmless. One Postgres
+    database does not —
     whichever app runs `create_all` first wins the name, and the other then
     queries a table with its own name and the wrong columns. The symptom is a
     column that "does not exist" on a table that plainly does.

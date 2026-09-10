@@ -14,8 +14,8 @@ from config import Config
 # the two applications apart.
 #
 # Mounted inside the warehouse on ONE Postgres, it is set to "shop", and it has
-# to be, because four table names are the same in both codebases: categories,
-# products, stock_movements and users. Whichever application creates a name first
+# to be, because five table names are the same in both codebases: categories,
+# floors, products, stock_movements and users. Whichever application creates a name first
 # wins it, and the other then queries a table with its own name and the wrong
 # columns — "column categories.description does not exist", on a table that
 # plainly does exist.

@@ -584,6 +584,16 @@ export const api = {
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
   deleteStore: (id) => fetch(`/api/locations/stores/${id}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
+  // Floors — the storey a till stands on, and the bill prefix its sales carry.
+  createFloor: (body) => fetch('/api/locations/floors', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('fl'), { detail: j.detail }); return j }),
+  updateFloor: (id, body) => fetch(`/api/locations/floors/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('fl'), { detail: j.detail }); return j }),
+  deleteFloor: (id) => fetch(`/api/locations/floors/${id}`, { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('fl'), { detail: j.detail }); return j }),
+
   createTerminal: (body) => fetch('/api/locations/terminals', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pos'), { detail: j.detail }); return j }),

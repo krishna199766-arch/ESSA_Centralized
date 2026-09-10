@@ -180,7 +180,129 @@ def sync_locations():
         retired += 1
 
     db.session.commit()
+    sync_places()
     return added, retired
+
+
+def sync_places():
+    """Bring the warehouse's FLOORS and TILLS in, under the branches above.
+
+    The warehouse's Locations screen is the master for the whole chain —
+    warehouse → store → floor → till — and this is the shop reading it, exactly
+    as `sync_locations` above reads the stores. It is not a second master: a
+    floor is created upstairs, and the prefix it carries is what the till here
+    numbers a bill with (see app/billing_numbers.py).
+
+    MATCHED ON THE WAREHOUSE'S OWN ID, not on the name. Stores are matched by
+    name because that is all the older option list ever gave; a floor and a till
+    both have a real id, so renaming "Ground Floor" upstairs renames it here
+    instead of creating a second one and leaving the counter on the first.
+
+    ADDITIVE, like everything else the shop reads. A row the warehouse no longer
+    lists is deactivated, never deleted — a till that closed still has last
+    week's bills against it. And a till the shop made for itself (`wh_id` null —
+    the "Counter 1" every branch gets so it can bill at all) is left alone
+    entirely: it is not the warehouse's to retire, and it may be the only till
+    the branch has.
+    """
+    con = _wh._connect()
+    if con is None:
+        return {"floors": 0, "counters": 0, "retired": 0}
+    try:
+        try:
+            floors = con.execute(
+                "SELECT f.id AS id, f.name AS name, f.prefix AS prefix, "
+                "       f.sort_order AS sort_order, f.active AS active, "
+                "       s.name AS store "
+                "FROM floors f JOIN stores s ON s.id = f.store_id").fetchall()
+        except SQLAlchemyError:
+            return {"floors": 0, "counters": 0, "retired": 0}   # older warehouse
+        try:
+            tills = con.execute(
+                "SELECT t.id AS id, t.name AS name, t.active AS active, "
+                "       t.floor_id AS floor_id, s.name AS store "
+                "FROM pos_terminals t JOIN stores s ON s.id = t.store_id").fetchall()
+        except SQLAlchemyError:
+            tills = []
+    finally:
+        con.close()
+
+    def key(name):
+        return " ".join(str(name or "").split()).lower()
+
+    here = {key(l.name): l for l in Location.query.all()}
+    made_f = made_c = retired = 0
+
+    # `active` is filtered in Python for the same reason as everywhere else in
+    # this file: it is BOOLEAN on Postgres and INTEGER on SQLite, and no single
+    # WHERE clause is valid on both.
+    seen_floors, by_wh_floor = set(), {}
+    for row in floors:
+        loc = here.get(key(row.get("store")))
+        if loc is None:
+            continue                  # a store this shop has not taken in
+        wh_id = row.get("id")
+        mine = Floor.query.filter_by(wh_id=wh_id).first()
+        if mine is None:
+            # A floor the shop had already created by hand under the same name
+            # is ADOPTED rather than duplicated — otherwise a shop that set its
+            # floors up locally and then had them added upstairs would end up
+            # with two of each and tills split between them.
+            mine = Floor.query.filter_by(location_id=loc.id,
+                                         name=str(row.get("name") or "")).first()
+            if mine is None:
+                mine = Floor(location_id=loc.id, name=str(row.get("name") or ""))
+                db.session.add(mine)
+                made_f += 1
+            mine.wh_id = wh_id
+        mine.location_id = loc.id
+        mine.name = str(row.get("name") or mine.name)
+        # A floor with no prefix upstairs bills on the shop's plain series; the
+        # column is not nullable here, so that is stored as the empty string and
+        # billing_numbers.series_for reads it as "not set".
+        mine.prefix = (str(row.get("prefix") or "").strip().upper())
+        mine.sort_order = int(row.get("sort_order") or 0)
+        mine.local = False
+        mine.active = bool(row.get("active") is None or row.get("active"))
+        db.session.flush()
+        by_wh_floor[wh_id] = mine.id
+        seen_floors.add(wh_id)
+
+    for row in tills:
+        loc = here.get(key(row.get("store")))
+        if loc is None:
+            continue
+        wh_id = row.get("id")
+        mine = Counter.query.filter_by(wh_id=wh_id).first()
+        if mine is None:
+            mine = Counter.query.filter_by(location_id=loc.id,
+                                           name=str(row.get("name") or "")).first()
+            if mine is None:
+                mine = Counter(location_id=loc.id, name=str(row.get("name") or ""))
+                db.session.add(mine)
+                made_c += 1
+            mine.wh_id = wh_id
+        mine.location_id = loc.id
+        mine.name = str(row.get("name") or mine.name)
+        mine.floor_id = by_wh_floor.get(row.get("floor_id"))
+        mine.active = bool(row.get("active") is None or row.get("active"))
+
+    # Retire what the warehouse has stopped listing — its rows only, and only by
+    # switching them off.
+    for f in Floor.query.filter(Floor.wh_id.isnot(None),
+                                Floor.active.is_(True)).all():
+        if f.wh_id not in seen_floors:
+            f.active = False
+            retired += 1
+    seen_tills = {row.get("id") for row in tills}
+    for c in Counter.query.filter(Counter.wh_id.isnot(None),
+                                  Counter.active.is_(True)).all():
+        if c.wh_id not in seen_tills:
+            c.active = False
+            retired += 1
+
+    db.session.commit()
+    return {"floors": made_f, "counters": made_c, "retired": retired}
 
 
 #: Where the "which warehouse opened this till" scope is kept. In the SESSION,

@@ -85,9 +85,29 @@ class StoreIn(LocationProfileIn):
     active: Optional[bool] = None
 
 
+class FloorIn(BaseModel):
+    """A storey. Not a LocationProfileIn — a floor does not print.
+
+    The postal and statutory block exists on the levels that appear at the head
+    of a document: a GRN's warehouse, a transfer's store, a bill's till. A floor
+    appears on none of them; what it contributes to a bill is the prefix its
+    number starts with. Giving it an address it would never use would be a form
+    asking for something nobody can answer.
+    """
+    name: str
+    store_id: Optional[int] = None
+    prefix: Optional[str] = None
+    sort_order: Optional[int] = None
+    active: Optional[bool] = None
+
+
 class TerminalIn(LocationProfileIn):
     name: str
     store_id: Optional[int] = None
+    #: Which storey it stands on. `None` means "not mentioned" here as
+    #: everywhere else in this file, so a PATCH that only closes a till does not
+    #: also unplace it. Sending 0 is how the screen says "take it off its floor".
+    floor_id: Optional[int] = None
     code: Optional[str] = None
     active: Optional[bool] = None
 
@@ -161,6 +181,33 @@ def _apply_profile(obj, body: LocationProfileIn, db: Session) -> None:
     # is not registered has a state all the same.
     if body.state_code is not None and not (body.gstin or "").strip():
         obj.state_code = _clean(body.state_code)
+
+
+def _free_code(db: Session, model, code, keep_id=None, what="place"):
+    """A code nothing else is already using, or a 409 saying who has it.
+
+    `code` is unique on all three levels, and until this existed nothing checked
+    it: the database refused the insert and the person got an Internal Server
+    Error with a SQLAlchemy traceback behind it. That is the worst possible
+    answer to a typo — it names no field, suggests no fix, and looks like the
+    application is broken rather than like the form is.
+
+    Worth saying out loud that this is a CHECK and not a lock: two people saving
+    the same code in the same second still race, and the unique constraint is
+    what stops them. What this removes is the ordinary case — one person, one
+    form, a code somebody else took last month — being reported as a crash.
+
+    `keep_id` is the row being edited, which is allowed to keep its own code.
+    """
+    if not code:
+        return None
+    holder = db.query(model).filter(model.code == code).first()
+    if holder and holder.id != keep_id:
+        raise HTTPException(409, f"the code “{code}” already belongs to "
+                                 f"“{holder.name}” — codes are unique across "
+                                 f"every {what}, so pick another or leave it "
+                                 f"blank and one will be issued")
+    return code
 
 
 def _catalogue_id(db: Session, given):
@@ -388,7 +435,9 @@ def create_warehouse(body: WarehouseIn, db: Session = Depends(get_db)):
     if db.query(models.Warehouse).filter(models.Warehouse.name == name).first():
         raise HTTPException(409, f"there is already a warehouse called “{name}”")
     w = models.Warehouse(name=name,
-                         code=_clean(body.code) or svc._next_code(db, models.Warehouse, "WH"),
+                         code=_free_code(db, models.Warehouse, _clean(body.code),
+                                              what="warehouse")
+                              or svc._next_code(db, models.Warehouse, "WH"),
                          catalogue_id=_catalogue_id(db, body.catalogue_id),
                          active=True if body.active is None else bool(body.active))
     _apply_profile(w, body, db)
@@ -415,7 +464,8 @@ def update_warehouse(wid: int, body: WarehouseIn, db: Session = Depends(get_db))
             raise HTTPException(409, f"there is already a warehouse called “{name}”")
         w.name = name
     if body.code is not None:
-        w.code = _clean(body.code)
+        w.code = _free_code(db, models.Warehouse, _clean(body.code),
+                           keep_id=w.id, what="warehouse")
     _apply_profile(w, body, db)
     if body.catalogue_id is not None:
         # Moving a warehouse to another business line is refused once it holds
@@ -513,7 +563,9 @@ def create_store(body: StoreIn, db: Session = Depends(get_db)):
     if not wid:
         wid = svc.ensure_default_warehouse(db).id
     s = models.Store(name=name, warehouse_id=wid,
-                     code=_clean(body.code) or svc._next_code(db, models.Store, "ST"),
+                     code=_free_code(db, models.Store, _clean(body.code),
+                                          what="store")
+                          or svc._next_code(db, models.Store, "ST"),
                      active=True if body.active is None else bool(body.active))
     _apply_profile(s, body, db)
     # Defaults to the supplying warehouse's company rather than to the install's
@@ -543,7 +595,8 @@ def update_store(sid: int, body: StoreIn, db: Session = Depends(get_db)):
         warning = svc.rename_warning(s.name, name)
         s.name = name
     if body.code is not None:
-        s.code = _clean(body.code)
+        s.code = _free_code(db, models.Store, _clean(body.code),
+                           keep_id=s.id, what="store")
     _apply_profile(s, body, db)
     if body.warehouse_id is not None:
         if not db.get(models.Warehouse, body.warehouse_id):
@@ -586,6 +639,143 @@ def delete_store(sid: int, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 #  POS terminals
 # ---------------------------------------------------------------------------
+# ---------- floors ----------------------------------------------------------
+#
+# Between a store and its tills, because that is where a storey is in the
+# building. What it carries is the BILL PREFIX: the retail app numbers a bill
+# from the floor the till stands on (TG26-001 on the ground floor, TF26-001 on
+# the first), so this is the master that decides it — and the shop mirrors these
+# rows rather than keeping a second list of its own.
+
+def _clean_prefix(raw):
+    """A bill prefix as it will be stored, or a 400 saying why not.
+
+    Letters and digits only, upper case, short. Anything else makes a document
+    number that cannot be read back apart — and the number is matched exactly
+    when the shop works out where a series has got to, so a stray space or dash
+    would quietly start a second series.
+    """
+    value = (raw or "").strip().upper()
+    if not value:
+        return None
+    if not value.isalnum():
+        raise HTTPException(400, f"“{value}” cannot be a bill prefix: letters "
+                                 f"and digits only, so a bill number reads back "
+                                 f"cleanly")
+    if len(value) > 8:
+        raise HTTPException(400, "a bill prefix is at most 8 characters")
+    return value
+
+
+@router.get("/floors")
+def list_floors(store_id: Optional[int] = None, db: Session = Depends(get_db)):
+    q = db.query(models.Floor)
+    if store_id:
+        q = q.filter(models.Floor.store_id == store_id)
+    return [svc.floor_out(f) for f in
+            q.order_by(models.Floor.sort_order, models.Floor.name).all()]
+
+
+@router.post("/floors")
+def create_floor(body: FloorIn, db: Session = Depends(get_db)):
+    name = _clean(body.name)
+    if not name:
+        raise HTTPException(400, "a floor needs a name")
+    if not body.store_id:
+        raise HTTPException(400, "a floor belongs to a store — say which")
+    store = db.get(models.Store, body.store_id)
+    if not store:
+        raise HTTPException(404, "that store does not exist")
+    if db.query(models.Floor).filter(models.Floor.store_id == store.id,
+                                     models.Floor.name == name).first():
+        raise HTTPException(409, f"“{store.name}” already has a floor called “{name}”")
+
+    prefix = _clean_prefix(body.prefix)
+    f = models.Floor(store_id=store.id, name=name, prefix=prefix,
+                     sort_order=body.sort_order or 0,
+                     active=True if body.active is None else bool(body.active))
+    db.add(f)
+    db.commit()
+    db.refresh(f)
+    return svc.floor_out(f)
+
+
+@router.patch("/floors/{fid}")
+def update_floor(fid: int, body: FloorIn, db: Session = Depends(get_db)):
+    f = db.get(models.Floor, fid)
+    if not f:
+        raise HTTPException(404, "floor not found")
+    name = _clean(body.name)
+    store_id = body.store_id or f.store_id
+    if name and (name != f.name or store_id != f.store_id):
+        if db.query(models.Floor).filter(models.Floor.store_id == store_id,
+                                         models.Floor.name == name,
+                                         models.Floor.id != fid).first():
+            raise HTTPException(409, "that store already has a floor with this name")
+    if name:
+        f.name = name
+    if body.store_id is not None:
+        if not db.get(models.Store, body.store_id):
+            raise HTTPException(404, "that store does not exist")
+        f.store_id = body.store_id
+    if body.prefix is not None:
+        f.prefix = _clean_prefix(body.prefix)
+    if body.sort_order is not None:
+        f.sort_order = body.sort_order
+    if body.active is not None:
+        f.active = bool(body.active)
+    db.commit()
+    db.refresh(f)
+    return svc.floor_out(f)
+
+
+@router.delete("/floors/{fid}")
+def delete_floor(fid: int, db: Session = Depends(get_db)):
+    """Remove a floor nothing stands on. One with tills is refused.
+
+    Deliberately only checks its tills. A floor's real history — the bills
+    numbered from its prefix — lives in the retail app's own database, which
+    this one does not read; and the bills keep their numbers regardless, because
+    each carries the prefix it was raised under. So the thing worth protecting
+    here is the mapping: deleting a floor that tills point at would leave those
+    tills numbering bills from nowhere.
+    """
+    f = db.get(models.Floor, fid)
+    if not f:
+        raise HTTPException(404, "floor not found")
+    standing = db.query(models.PosTerminal).filter(
+        models.PosTerminal.floor_id == fid).count()
+    if standing:
+        raise HTTPException(409, f"{standing} till(s) stand on “{f.name}”. Move "
+                                 f"them to another floor first, or switch this "
+                                 f"one off to stop it being offered.")
+    db.delete(f)
+    db.commit()
+    return {"ok": True}
+
+
+def _floor_for(db: Session, store_id, floor_id):
+    """The storey a till is being put on, checked against its store.
+
+    A till cannot stand on a floor of another building. Refused rather than
+    quietly ignored: the floor decides what the till's bills are called, so
+    silently dropping it would leave a counter numbering bills from the shop's
+    fallback series while the screen that set it says otherwise.
+
+    0 (or any falsy value that was actually sent) means "take it off its floor",
+    which is different from `None` — see FloorIn.
+    """
+    if not floor_id:
+        return None
+    f = db.get(models.Floor, floor_id)
+    if not f:
+        raise HTTPException(404, "that floor does not exist")
+    if f.store_id != store_id:
+        raise HTTPException(400, f"“{f.name}” is a floor of another store — a "
+                                 f"till can only stand on a floor of its own")
+    return f.id
+
+
 @router.get("/terminals")
 def list_terminals(store_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(models.PosTerminal)
@@ -610,7 +800,10 @@ def create_terminal(body: TerminalIn, db: Session = Depends(get_db)):
     if dupe:
         raise HTTPException(409, f"“{store.name}” already has a terminal called “{name}”")
     t = models.PosTerminal(name=name, store_id=store.id,
-                           code=_clean(body.code) or svc._next_code(db, models.PosTerminal, "POS"),
+                           floor_id=_floor_for(db, store.id, body.floor_id),
+                           code=_free_code(db, models.PosTerminal, _clean(body.code),
+                                                  what="till")
+                                   or svc._next_code(db, models.PosTerminal, "POS"),
                            active=True if body.active is None else bool(body.active))
     _apply_profile(t, body, db)
     if t.business_id is None:
@@ -641,8 +834,15 @@ def update_terminal(tid: int, body: TerminalIn, db: Session = Depends(get_db)):
         if not db.get(models.Store, body.store_id):
             raise HTTPException(404, "that store does not exist")
         t.store_id = body.store_id
+        # Moved to another building, so whatever storey it was on is not one of
+        # this store's. Cleared rather than carried, and re-set below if the
+        # same request named a floor at the new store.
+        t.floor_id = None
+    if body.floor_id is not None:
+        t.floor_id = _floor_for(db, t.store_id, body.floor_id)
     if body.code is not None:
-        t.code = _clean(body.code)
+        t.code = _free_code(db, models.PosTerminal, _clean(body.code),
+                           keep_id=t.id, what="till")
     _apply_profile(t, body, db)
     if body.active is not None:
         want = bool(body.active)

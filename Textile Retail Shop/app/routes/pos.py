@@ -4,8 +4,15 @@ from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
 from app import billing_numbers, places, promotions, transfers, warehouse_items
-from app.models import (Product, Customer, Invoice, InvoiceItem, InvoicePayment,
-                        StockMovement, LoyaltyTxn, User, PAYMENT_METHODS)
+# Every name this file needs is imported HERE, at module level, and never inside
+# a view. This package is loaded as `app`, and when the shop is served inside the
+# Essa backend that name belongs to the backend by the time a request arrives —
+# so a late `from app…` reaches into the wrong package and raises ImportError at
+# the worst moment, on a screen that worked in every test run standalone. See
+# backend/app/pos_mount.py, and the same note in app/places.py.
+from app.models import (Product, Customer, Floor, Invoice, InvoiceItem,
+                        InvoicePayment, StockMovement, LoyaltyTxn, User,
+                        PAYMENT_METHODS)
 
 pos_bp = Blueprint("pos", __name__)
 
@@ -644,9 +651,14 @@ def invoice_list():
     # on, named by the floor it belongs to. Built from the bills rather than from
     # the floor master so a series that predates a rename, or one whose floor has
     # since been removed, is still selectable — the bills exist either way.
-    from app.models import Floor as _Floor
+    #
+    # `Floor` is imported at the top of this file and NOT here. By the time a
+    # request runs, `app` in sys.modules is the warehouse's package again — the
+    # swap in backend/app/pos_mount is long over — so a `from app.models import`
+    # at this point reaches into the wrong package and raises ImportError. It did
+    # exactly that, on this line. See the note above the imports.
     named = {f.prefix: f"{f.location.name} · {f.name}"
-             for f in _Floor.query.all() if f.location}
+             for f in Floor.query.all() if f.location}
     used = [p for (p,) in db.session.query(Invoice.bill_prefix)
             .filter(Invoice.bill_prefix.isnot(None)).distinct().all() if p]
     series_options = sorted(

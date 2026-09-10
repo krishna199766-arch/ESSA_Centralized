@@ -643,9 +643,13 @@ inside the same transaction that writes the sale, so two counters billing at the
 same moment cannot land on the same number and a sale that fails gives its number
 back rather than leaving a hole. `26` is the financial year it started in, and
 the series rolls to `TG27-001` on 1 April with nothing having to run overnight.
-The floor-to-prefix mapping is master data under **Floors & tills**, so a fifth
-floor or a second store is typing rather than deploying. A till nobody has mapped
-yet keeps billing on the shop's plain `INV-` series and says so.
+Floors are created in **Locations**, alongside everything else about a place —
+`Business → Warehouse → Store → Floor → POS terminal` is one master here, and the
+shop mirrors it the way it already mirrors the stores and the category master.
+Add a floor under a store, give it a prefix, put a till on it; the till downstairs
+picks it up and bills on that series. A fifth floor or a second store is typing
+rather than deploying, and a till nobody has placed yet keeps billing on the
+shop's plain `INV-` series and says so.
 `python "Textile Retail Shop/test_bill_numbers.py"` runs twenty simultaneous
 checkouts and asserts twenty distinct numbers, no gaps, no failed sales.
 

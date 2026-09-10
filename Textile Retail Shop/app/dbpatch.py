@@ -88,6 +88,13 @@ COLUMNS = [
     # predates floors has no answer, and the plain INV- series they were numbered
     # on is still a series.
     ("counters", "floor_id", "INTEGER"),
+    # Which warehouse row a mirrored floor or till came from, and whether the
+    # shop made it itself — see app/places.sync_places. On the `floors` table as
+    # well as `counters` because a shop that ran an earlier build already has
+    # `floors` without them, and create_all never revisits a table it has made.
+    ("counters", "wh_id", "INTEGER"),
+    ("floors", "wh_id", "INTEGER"),
+    ("floors", "local", "BOOLEAN"),
     ("invoices", "floor_id", "INTEGER"),
     ("invoices", "fin_year", "VARCHAR(8)"),
     ("invoices", "bill_prefix", "VARCHAR(8)"),

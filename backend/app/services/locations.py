@@ -213,6 +213,18 @@ def store_out(s: models.Store, counts=True) -> dict:
            **profile_out(s)}
     if counts:
         out["terminal_count"] = len([t for t in s.terminals if t.active])
+        out["floor_count"] = len([f for f in s.floors if f.active])
+    return out
+
+
+def floor_out(f: models.Floor, counts=True) -> dict:
+    out = {"id": f.id, "name": f.name, "prefix": f.prefix,
+           "sort_order": f.sort_order or 0, "active": bool(f.active),
+           "store_id": f.store_id,
+           "store_name": f.store.name if f.store else None,
+           "warehouse_id": f.store.warehouse_id if f.store else None}
+    if counts:
+        out["terminal_count"] = len([t for t in f.terminals if t.active])
     return out
 
 
@@ -234,6 +246,13 @@ def terminal_out(t: models.PosTerminal) -> dict:
             "store_id": t.store_id, "business_id": t.business_id,
             "store_name": t.store.name if t.store else None,
             "warehouse_id": t.store.warehouse_id if t.store else None,
+            # Which storey it stands on, and what that means for its bills. The
+            # prefix travels with the till because every screen that shows a
+            # till wants to say what its bills will be called — reading it back
+            # through the floor each time is how one of them ends up not saying.
+            "floor_id": t.floor_id,
+            "floor_name": t.floor.name if t.floor else None,
+            "bill_prefix": t.floor.prefix if t.floor else None,
             # The screen hides the delete button rather than offering one that
             # the server would refuse. It is told the answer and the date behind
             # it, so it can say WHEN instead of only "no" — and the rule is
@@ -262,8 +281,21 @@ def tree(db: Session, allowed=None) -> list:
         node["stores"] = []
         for s in sorted(w.stores, key=lambda x: x.name):
             sn = store_out(s, counts=False)
+            # Floors, each carrying the tills standing on it — and then the
+            # tills that are on NO floor, at the store level where they have
+            # always been. Both, because a shop that has never used floors must
+            # not have its tills disappear off this screen the day the level
+            # exists, and one that has must be able to see which tills are still
+            # unplaced. That list is the whole reason somebody opens this page.
+            sn["floors"] = [dict(floor_out(f, counts=False),
+                                 terminals=[terminal_out(t) for t in
+                                            sorted(s.terminals, key=lambda x: x.name)
+                                            if t.floor_id == f.id])
+                            for f in sorted(s.floors,
+                                            key=lambda x: (x.sort_order or 0, x.name))]
             sn["terminals"] = [terminal_out(t) for t in
-                               sorted(s.terminals, key=lambda x: x.name)]
+                               sorted(s.terminals, key=lambda x: x.name)
+                               if not t.floor_id]
             node["stores"].append(sn)
         out.append(node)
     # A store whose warehouse was never set would otherwise be invisible on a
@@ -278,9 +310,20 @@ def tree(db: Session, allowed=None) -> list:
         out.append({"id": None, "name": "Not assigned to a warehouse",
                     "code": None, "address": None, "active": True,
                     "unassigned": True,
-                    "stores": [dict(store_out(s, counts=False),
-                                    terminals=[terminal_out(t) for t in s.terminals])
-                               for s in orphans]})
+                    # Shaped exactly like a warehouse's stores above, floors and
+                    # all — a store nobody has assigned still has storeys, and a
+                    # branch of the tree that is missing a level is one the
+                    # screen has to special-case.
+                    "stores": [dict(
+                        store_out(s, counts=False),
+                        floors=[dict(floor_out(f, counts=False),
+                                     terminals=[terminal_out(t) for t in s.terminals
+                                                if t.floor_id == f.id])
+                                for f in sorted(s.floors,
+                                                key=lambda x: (x.sort_order or 0, x.name))],
+                        terminals=[terminal_out(t) for t in s.terminals
+                                   if not t.floor_id])
+                        for s in orphans]})
     return out
 
 

@@ -11217,16 +11217,31 @@ function locWhere(node) {
     .join(', ')
 }
 
-function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, deleteHint, children }) {
+function LocationRow({ node, kind, onEdit, onAdd, onAddAlt, onToggle, onDelete, deleteHint, children }) {
   const dim = node.active === false
   const where = locWhere(node)
   return (
     <div className={'locnode loc-' + kind + (dim ? ' off' : '')}>
       <div className="locbar">
         <span className="locico" aria-hidden="true">
-          {kind === 'warehouse' ? '🏢' : kind === 'store' ? '🏬' : '🖥'}</span>
+          {kind === 'warehouse' ? '🏢' : kind === 'store' ? '🏬'
+            : kind === 'floor' ? '🪜' : '🖥'}</span>
         <span className="locname">{node.name}</span>
         {node.code && <span className="loccode">{node.code}</span>}
+        {/* The bill prefix, on the row. It is the only thing a floor decides,
+            and it is what somebody opens this screen to check — a till left on
+            the wrong storey is discoverable only if the series it prints is
+            visible beside it. Shown on the till too, read through from its
+            floor, because that is the row people actually look at. */}
+        {kind === 'floor' && (node.prefix
+          ? <span className="badge gstbadge" title="Bills from this floor start with this">
+              {node.prefix}…</span>
+          : <span className="badge review" title="Without a prefix this floor's tills bill on the shop's plain series">
+              no bill prefix</span>)}
+        {kind === 'terminal' && node.bill_prefix && (
+          <span className="badge" title={`Bills read ${node.bill_prefix}26-001 — from ${node.floor_name}`}>
+            {node.bill_prefix}…</span>
+        )}
         {/* What this building trades in. On the row rather than only in the
             editor, because "which of these is the silk warehouse" is the
             question this screen is opened to answer once there is more than one
@@ -11250,7 +11265,10 @@ function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, deleteHint
         {where && <span className="small locaddr" title={where}>{where}</span>}
         <span className="spacer" />
         {onAdd && <button className="btn" onClick={onAdd}>{
-          kind === 'warehouse' ? '+ Store' : '+ POS'}</button>}
+          kind === 'warehouse' ? '+ Store' : kind === 'store' ? '+ Floor' : '+ POS'}</button>}
+        {/* A store offers both, because a shop with no floors still has tills
+            and must not be made to invent a storey before it can add one. */}
+        {onAddAlt && <button className="btn" onClick={onAddAlt}>+ POS</button>}
         {onEdit && <button className="iconbtn" title="Rename or edit" onClick={onEdit}>✎</button>}
         {onToggle && <button className="iconbtn"
           title={dim ? 'Reopen this' : 'Close it — its history stays readable'}
@@ -11286,7 +11304,8 @@ function LocationRow({ node, kind, onEdit, onAdd, onToggle, onDelete, deleteHint
 //  ring, what is it registered as, is it open. The rules between those groups
 //  are doing real work — an undifferentiated grid of seventeen boxes reads as
 //  a form to endure rather than one to fill in.
-const LOC_LABEL = { warehouse: 'Warehouse', store: 'Store / Shop', terminal: 'POS / Counter' }
+const LOC_LABEL = { warehouse: 'Warehouse', store: 'Store / Shop', floor: 'Floor',
+  terminal: 'POS / Counter' }
 //  Written out rather than lower-cased from the badge above, because POS is an
 //  abbreviation and "New pos / counter" reads as a typo.
 const LOC_TITLE = { warehouse: 'warehouse', store: 'store / shop', terminal: 'POS / counter' }
@@ -11319,9 +11338,101 @@ function LocField({ label, hint, error, wide, children }) {
   )
 }
 
-function LocationEditor({ init, kind, stores, warehouses, catalogues, options, onSave, onClose }) {
+//  A floor gets its OWN small editor rather than a fourth mode of the form
+//  below, and for the same reason that form has three modes: the field set. The
+//  other three levels share one because they all print a document and all need
+//  the same address and GSTIN block (see models.LocationProfile). A floor prints
+//  nothing. What it has is a name, an order and a bill prefix — four boxes —
+//  and putting those through a seventeen-field form would mean hiding most of
+//  it and asking for an address nobody could answer.
+function FloorEditor({ init, stores, onSave, onClose }) {
+  const [f, setF] = useState(() => ({
+    name: init?.name || '',
+    prefix: init?.prefix || '',
+    sort_order: init?.sort_order ?? 0,
+    active: init?.active !== false,
+    store_id: init?.store_id || stores?.[0]?.id || null,
+  }))
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }))
+  const prefix = (f.prefix || '').trim().toUpperCase()
+  const bad = {}
+  if (!(f.name || '').trim()) bad.name = 'required'
+  // Refused here as well as on the server, because finding out after pressing
+  // Create means re-reading a form you thought you had finished.
+  if (prefix && !/^[A-Z0-9]{1,8}$/.test(prefix))
+    bad.prefix = 'Letters and digits only, up to 8 — it is the front of a bill number'
+  const blocked = Object.keys(bad).length > 0
+  const year = String(new Date().getFullYear() % 100)
+
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal locmodal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <b>{`${init?.id ? 'Edit' : 'New'} floor`}</b>
+          <span className="badge">Floor</span>
+          <button className="modal-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          <div className="formsec">
+            <h5>Identity</h5>
+            <div className="mgrid">
+              <LocField label="Name" error={bad.name === 'required' ? null : bad.name}>
+                <input autoFocus value={f.name} onChange={(e) => set('name', e.target.value)}
+                  placeholder="e.g. Ground Floor" />
+              </LocField>
+              <LocField label="At store">
+                <select value={f.store_id || ''} onChange={(e) => set('store_id', +e.target.value)}>
+                  {(stores || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </LocField>
+              <LocField label="Bill prefix" error={bad.prefix}
+                hint={prefix
+                  ? `Bills from this floor will read ${prefix}${year}-001`
+                  : 'Left blank, its tills bill on the shop’s plain INV- series'}>
+                <input value={f.prefix} style={{ textTransform: 'uppercase' }}
+                  maxLength={8} onChange={(e) => set('prefix', e.target.value)}
+                  placeholder="TG" />
+              </LocField>
+              <LocField label="Order"
+                hint="Ground floor first — F sorts before G, so the list needs telling">
+                <input type="number" value={f.sort_order}
+                  onChange={(e) => set('sort_order', +e.target.value || 0)} />
+              </LocField>
+            </div>
+          </div>
+          <div className="formsec">
+            <h5>Status</h5>
+            <label className="chk">
+              <input type="checkbox" checked={!!f.active}
+                onChange={(e) => set('active', e.target.checked)} />
+              <span>Open — offered at the till and on this screen</span>
+            </label>
+            <div className="hint" style={{ marginTop: 6 }}>
+              Closing a floor stops it being offered. Bills already numbered from
+              it keep their numbers — each carries the prefix it was raised under,
+              so the register stays readable whatever happens here.
+            </div>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn primary" disabled={blocked}
+            onClick={() => onSave({ ...f, prefix })}>
+            {init?.id ? 'Save' : 'Create'}</button>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          {blocked && !bad.name && <span className="small" style={{ color: 'var(--warn)' }}>
+            Fix the highlighted field to save</span>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LocationEditor({ init, kind, stores, floors, warehouses, catalogues, options, onSave, onClose }) {
   const [f, setF] = useState(() => ({
     name: init?.name || '', code: init?.code || '',
+    // Which storey a till stands on. Blank means it is on none, which is a real
+    // answer and the one every till has until somebody places it.
+    floor_id: init?.floor_id || '',
     loc_type: init?.loc_type || '',
     address: init?.address || '', address2: init?.address2 || '',
     city: init?.city || '', district: init?.district || '',
@@ -11355,6 +11466,14 @@ function LocationEditor({ init, kind, stores, warehouses, catalogues, options, o
   const gst = (f.gstin || '').trim().toUpperCase()
   const stateCode = /^\d{2}/.test(gst) ? gst.slice(0, 2) : null
 
+  // The storeys of the store this till is being put at, and the one chosen.
+  // Narrowed here rather than offering every floor in the company, because the
+  // server refuses a floor of another building and a picker that offers one is
+  // the only thing standing between a manager and that error.
+  const storeFloors = (floors || []).filter(
+    (x) => String(x.store_id) === String(f.store_id) && x.active !== false)
+  const tillFloor = storeFloors.find((x) => String(x.id) === String(f.floor_id))
+
   const businesses = (options?.businesses || [])
   const types = options?.types || ['Garments', 'Silks', 'Franchise']
   const inherits = kind === 'warehouse' ? 'the default company'
@@ -11380,9 +11499,17 @@ function LocationEditor({ init, kind, stores, warehouses, catalogues, options, o
                   placeholder={kind === 'warehouse' ? 'e.g. Warehouse 1'
                     : kind === 'store' ? 'e.g. TAQUA SILKS, TIRUPUR' : 'e.g. Main Counter'} />
               </LocField>
-              <LocField label="Code" hint="Filled in for you if left blank">
+              {/* The placeholder used to be a real code — WH-01, ST-01, POS-01
+                  — which reads as a suggestion, gets typed in, and collides with
+                  whatever already holds it. Codes are unique across every level,
+                  so the only safe suggestion is none: this says what happens if
+                  you leave it alone, and the server names the holder if you
+                  pick one that is taken. */}
+              <LocField label="Code"
+                hint={init?.id ? 'Unique across every ' + (LOC_TITLE[kind] || 'place')
+                               : 'Leave blank and one is issued for you'}>
                 <input value={f.code} onChange={(e) => set('code', e.target.value)}
-                  placeholder={kind === 'warehouse' ? 'WH-01' : kind === 'store' ? 'ST-01' : 'POS-01'} />
+                  placeholder="issued automatically" />
               </LocField>
               <LocField label="Type">
                 <select value={f.loc_type} onChange={(e) => set('loc_type', e.target.value)}>
@@ -11418,8 +11545,27 @@ function LocationEditor({ init, kind, stores, warehouses, catalogues, options, o
               )}
               {kind === 'terminal' && (
                 <LocField label="At store">
-                  <select value={f.store_id || ''} onChange={(e) => set('store_id', +e.target.value)}>
+                  <select value={f.store_id || ''} onChange={(e) => {
+                    // Moving a till to another building drops the storey with
+                    // it — a floor belongs to one store, and keeping the old id
+                    // would offer a pairing the server refuses.
+                    set('store_id', +e.target.value); set('floor_id', '')
+                  }}>
                     {(stores || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </LocField>
+              )}
+              {kind === 'terminal' && (
+                <LocField label="On floor"
+                  hint={tillFloor
+                    ? `Bills from this till will read ${tillFloor.prefix || 'INV'}${String(new Date().getFullYear() % 100)}-001`
+                    : 'Not on a floor — it bills on the shop’s plain INV- series'}>
+                  <select value={f.floor_id || ''} onChange={(e) => set('floor_id', e.target.value)}>
+                    <option value="">— not on a floor —</option>
+                    {storeFloors.map((fl) => (
+                      <option key={fl.id} value={fl.id}>
+                        {fl.name}{fl.prefix ? ` — ${fl.prefix}…` : ''}</option>
+                    ))}
                   </select>
                 </LocField>
               )}
@@ -11572,6 +11718,9 @@ function Locations({ toast }) {
 
   const warehouses = (tree || []).filter((w) => !w.unassigned)
   const allStores = (tree || []).flatMap((w) => w.stores || [])
+  // Flattened for the till editor's floor picker, which narrows to the store
+  // being chosen — a till can only stand on a floor of its own building.
+  const allFloors = allStores.flatMap((s) => s.floors || [])
 
   const run = async (fn, ok) => {
     try { const r = await fn(); await load(); toast(r?.warning || ok, r?.warning ? 'warn' : 'ok'); setEdit(null) }
@@ -11586,7 +11735,27 @@ function Locations({ toast }) {
   const TEXT = ['loc_type', 'address', 'address2', 'city', 'district', 'state',
     'country', 'pincode', 'contact_person', 'phone', 'email', 'gstin', 'cin']
 
+  // Which API each level uses, in one place. A chain of ternaries with a
+  // fallback meant every new level silently defaulted to the terminal's
+  // endpoints — a floor would have been PATCHed as a till.
+  const API = {
+    warehouse: { create: api.createWarehouse, update: api.updateWarehouse, remove: api.deleteWarehouse },
+    store: { create: api.createStore, update: api.updateStore, remove: api.deleteStore },
+    floor: { create: api.createFloor, update: api.updateFloor, remove: api.deleteFloor },
+    terminal: { create: api.createTerminal, update: api.updateTerminal, remove: api.deleteTerminal },
+  }
+
   const save = (kind, init, f) => {
+    // A floor carries none of the address block — it prints no document. See
+    // FloorEditor.
+    if (kind === 'floor') {
+      const body = {
+        name: f.name.trim(), prefix: (f.prefix || '').trim().toUpperCase() || '',
+        sort_order: f.sort_order || 0, active: !!f.active, store_id: f.store_id,
+      }
+      return init?.id ? run(() => API.floor.update(init.id, body), 'Saved')
+                      : run(() => API.floor.create(body), 'Created')
+    }
     const body = { name: f.name.trim(), code: f.code.trim() || null, active: !!f.active }
     for (const k of TEXT) body[k] = (f[k] ?? '').trim()
     // 0, not null, for "no company of its own — inherit". null would mean "not
@@ -11595,25 +11764,23 @@ function Locations({ toast }) {
     body.business_id = f.business_id ? +f.business_id : 0
     if (kind === 'warehouse') body.catalogue_id = f.catalogue_id
     if (kind === 'store') body.warehouse_id = f.warehouse_id
-    if (kind === 'terminal') body.store_id = f.store_id
-    if (init?.id) {
-      const fn = kind === 'warehouse' ? api.updateWarehouse : kind === 'store' ? api.updateStore : api.updateTerminal
-      return run(() => fn(init.id, body), 'Saved')
+    if (kind === 'terminal') {
+      body.store_id = f.store_id
+      // 0 for "take it off its floor", never null — null means "not mentioned"
+      // to the server, so the blank option could not unplace a till.
+      body.floor_id = f.floor_id ? +f.floor_id : 0
     }
-    const fn = kind === 'warehouse' ? api.createWarehouse : kind === 'store' ? api.createStore : api.createTerminal
-    return run(() => fn(body), 'Created')
+    if (init?.id) return run(() => API[kind].update(init.id, body), 'Saved')
+    return run(() => API[kind].create(body), 'Created')
   }
 
-  const toggle = (kind, node) => {
-    const fn = kind === 'warehouse' ? api.updateWarehouse : kind === 'store' ? api.updateStore : api.updateTerminal
-    return run(() => fn(node.id, { name: node.name, active: node.active === false }),
+  const toggle = (kind, node) =>
+    run(() => API[kind].update(node.id, { name: node.name, active: node.active === false }),
       node.active === false ? 'Reopened' : 'Closed')
-  }
 
   const remove = (kind, node) => {
     if (!window.confirm(`Delete “${node.name}”? This is only possible while nothing is filed under it — otherwise close it instead.`)) return
-    const fn = kind === 'warehouse' ? api.deleteWarehouse : kind === 'store' ? api.deleteStore : api.deleteTerminal
-    return run(() => fn(node.id), 'Deleted')
+    return run(() => API[kind].remove(node.id), 'Deleted')
   }
 
   if (err === 'restart') return (
@@ -11636,7 +11803,8 @@ function Locations({ toast }) {
       <div className="pagehead">
         <h2>Locations</h2>
         <div className="pagesub small">
-          The warehouses, the stores each one supplies, and the tills at each store
+          The warehouses, the stores each one supplies, the floors of each store
+          and the tills standing on them
         </div>
         <div style={{ flex: 1 }} />
         <button className="btn" onClick={load}>↻ Refresh</button>
@@ -11649,10 +11817,13 @@ function Locations({ toast }) {
           <div className="small" style={{ color: 'var(--text-2)' }}>{err}</div></div>}
 
         <div className="infobox" style={{ marginBottom: 'var(--sp-4)' }}>
-          A <b>store</b> owns stock; a <b>POS terminal</b> only records sales against
-          its store's stock. Closing a place keeps its history and stops it being
-          offered as a destination — deleting is refused once anything is filed
-          under it.
+          A <b>store</b> owns stock; a <b>floor</b> and a <b>POS terminal</b> only
+          record sales against it. What a floor decides is the <b>bill prefix</b>:
+          a till on a floor numbers its bills from that floor's own series —
+          <code> TG26-001</code> on the ground floor, <code>TF26-001</code> on the
+          first — and one on no floor bills on the shop's plain <code>INV-</code>
+          series. Closing a place keeps its history and stops it being offered —
+          deleting is refused once anything is filed under it.
         </div>
 
         {tree && tree.length === 0 && (
@@ -11672,13 +11843,63 @@ function Locations({ toast }) {
               )}
               {(w.stores || []).map((s) => (
                 <LocationRow key={s.id} node={s} kind="store"
-                  onAdd={() => setEdit({ kind: 'terminal', init: { store_id: s.id } })}
+                  onAdd={() => setEdit({ kind: 'floor', init: { store_id: s.id } })}
+                  onAddAlt={() => setEdit({ kind: 'terminal', init: { store_id: s.id } })}
                   onEdit={() => setEdit({ kind: 'store', init: s })}
                   onToggle={() => toggle('store', s)}
-                  onDelete={(s.terminals || []).length ? null : () => remove('store', s)}>
+                  onDelete={(s.terminals || []).length || (s.floors || []).length
+                    ? null : () => remove('store', s)}>
                   <div className="lockids">
-                    {(s.terminals || []).length === 0 && (
-                      <div className="small locempty">No tills at this store yet.</div>
+                    {(s.floors || []).length === 0 && (s.terminals || []).length === 0 && (
+                      <div className="small locempty">
+                        No floors or tills at this store yet. Add a floor first —
+                        it is what decides the bill prefix its tills use.
+                      </div>
+                    )}
+
+                    {/* A storey, and the tills standing on it. The floor row
+                        carries the bill prefix because that is the only thing a
+                        floor decides, and hiding it behind the editor would make
+                        this screen unable to answer the question it exists for:
+                        what will this counter's bills be called. */}
+                    {(s.floors || []).map((fl) => (
+                      <LocationRow key={'f' + fl.id} node={fl} kind="floor"
+                        onAdd={() => setEdit({ kind: 'terminal',
+                          init: { store_id: s.id, floor_id: fl.id } })}
+                        onEdit={() => setEdit({ kind: 'floor', init: fl })}
+                        onToggle={() => toggle('floor', fl)}
+                        deleteHint={(fl.terminals || []).length
+                          ? 'Move its tills to another floor first' : null}
+                        onDelete={(fl.terminals || []).length ? null : () => remove('floor', fl)}>
+                        <div className="lockids">
+                          {(fl.terminals || []).length === 0 && (
+                            <div className="small locempty">No tills on this floor yet.</div>
+                          )}
+                          {(fl.terminals || []).map((t) => (
+                            <LocationRow key={t.id} node={t} kind="terminal"
+                              deleteHint={t.deletable_on
+                                ? `Closed on ${fmtDate(t.deactivated_at)} — can be deleted from ${fmtDate(t.deletable_on)}`
+                                : 'Close this till first — it can be deleted a year after it is switched off'}
+                              onEdit={() => setEdit({ kind: 'terminal', init: t })}
+                              onToggle={() => toggle('terminal', t)}
+                              onDelete={t.can_delete ? () => remove('terminal', t) : null} />
+                          ))}
+                        </div>
+                      </LocationRow>
+                    ))}
+
+                    {/* Tills on no floor, at the store level where they have
+                        always been. Shown as such rather than hidden or quietly
+                        filed under the first floor: a shop that has never used
+                        floors must not have its tills vanish the day the level
+                        exists, and one that has needs to see which are unplaced
+                        — those are the counters still numbering bills from the
+                        shop's fallback series. */}
+                    {(s.terminals || []).length > 0 && (s.floors || []).length > 0 && (
+                      <div className="small locempty" style={{ marginTop: 6 }}>
+                        Not on any floor — these bill on the shop's plain series
+                        until they are placed:
+                      </div>
                     )}
                     {(s.terminals || []).map((t) => (
                       /* A till is closed, not deleted — its number is on every
@@ -11703,9 +11924,14 @@ function Locations({ toast }) {
         ))}
       </div>
 
-      {edit && (
+      {edit && edit.kind === 'floor' && (
+        <FloorEditor init={edit.init} stores={allStores}
+          onClose={() => setEdit(null)}
+          onSave={(f) => save('floor', edit.init?.id ? edit.init : null, f)} />
+      )}
+      {edit && edit.kind !== 'floor' && (
         <LocationEditor kind={edit.kind} init={edit.init} warehouses={warehouses}
-          stores={allStores} catalogues={catalogues} options={options}
+          stores={allStores} floors={allFloors} catalogues={catalogues} options={options}
           onClose={() => setEdit(null)}
           onSave={(f) => save(edit.kind, edit.init?.id ? edit.init : null, f)} />
       )}

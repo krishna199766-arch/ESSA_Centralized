@@ -66,7 +66,8 @@ sys.path.insert(0, str(SHOP))
 
 import app as shop                                               # noqa: E402
 from app import db, places                                       # noqa: E402
-from app.models import Company, Counter, Invoice, Location, User  # noqa: E402
+from app.models import (Company, Counter, Floor, Invoice,        # noqa: E402
+                        Location, User)
 
 flask_app = shop.create_app()
 used = flask_app.config["SQLALCHEMY_DATABASE_URI"]
@@ -109,15 +110,43 @@ eq("with their counters", sorted(c["name"] for c in opts["counters"]),
    ["Counter 1", "Counter 2"])
 
 head("and an impossible pairing is refused, not stored")
-c, l, t = places.resolve(other.id, tirupur.id, till1.id)
+# Four levels now — company, location, FLOOR, counter. The floor sits between a
+# branch and its tills because a bill's number comes from the storey it was rung
+# on; see the shop's app/billing_numbers. None of these tills is on one, so the
+# floor comes back None throughout, which is the ordinary case for a shop that
+# has not set its storeys up.
+c, l, fl, t = places.resolve(other.id, tirupur.id, None, till1.id)
 eq("a counter at the chosen branch is kept", (c.id, l.id, t.id),
    (other.id, tirupur.id, till1.id))
-c, l, t = places.resolve(other.id, tirupur.id, till2.id)
+eq("…and it is on no floor, so none is reported", fl, None)
+c, l, fl, t = places.resolve(other.id, tirupur.id, None, till2.id)
 eq("a counter at ANOTHER branch is dropped", t, None)
 eq("…and the branch it does belong to is not silently substituted", l.id, tirupur.id)
-c, l, t = places.resolve(other.id, elsewhere.id, till2.id)
+c, l, fl, t = places.resolve(other.id, elsewhere.id, None, till2.id)
 eq("a location belonging to the other company is dropped", (l, t), (None, None))
-eq("nothing chosen at all", places.resolve(None, None, None), (None, None, None))
+eq("nothing chosen at all", places.resolve(None, None, None, None),
+   (None, None, None, None))
+
+head("a till on a floor reports it without being asked")
+storey = Floor(location_id=tirupur.id, name="Ground Floor", prefix="TG",
+               local=True, active=True)
+db.session.add(storey)
+db.session.commit()
+till1.floor_id = storey.id
+db.session.commit()
+c, l, fl, t = places.resolve(other.id, tirupur.id, None, till1.id)
+eq("the floor is read off the till's own mapping", fl.id, storey.id)
+# A floor the till is not on gives way to the till, which is the thing actually
+# standing in the building.
+upstairs = Floor(location_id=tirupur.id, name="First Floor", prefix="TF",
+                 local=True, active=True)
+db.session.add(upstairs)
+db.session.commit()
+c, l, fl, t = places.resolve(other.id, tirupur.id, upstairs.id, till1.id)
+eq("a chosen floor that disagrees with the till gives way", fl.id, storey.id)
+eq("the picker offers the floors too",
+   sorted(f["name"] for f in places.picker_options()["floors"]),
+   ["First Floor", "Ground Floor"])
 
 head("the till remembers, and the bill records what it remembered")
 staff = User(username="till", full_name="Till Operator", role="cashier", active=True)

@@ -221,5 +221,98 @@ eq("every profile field reaches the tree, none dropped in the serializer",
    sorted(set(svc.PROFILE_FIELDS) - set(till)), [])
 
 
+# ===========================================================================
+head("floors sit between a store and its tills, and carry the bill prefix")
+# The level the retail app reads to number a bill: a till on the ground floor
+# bills TG26-001, one on the first bills TF26-001. It lives HERE, in the one
+# location master, rather than in the shop — a second list of storeys could be
+# asked what a counter's bills are called and answer differently from the system
+# that issued the counter.
+store_id = store["id"]
+made = {}
+for i, (nm, px) in enumerate([("Ground Floor", "TG"), ("First Floor", "TF")]):
+    r = client.post("/api/locations/floors", headers=H,
+                    json={"name": nm, "store_id": store_id, "prefix": px,
+                          "sort_order": i})
+    eq(f"{nm} created", r.status_code, 200)
+    made[nm] = r.json()
+eq("the prefix comes back as it will be used", made["Ground Floor"]["prefix"], "TG")
+
+eq("a prefix that would not read back is refused",
+   client.post("/api/locations/floors", headers=H,
+               json={"name": "Bad", "store_id": store_id,
+                     "prefix": "T-G"}).status_code, 400)
+eq("and two floors of one store cannot share a name",
+   client.post("/api/locations/floors", headers=H,
+               json={"name": "Ground Floor", "store_id": store_id,
+                     "prefix": "TZ"}).status_code, 409)
+
+# A till stands on a floor of ITS OWN store, never another building's.
+other_store = [x for x in tree for x in x["stores"]
+               if x["id"] != store_id]
+r = client.post("/api/locations/terminals", headers=H,
+                json={"name": "GF TILL", "store_id": store_id,
+                      "floor_id": made["Ground Floor"]["id"]})
+eq("a till can be put straight on a floor", r.status_code, 200)
+eq("…and reports the series its bills will carry", r.json().get("bill_prefix"), "TG")
+if other_store:
+    eq("a till cannot stand on another store's floor",
+       client.post("/api/locations/terminals", headers=H,
+                   json={"name": "WRONG", "store_id": other_store[0]["id"],
+                         "floor_id": made["Ground Floor"]["id"]}).status_code, 400)
+
+tree2 = client.get("/api/locations", headers=H).json()["warehouses"]
+s2 = [x for w in tree2 for x in w["stores"] if x["id"] == store_id][0]
+eq("the tree shows the floors in order, ground first",
+   [f["name"] for f in s2["floors"]], ["Ground Floor", "First Floor"])
+gf = [f for f in s2["floors"] if f["name"] == "Ground Floor"][0]
+eq("with the till standing on it", [t["name"] for t in gf["terminals"]], ["GF TILL"])
+eq("and the tills on NO floor still listed at the store, not lost",
+   "MAIN COUNTER" in [t["name"] for t in s2["terminals"]], True)
+
+eq("a floor with tills on it cannot be deleted",
+   client.delete(f"/api/locations/floors/{gf['id']}", headers=H).status_code, 409)
+eq("an empty one can",
+   client.delete(f"/api/locations/floors/{made['First Floor']['id']}",
+                 headers=H).status_code, 200)
+
+
+# ===========================================================================
+head("a code somebody already has is refused, not crashed on")
+# `code` is unique on all three levels and nothing used to check it: the insert
+# reached the database, the constraint refused it, and the person got an
+# Internal Server Error with a SQLAlchemy traceback behind it. On a form whose
+# Code placeholder used to read "POS-01" — a real, already-taken code — that was
+# a typo away for anybody.
+held = client.post("/api/locations/terminals", headers=H,
+                   json={"name": "CODED TILL", "store_id": store_id}).json()
+eq("a till created blank gets a code of its own", bool(held.get("code")), True)
+
+clash = client.post("/api/locations/terminals", headers=H,
+                    json={"name": "ANOTHER", "store_id": store_id,
+                          "code": held["code"]})
+eq("a second till cannot take it", clash.status_code, 409)
+eq("…and is told who has it", "CODED TILL" in (clash.json().get("detail") or ""), True)
+
+eq("nor can a store take a store code that is used",
+   client.post("/api/locations/stores", headers=H,
+               json={"name": "CLASHING STORE", "code": store["code"]}).status_code, 409)
+eq("nor a warehouse", client.post("/api/locations/warehouses", headers=H,
+                                  json={"name": "CLASHING WH",
+                                        "code": node["code"]}).status_code, 409)
+
+neighbour = client.post("/api/locations/terminals", headers=H,
+                        json={"name": "NEIGHBOUR TILL", "store_id": store_id,
+                              "code": "POS-ZZ"}).json()
+eq("a code nobody holds is accepted as given", neighbour.get("code"), "POS-ZZ")
+eq("a row may keep its own code when it is edited",
+   client.patch(f"/api/locations/terminals/{held['id']}", headers=H,
+                json={"name": "CODED TILL RENAMED",
+                      "code": held["code"]}).status_code, 200)
+eq("but may not take its neighbour's",
+   client.patch(f"/api/locations/terminals/{held['id']}", headers=H,
+                json={"name": "CODED TILL RENAMED", "code": "POS-ZZ"}).status_code, 409)
+
+
 print("\n%s" % ("all passing" if not bad else "FAILED: " + ", ".join(bad)))
 sys.exit(1 if bad else 0)

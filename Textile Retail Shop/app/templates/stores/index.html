@@ -12,10 +12,23 @@
 
 <p class="text-muted small">
   A till's bills are named after the storey it stands on:
-  <strong>POS → floor → prefix → financial year → next number</strong>. Set the
-  mapping here and the billing counter does the rest — a cashier never types a
-  bill number and cannot change one.
+  <strong>POS → floor → prefix → financial year → next number</strong>. The
+  billing counter does the rest — a cashier never types a bill number and cannot
+  change one.
 </p>
+
+<div class="alert alert-secondary py-2 small">
+  <i class="bi bi-diagram-3"></i>
+  <strong>Floors are created in the warehouse.</strong> The chain
+  <em>warehouse → store → floor → till</em> is one master, kept in the Essa
+  warehouse's <b>Locations</b> screen, and this shop mirrors it — the same way it
+  mirrors the stores themselves. Rows marked
+  <span class="badge text-bg-info">warehouse</span> below are read-only here;
+  change them there and they follow through on the next sync. Anything you add on
+  this page is marked <span class="badge text-bg-light border">local</span> and is
+  left alone by a sync — that is for a shop running on its own, with no warehouse
+  to read.
+</div>
 
 {% if unassigned %}
 <div class="alert alert-info py-2">
@@ -45,12 +58,19 @@
   <div class="p-3 pb-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
     <h5 class="mb-0"><i class="bi bi-shop"></i> {{ loc.name }}</h5>
     {% if not floors %}
-    <form method="post" action="{{ url_for('stores.standard_floors') }}">
-      <input type="hidden" name="location_id" value="{{ loc.id }}">
-      <button class="btn btn-brand btn-sm">
-        <i class="bi bi-magic"></i> Add the four standard floors</button>
-      <span class="text-muted small ms-1">Ground TG · First TF · Second TS · Third TT</span>
-    </form>
+      {% if wh_available %}
+      <span class="text-muted small">
+        <i class="bi bi-arrow-up-right-square"></i>
+        Add its floors in the warehouse — <b>Locations → {{ loc.name }} → + Floor</b>
+        — and they appear here on the next sync.</span>
+      {% else %}
+      <form method="post" action="{{ url_for('stores.standard_floors') }}">
+        <input type="hidden" name="location_id" value="{{ loc.id }}">
+        <button class="btn btn-brand btn-sm">
+          <i class="bi bi-magic"></i> Add the four standard floors</button>
+        <span class="text-muted small ms-1">Ground TG · First TF · Second TS · Third TT</span>
+      </form>
+      {% endif %}
     {% endif %}
   </div>
 
@@ -65,12 +85,25 @@
         {% for f in floors %}
         <tr>
           <form method="post" action="{{ url_for('stores.edit_floor', fid=f.id) }}">
+          {# A mirrored floor is shown, not offered for editing. The inputs
+             become plain text rather than disabled boxes — a greyed-out field
+             invites a click and then says nothing. #}
+          {% if f.wh_id %}
+          <td class="text-muted">{{ f.sort_order or 0 }}</td>
+          <td>{{ f.name }} <span class="badge text-bg-info"
+                title="Created in the warehouse's Locations screen">warehouse</span></td>
+          <td><code>{{ f.prefix or '—' }}</code></td>
+          {% else %}
           <td><input class="form-control form-control-sm" type="number" name="sort_order"
                      value="{{ f.sort_order or 0 }}"></td>
-          <td><input class="form-control form-control-sm" name="name" value="{{ f.name }}" required></td>
+          <td><input class="form-control form-control-sm" name="name" value="{{ f.name }}" required>
+            <span class="badge text-bg-light border"
+                  title="Added on this screen — a sync leaves it alone">local</span></td>
           <td><input class="form-control form-control-sm text-uppercase" name="prefix"
                      value="{{ f.prefix }}" maxlength="8" required></td>
-          <td><code>{{ f.prefix }}{{ year }}-{{ '%03d' % ((series.get((f.prefix, year)) or 0) + 1) }}</code></td>
+          {% endif %}
+          <td>{% if f.prefix %}<code>{{ f.prefix }}{{ year }}-{{ '%03d' % ((series.get((f.prefix, year)) or 0) + 1) }}</code>
+              {% else %}<span class="text-muted small">no prefix — plain series</span>{% endif %}</td>
           <td class="text-end">{{ counts.get(f.id, 0) }}</td>
           <td class="small">
             {% set tills = f.counters | selectattr('active') | list %}
@@ -79,8 +112,12 @@
             {% else %}<span class="text-warning">no till mapped</span>{% endif %}
           </td>
           <td class="text-nowrap">
+            {% if not f.wh_id %}
             <input type="hidden" name="active" value="on">
             <button class="btn btn-sm btn-outline-primary" title="Save"><i class="bi bi-check-lg"></i></button>
+            {% else %}
+            <span class="text-muted small">edit upstairs</span>
+            {% endif %}
           </td>
           </form>
         </tr>
@@ -126,19 +163,26 @@
           {% for t in loc.counters if t.active %}
           <tr>
             <form method="post" action="{{ url_for('stores.assign_counter', cid=t.id) }}">
-            <td>{{ t.name }}</td>
+            <td>{{ t.name }}
+              {% if t.wh_id %}<span class="badge text-bg-info"
+                title="This till comes from the warehouse's Locations screen">warehouse</span>{% endif %}</td>
             <td>
+              {% if t.wh_id %}
+              {{ t.floor.name if t.floor else '— not on a floor —' }}
+              {% else %}
               <select class="form-select form-select-sm" name="floor_id">
                 <option value="">— not on a floor —</option>
                 {% for f in floors %}
                 <option value="{{ f.id }}" {% if t.floor_id == f.id %}selected{% endif %}>
-                  {{ f.name }} ({{ f.prefix }})</option>
+                  {{ f.name }}{% if f.prefix %} ({{ f.prefix }}){% endif %}</option>
                 {% endfor %}
               </select>
+              {% endif %}
             </td>
-            <td><code>{% if t.floor and t.floor.active %}{{ t.floor.prefix }}{{ year }}-001{% else %}INV-000001{% endif %}</code></td>
-            <td><button class="btn btn-sm btn-outline-primary">
-              <i class="bi bi-check-lg"></i> Map</button></td>
+            <td><code>{% if t.floor and t.floor.active and t.floor.prefix %}{{ t.floor.prefix }}{{ year }}-001{% else %}INV-000001{% endif %}</code></td>
+            <td>{% if t.wh_id %}<span class="text-muted small">map upstairs</span>
+              {% else %}<button class="btn btn-sm btn-outline-primary">
+              <i class="bi bi-check-lg"></i> Map</button>{% endif %}</td>
             </form>
           </tr>
           {% else %}

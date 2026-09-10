@@ -397,6 +397,108 @@ with app.app_context():
           seq.last_number, start_tg + ROUNDS)
 
 
+# ---- floors mirrored from the warehouse -------------------------------------
+#
+# The chain warehouse → store → floor → till is ONE master, kept upstairs. This
+# is the shop reading it, and the thing worth proving is that reading it twice
+# does not produce two of everything — a sync that duplicated on every start
+# would split a floor's tills between two rows and quietly open a second bill
+# series.
+with app.app_context():
+    print("\n-- reading the warehouse's floors and tills --")
+    import sqlite3
+
+    wh_path = Path(tempfile.mkdtemp()) / "warehouse.db"
+    con = sqlite3.connect(wh_path)
+    con.executescript("""
+        CREATE TABLE stores (id INTEGER PRIMARY KEY, name TEXT, warehouse_id INT,
+                             active INT);
+        CREATE TABLE floors (id INTEGER PRIMARY KEY, store_id INT, name TEXT,
+                             prefix TEXT, sort_order INT, active INT);
+        CREATE TABLE pos_terminals (id INTEGER PRIMARY KEY, store_id INT, name TEXT,
+                                    floor_id INT, active INT);
+        CREATE TABLE master_options (id INTEGER PRIMARY KEY, kind TEXT, value TEXT);
+        INSERT INTO stores VALUES (1, 'TIRUPUR', 1, 1);
+        INSERT INTO floors VALUES (1, 1, 'Ground Floor', 'TG', 0, 1),
+                                  (2, 1, 'First Floor',  'TF', 1, 1);
+        INSERT INTO pos_terminals VALUES (1, 1, 'CBE-POS', 1, 1),
+                                         (2, 1, 'UPSTAIRS', 2, 1);
+    """)
+    con.commit()
+    con.close()
+    os.environ["ESSA_WAREHOUSE_DB"] = str(wh_path)
+
+    # No cache to clear: warehouse_items._get_engine rebuilds whenever the URL
+    # changes, which is exactly what pointing ESSA_WAREHOUSE_DB somewhere else
+    # does.
+    from app import places
+
+    places.sync_places()
+    mirrored = {f.name: f for f in Floor.query.filter(Floor.wh_id.isnot(None)).all()}
+    check("the warehouse's floors arrive", sorted(mirrored), ["First Floor", "Ground Floor"])
+    check("…with the prefixes set upstairs",
+          sorted((f.name, f.prefix) for f in mirrored.values()),
+          [("First Floor", "TF"), ("Ground Floor", "TG")])
+    check("…and are not marked local, so a sync may retire them",
+          [f.local for f in mirrored.values()], [False, False])
+
+    tills = {c.name: c for c in Counter.query.filter(Counter.wh_id.isnot(None)).all()}
+    check("the warehouse's tills arrive too", sorted(tills), ["CBE-POS", "UPSTAIRS"])
+    check("…standing on the floor it put them on",
+          tills["CBE-POS"].floor_id, mirrored["Ground Floor"].id)
+    # The prefix, not the number: TG and TF have been billed on higher up this
+    # file, and carrying on where they were is the correct answer rather than
+    # restarting at 001 because a till arrived from upstairs.
+    check("…so the till bills on that floor's series",
+          billing_numbers.peek(tills["CBE-POS"])["prefix"], "TG")
+    check("…and the one upstairs on its own",
+          billing_numbers.peek(tills["UPSTAIRS"])["prefix"], "TF")
+
+    before = (Floor.query.count(), Counter.query.count())
+    places.sync_places()
+    places.sync_places()
+    check("syncing again changes nothing", (Floor.query.count(), Counter.query.count()),
+          before)
+
+    # A rename upstairs follows through instead of making a second floor — which
+    # is why the mirror is matched on the warehouse's id and not on the name.
+    con = sqlite3.connect(wh_path)
+    con.execute("UPDATE floors SET name = 'Ground', prefix = 'GG' WHERE id = 1")
+    con.commit()
+    con.close()
+    places.sync_places()
+    check("a floor renamed upstairs is renamed here, not duplicated",
+          (Floor.query.count(), db.session.get(Floor, mirrored["Ground Floor"].id).name),
+          (before[0], "Ground"))
+    check("…and its till follows the new prefix",
+          billing_numbers.peek(db.session.get(Counter, tills["CBE-POS"].id))["number"],
+          f"GG{year}-001")     # a prefix nothing has billed on yet, so 001
+
+    # A floor the shop added itself is left alone by all of that.
+    local_floor = Floor(location_id=ids["shop"], name="Mezzanine", prefix="TM",
+                        local=True, active=True)
+    db.session.add(local_floor)
+    db.session.commit()
+    places.sync_places()
+    kept = db.session.get(Floor, local_floor.id)
+    ok("a floor this shop created is not retired by a sync",
+       kept is not None and kept.active, "the sync switched off a local floor")
+
+    # And one the warehouse stops listing is switched off, never deleted — its
+    # prefix is on bills that are still read back.
+    con = sqlite3.connect(wh_path)
+    con.execute("DELETE FROM floors WHERE id = 2")
+    con.execute("DELETE FROM pos_terminals WHERE id = 2")
+    con.commit()
+    con.close()
+    places.sync_places()
+    gone = Floor.query.filter_by(wh_id=2).first()
+    check("a floor the warehouse drops is switched off, not deleted",
+          (gone is not None, gone.active if gone else None), (True, False))
+
+    os.environ["ESSA_WAREHOUSE_DB"] = str(Path(tempfile.mkdtemp()) / "no-warehouse.db")
+
+
 # ---- the screens, and the master behind them --------------------------------
 with app.app_context():
     print("\n-- every screen renders --")
