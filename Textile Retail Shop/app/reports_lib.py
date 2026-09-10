@@ -15,8 +15,9 @@ from datetime import date, timedelta
 from sqlalchemy import func
 
 from app import db
-from app.models import (Alteration, CreditNote, Category, Customer, Invoice,
-                        InvoiceItem, LoyaltyTxn, Product, User)
+from app.models import (Alteration, CreditNote, Category, Counter, Customer,
+                        Invoice, InvoiceItem, Location, LoyaltyTxn, Product,
+                        PromotionApplication, PromotionAudit, User)
 
 
 def _inv_in(start, end):
@@ -253,6 +254,194 @@ def commission_report(start, end):
             "note": r["note"]}
 
 
+# ---- promotions -----------------------------------------------------------
+#
+# Every one of these is dated by the BILL, not by when the promotion row was
+# written. A credit note raised in April against a March bill reduces March's
+# application, which is where the goods actually went out — filing the reduction
+# under April would leave two months both wrong.
+
+def _promo_apps(start, end):
+    return (db.session.query(PromotionApplication)
+            .join(Invoice, Invoice.id == PromotionApplication.invoice_id)
+            .filter(func.date(Invoice.invoice_date) >= start,
+                    func.date(Invoice.invoice_date) <= end))
+
+
+def _reward_lines(start, end):
+    """Every free / discounted line billed in the period, with its scheme."""
+    return (db.session.query(InvoiceItem, PromotionApplication)
+            .join(PromotionApplication,
+                  PromotionApplication.id == InvoiceItem.promo_application_id)
+            .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
+            .filter(InvoiceItem.promo_role == "reward",
+                    func.date(Invoice.invoice_date) >= start,
+                    func.date(Invoice.invoice_date) <= end))
+
+
+def promotion_schemes(start, end):
+    """Scheme performance — the register a manager asks for by name."""
+    # What each scheme actually handed over, so the report can name the free
+    # item rather than making somebody open a bill to find out.
+    given = {}
+    for item, app_row in _reward_lines(start, end).all():
+        given.setdefault(app_row.scheme_code, {}).setdefault(
+            item.product.name if item.product else "—", 0)
+        given[app_row.scheme_code][item.product.name if item.product else "—"] += \
+            item.quantity
+
+    rows = (db.session.query(
+        PromotionApplication.scheme_code, PromotionApplication.scheme_name,
+        func.count(func.distinct(PromotionApplication.invoice_id)),
+        func.sum(PromotionApplication.times_applied),
+        func.sum(PromotionApplication.qualifying_qty),
+        func.sum(PromotionApplication.reward_qty),
+        func.sum(PromotionApplication.benefit_value))
+        .join(Invoice, Invoice.id == PromotionApplication.invoice_id)
+        .filter(func.date(Invoice.invoice_date) >= start,
+                func.date(Invoice.invoice_date) <= end)
+        .group_by(PromotionApplication.scheme_code,
+                  PromotionApplication.scheme_name)
+        .order_by(func.sum(PromotionApplication.benefit_value).desc()).all())
+
+    out = []
+    for code, name, bills, times, qual, free, value in rows:
+        items = given.get(code) or {}
+        top = sorted(items.items(), key=lambda kv: -kv[1])
+        label = ", ".join(n for n, _ in top[:2]) or "—"
+        if len(top) > 2:
+            label += f" +{len(top) - 2}"
+        out.append([code, name, bills, int(times or 0),
+                    round(float(qual or 0), 2), round(float(free or 0), 2),
+                    label, _money(value)])
+    return {"columns": ["Code", "Scheme", "Bills", "Times applied",
+                        "Qualifying qty", "Free qty", "Free item", "Benefit"],
+            "rows": out,
+            "totals": {"Free qty": round(sum(r[5] for r in out), 2),
+                       "Benefit": _money(sum(r[7] for r in out))},
+            "note": "Benefit is what the free goods would have sold for. A "
+                    "return that breaks a promotion reduces the bill it was "
+                    "earned on, so these figures net down rather than double-"
+                    "counting a reward the customer no longer qualifies for."}
+
+
+def promotion_items(start, end):
+    """Stock issued as free items — product by product.
+
+    The one promotion report that is also a STOCK report: these garments left
+    the building and nobody paid for them, so this is what a stock question ends
+    up asking of promotions.
+    """
+    agg = {}
+    for item, app_row in _reward_lines(start, end).all():
+        p = item.product
+        key = (p.sku if p else "—", p.name if p else "—", app_row.scheme_name)
+        row = agg.setdefault(key, [0.0, 0.0])
+        row[0] += item.quantity or 0
+        row[1] += item.promo_value or 0
+    out = [[sku, name, scheme, round(qty, 2), _money(value)]
+           for (sku, name, scheme), (qty, value) in
+           sorted(agg.items(), key=lambda kv: -kv[1][1])]
+    return {"columns": ["SKU", "Item", "Scheme", "Free qty", "Value given"],
+            "rows": out,
+            "totals": {"Free qty": round(sum(r[3] for r in out), 2),
+                       "Value given": _money(sum(r[4] for r in out))},
+            "note": "Every line billed under a promotion, at what it would "
+                    "otherwise have sold for. Each one moved stock — look for "
+                    "them in the ledger under “promo”."}
+
+
+def promotion_places(start, end):
+    """Store-wise and POS-wise performance, in one table.
+
+    Both in one because they are the same question at two depths, and a shop
+    with one till at each branch would otherwise get the identical report twice.
+    """
+    # Started from the applications explicitly. Selecting Location.name first and
+    # letting SQLAlchemy infer the FROM would hang the joins off `locations`,
+    # which is not what any of the join conditions are about — and the answer
+    # would be a cross product that looks plausible until a second branch exists.
+    rows = (db.session.query(
+        Location.name, Counter.name,
+        func.count(func.distinct(PromotionApplication.invoice_id)),
+        func.sum(PromotionApplication.times_applied),
+        func.sum(PromotionApplication.reward_qty),
+        func.sum(PromotionApplication.benefit_value))
+        .select_from(PromotionApplication)
+        .join(Invoice, Invoice.id == PromotionApplication.invoice_id)
+        .outerjoin(Location, Location.id == Invoice.location_id)
+        .outerjoin(Counter, Counter.id == Invoice.counter_id)
+        .filter(func.date(Invoice.invoice_date) >= start,
+                func.date(Invoice.invoice_date) <= end)
+        .group_by(Location.name, Counter.name)
+        .order_by(func.sum(PromotionApplication.benefit_value).desc()).all())
+    out = [[loc or "—", till or "—", bills, int(times or 0),
+            round(float(free or 0), 2), _money(value)]
+           for loc, till, bills, times, free, value in rows]
+    return {"columns": ["Store", "Counter", "Bills", "Times applied",
+                        "Free qty", "Benefit"], "rows": out,
+            "totals": {"Benefit": _money(sum(r[5] for r in out))},
+            "note": "A dash means the bill was raised before the till recorded "
+                    "which branch and counter it came from."}
+
+
+def promotion_daily(start, end):
+    """Date-wise promotion performance."""
+    rows = (db.session.query(
+        func.date(Invoice.invoice_date),
+        func.count(func.distinct(PromotionApplication.invoice_id)),
+        func.sum(PromotionApplication.times_applied),
+        func.sum(PromotionApplication.qualifying_qty),
+        func.sum(PromotionApplication.reward_qty),
+        func.sum(PromotionApplication.benefit_value))
+        .join(PromotionApplication,
+              PromotionApplication.invoice_id == Invoice.id)
+        .filter(func.date(Invoice.invoice_date) >= start,
+                func.date(Invoice.invoice_date) <= end)
+        .group_by(func.date(Invoice.invoice_date))
+        .order_by(func.date(Invoice.invoice_date)).all())
+    out = [[d, bills, int(times or 0), round(float(qual or 0), 2),
+            round(float(free or 0), 2), _money(value)]
+           for d, bills, times, qual, free, value in rows]
+    return {"columns": ["Date", "Bills", "Times applied", "Qualifying qty",
+                        "Free qty", "Benefit"], "rows": out,
+            "totals": {"Free qty": round(sum(r[4] for r in out), 2),
+                       "Benefit": _money(sum(r[5] for r in out))},
+            "note": "Days with no promotion on any bill are left out rather "
+                    "than shown as zero."}
+
+
+def promotion_audit(start, end):
+    """Every promotion event, including the ones that gave nothing away.
+
+    The refusals are the point. A scheme that qualifies on twenty bills and
+    hands over nothing because its reward has been out of stock all week looks
+    like a scheme nobody is using, until this report says otherwise.
+    """
+    rows = (PromotionAudit.query
+            .filter(func.date(PromotionAudit.created_at) >= start,
+                    func.date(PromotionAudit.created_at) <= end)
+            .order_by(PromotionAudit.id.desc()).limit(1000).all())
+    labels = {"applied": "Applied", "blocked_no_stock": "BLOCKED — no stock",
+              "substituted": "Substituted", "reduced": "Reduced by a return",
+              "reversed": "Reversed by a return"}
+    out = [[a.created_at.strftime("%d-%m-%Y %H:%M"), a.scheme_code or "—",
+            a.scheme_name or "—",
+            a.invoice.invoice_number if a.invoice else "—",
+            labels.get(a.event, a.event),
+            a.location.name if a.location else "—",
+            a.user.full_name if a.user else "—",
+            round(float(a.reward_qty or 0), 2), _money(a.benefit_value)]
+           for a in rows]
+    blocked = sum(1 for a in rows if a.event == "blocked_no_stock")
+    return {"columns": ["When", "Code", "Scheme", "Bill", "Event", "Store",
+                        "By", "Free qty", "Benefit"], "rows": out,
+            "totals": {"Events": len(out), "Refused for want of stock": blocked},
+            "note": "Dated by when the event happened, not by the bill — a "
+                    "return in April reversing a March promotion belongs to "
+                    "April here. Capped at the most recent 1,000 events."}
+
+
 REPORTS = {
     "sales_summary": {
         "label": "Sales summary", "run": sales_summary, "dated": True,
@@ -322,7 +511,43 @@ REPORTS = {
     "loyalty": {
         "label": "Loyalty points", "run": loyalty_report, "dated": True,
         "blurb": "Points earned and redeemed per customer",
-        "keywords": ["loyalty", "points", "reward", "புள்ளி"]},
+        # "reward" was here and had to go: it is the word the promotion reports
+        # are about, and a question asking what the shop gave away was being
+        # answered with a table of loyalty points.
+        "keywords": ["loyalty", "points", "புள்ளி"]},
+    "promotions": {
+        "label": "Promotion schemes", "run": promotion_schemes, "dated": True,
+        "blurb": "Each offer: bills, qualifying qty, free qty and what it cost",
+        "keywords": ["promotion", "scheme", "offer", "buy get", "free item",
+                     "சலுகை", "இலவசம்"]},
+    "promotion_items": {
+        "label": "Free items issued", "run": promotion_items, "dated": True,
+        "blurb": "Stock given away under a promotion, product by product",
+        "keywords": ["free items", "free goods", "giveaway", "gift",
+                     "stock issued free", "இலவச பொருள்"]},
+    "promotion_places": {
+        # Two-word keys, and every one of them carries "promotion" or "offer".
+        # A bare "store" here would win every question that mentions a branch,
+        # including the ones about sales — the router scores on how many keywords
+        # a question contains, so a keyword broader than its report is how a
+        # question ends up at the wrong table.
+        "label": "Promotions by store", "run": promotion_places, "dated": True,
+        "blurb": "Which branch and counter the offers ran at",
+        "keywords": ["promotion store", "promotion branch", "offer store",
+                     "promotion counter", "promotion pos", "promotions by store",
+                     "promotion store wise", "offers by store",
+                     "promotion by branch", "offer branch"]},
+    "promotion_daily": {
+        "label": "Promotions by date", "run": promotion_daily, "dated": True,
+        "blurb": "Day by day: free items given and what they were worth",
+        "keywords": ["promotion daily", "offer daily", "promotion by date",
+                     "promotions by date", "promotion date wise",
+                     "promotion trend", "offers by date"]},
+    "promotion_audit": {
+        "label": "Promotion audit", "run": promotion_audit, "dated": True,
+        "blurb": "Every promotion event, including offers refused for no stock",
+        "keywords": ["promotion audit", "promotion history", "why no free",
+                     "promotion blocked", "offer refused"]},
 }
 
 

@@ -48,6 +48,10 @@ MODULES = [
      "label": "Alteration", "owns": ["alterations."], "manager": False,
      "blurb": "Garments out for tailoring, and what each tailor is holding"},
 
+    {"key": "promotions", "endpoint": "promotions.index", "icon": "bi-gift",
+     "label": "Promotions", "owns": ["promotions."], "manager": True,
+     "blurb": "Offers the till applies by itself, and what they have given away"},
+
     {"key": "staff", "endpoint": "staff.list_staff", "icon": "bi-person-badge",
      "label": "Staff", "owns": ["staff."], "manager": True,
      "blurb": "Attendance, roles, ID cards and sales commission"},

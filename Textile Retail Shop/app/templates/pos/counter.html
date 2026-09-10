@@ -183,6 +183,15 @@
         </table>
       </div>
 
+      {# What the cart has earned, and what it earned and cannot have.
+
+         On the billing screen rather than behind a button, because the cashier
+         has to be able to answer "why is there a leggings on my bill" without
+         leaving the sale — and because a promotion the customer qualified for
+         and the shop cannot honour has to be visible BEFORE the money is taken,
+         not discovered in the bag afterwards. #}
+      <div id="promoBox" class="mb-2 d-none"></div>
+
       <div class="border-top pt-2 mt-2">
         <div class="d-flex justify-content-between"><span>Subtotal</span><span id="subtotal">₹0.00</span></div>
         <div class="d-flex justify-content-between"><span>GST</span><span id="tax">₹0.00</span></div>
@@ -335,6 +344,15 @@
 const cart = new Map();
 let currentCustomerId = null;
 
+// What the cart has earned, as the server last answered it. Held here and never
+// computed on this side: the till SHOWS promotions, the server DECIDES them, and
+// `checkout` works the whole thing out again from the paid lines before it bills
+// anything. A page that could add its own free lines could give away stock.
+let promoAwards = [];
+let promoNotices = [];
+//: {scheme_id: product_id} where a scheme lets the cashier pick the reward.
+const promoChoices = {};
+
 function fmt(n){ return '₹' + Number(n).toFixed(2); }
 
 function renderCart(){
@@ -356,6 +374,26 @@ function renderCart(){
           <td><button class="btn btn-sm btn-outline-danger remove-btn" data-id="${id}"><i class="bi bi-x"></i></button></td>
         </tr>`);
     });
+    // The free lines, under the paid ones. No quantity box and no remove button:
+    // they are not the cashier's to change. They appear and disappear because of
+    // what is in the cart above, which is exactly what a promotion is — and a
+    // free item somebody can delete is a free item somebody can forget to give.
+    promoAwards.forEach((a) => a.rewards.forEach((r) => {
+      // A free reward is priced at zero, so these two add nothing for the
+      // ordinary case and add the right thing for a reward given at a discount.
+      const line = r.unit_price * r.qty;
+      const t = line * (r.gst || 0) / 100;
+      subtotal += line; tax += t;
+      body.insertAdjacentHTML('beforeend', `
+        <tr class="table-success">
+          <td>${r.name}
+            <span class="badge text-bg-success">${r.free ? 'FREE' : 'OFFER'}</span>
+            <br><small class="text-muted">${a.name}</small></td>
+          <td class="text-center">${r.qty}</td>
+          <td class="text-end">${fmt(line + t)}</td>
+          <td></td>
+        </tr>`);
+    }));
   }
   const discount = Math.min(parseFloat(document.getElementById('discount').value) || 0, subtotal);
   const preLoyalty = Math.max(0, subtotal - discount + tax);
@@ -390,9 +428,98 @@ function renderCart(){
     const id = e.target.dataset.id; const q = parseFloat(e.target.value) || 0;
     if (q <= 0) cart.delete(id); else cart.get(id).qty = q;
     renderCart();
+    refreshPromotions();
   });
   document.querySelectorAll('.remove-btn').forEach(b => b.onclick = e => {
-    cart.delete(e.currentTarget.dataset.id); renderCart();
+    cart.delete(e.currentTarget.dataset.id);
+    renderCart();
+    refreshPromotions();
+  });
+}
+
+// ---- promotions ------------------------------------------------------------
+// Asked of the server on every cart change, debounced, because a scanner fires
+// faster than a round trip. Advisory: the answer is drawn on screen, and the
+// same evaluation runs again at checkout against the server's own reading of
+// the cart. If this request fails the sale is unaffected — the free item simply
+// isn't shown, and `checkout` still applies it.
+let promoTimer = null;
+let promoSeq = 0;
+
+function refreshPromotions(){
+  clearTimeout(promoTimer);
+  promoTimer = setTimeout(async () => {
+    if (cart.size === 0){
+      promoAwards = []; promoNotices = [];
+      paintPromotions();
+      return;
+    }
+    const mine = ++promoSeq;
+    try {
+      const r = await fetch(`${SHOP_ROOT}/pos/api/promotions`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          items: [...cart.entries()].map(([id, it]) => ({product_id: id, quantity: it.qty})),
+          choices: promoChoices,
+        }),
+      });
+      const j = await r.json();
+      // A slower earlier request must not overwrite a newer answer — at a
+      // counter these fire on every beep and they do not come back in order.
+      if (mine !== promoSeq) return;
+      promoAwards = j.awards || [];
+      promoNotices = j.notices || [];
+    } catch (e){
+      if (mine !== promoSeq) return;
+      promoAwards = []; promoNotices = [];
+    }
+    renderCart();
+    paintPromotions();
+  }, 250);
+}
+
+function paintPromotions(){
+  const box = document.getElementById('promoBox');
+  if (!promoAwards.length && !promoNotices.length){
+    box.classList.add('d-none');
+    box.innerHTML = '';
+    return;
+  }
+  const awards = promoAwards.map((a) => `
+    <div class="d-flex justify-content-between align-items-start gap-2 py-1">
+      <div>
+        <i class="bi bi-gift text-success"></i>
+        <strong>${a.name}</strong>${a.times > 1 ? ' × ' + a.times : ''}
+        <div class="small text-muted">${a.description}</div>
+        ${a.note ? `<div class="small" style="color:#8a6d3b">${a.note}</div>` : ''}
+        ${a.options && a.options.length ? `
+          <select class="form-select form-select-sm mt-1 promo-pick" data-scheme="${a.scheme_id}">
+            ${a.rewards.map((r) => `<option value="${r.product_id}" selected>${r.name}</option>`).join('')}
+            ${a.options.map((o) => `<option value="${o.product_id}">${o.name} — ₹${Number(o.price).toFixed(2)}</option>`).join('')}
+          </select>` : ''}
+      </div>
+      <div class="text-end small text-nowrap">
+        <span class="badge text-bg-success">saves ${fmt(a.benefit)}</span>
+      </div>
+    </div>`).join('');
+
+  // The refusals are why this panel is on the billing screen at all. A customer
+  // who has earned a free garment the shop hasn't got must be told at the
+  // counter, by the person taking their money.
+  const notices = promoNotices.map((n) => `
+    <div class="d-flex gap-2 align-items-start py-1" style="color:#8a1c1c">
+      <i class="bi bi-exclamation-triangle"></i>
+      <div class="small">${n.message}</div>
+    </div>`).join('');
+
+  box.className = 'mb-2 p-2 border rounded';
+  box.style.background = promoAwards.length ? '#f2f8f2' : '#fdf4f4';
+  box.style.borderColor = promoAwards.length ? '#c9e2c9' : '#e5c9c9';
+  box.innerHTML = awards + notices;
+
+  document.querySelectorAll('.promo-pick').forEach((s) => s.onchange = (e) => {
+    promoChoices[e.target.dataset.scheme] = e.target.value;
+    refreshPromotions();
   });
 }
 
@@ -410,6 +537,7 @@ function addProduct(p){
     });
   }
   renderCart();
+  refreshPromotions();
 }
 
 // addToCart(el) is gone with the grid it read its dataset off. Everything now
@@ -901,6 +1029,11 @@ async function submitSale(payments, btn){
     discount: parseFloat(document.getElementById('discount').value) || 0,
     redeem_points: parseFloat(document.getElementById('redeemPoints').value) || 0,
     payments,
+    // The paid lines only. Free items are not sent and would not be believed if
+    // they were — the server works out what the promotion gives from these.
+    // What IS sent is which reward the cashier picked, where the scheme allows
+    // a choice, and even that is checked against the scheme's own list.
+    promotion_choices: promoChoices,
     items: [...cart.entries()].map(([id, it]) => ({product_id: id, quantity: it.qty, unit_price: it.price}))
   };
   try {
@@ -914,8 +1047,14 @@ async function submitSale(payments, btn){
       btn.disabled = false;
       return;
     }
-    // Said before the print view takes over the screen, because the change is
-    // the last thing that has to happen at the counter.
+    // Said before the print view takes over the screen, because these are the
+    // last two things that have to physically happen at the counter: the change
+    // out of the drawer, and the free garment into the bag. A promotion nobody
+    // hands over is a promotion the shop has paid for and the customer never got.
+    if (j.free_items && j.free_items.length){
+      alert('Put in the bag — free with this bill:\n\n'
+        + j.free_items.map((f) => `${f.qty} × ${f.name} (${f.sku})\n   under ${f.scheme}`).join('\n'));
+    }
     if (j.change > 0) alert('Return ' + fmt(j.change) + ' change to the customer.');
     window.location = `${SHOP_ROOT}/pos/invoice/${j.invoice_id}/print`;
   } catch (err){

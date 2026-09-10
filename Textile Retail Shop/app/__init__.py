@@ -61,6 +61,7 @@ def create_app(config_class=Config):
     from app.routes.checker import checker_bp
     from app.routes.floor import floor_bp
     from app.routes.delivery import delivery_bp
+    from app.routes.promotions import promotions_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -74,6 +75,7 @@ def create_app(config_class=Config):
     app.register_blueprint(checker_bp, url_prefix="/stock-check")
     app.register_blueprint(floor_bp, url_prefix="/floor")
     app.register_blueprint(delivery_bp, url_prefix="/delivery")
+    app.register_blueprint(promotions_bp, url_prefix="/promotions")
 
     # A product detailed and posted from the warehouse's mobile app should be in
     # the shop by the time anyone looks, without a restart or a button. Checking

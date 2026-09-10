@@ -15,7 +15,7 @@ from flask import (
 from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
-from app import warehouse_items
+from app import promotions, warehouse_items
 from app.models import (
     SaleSession, SaleSessionItem, Product, Customer,
     Invoice, InvoiceItem, StockMovement, LoyaltyTxn
@@ -297,6 +297,18 @@ def finalize(code):
     customer = s.customer
     is_interstate = bool(customer and customer.state_code and customer.state_code != shop_state)
 
+    # The same offers the billing counter applies. A customer who bought three
+    # chudithars from someone walking the floor has bought three chudithars, and
+    # a promotion that depends on which desk served them is a promotion the shop
+    # cannot explain. Evaluated before any stock moves, for the reason set out in
+    # pos.checkout: every line below reduces the figure this reads.
+    try:
+        outcome = promotions.evaluate(
+            [{"product_id": i.product_id, "quantity": i.quantity} for i in s.items])
+    except Exception:                                # noqa: BLE001
+        current_app.logger.warning("promotions skipped for this sale", exc_info=True)
+        outcome = promotions.Outcome([], [])
+
     inv = Invoice(
         invoice_number=generate_number("INV", Invoice, "invoice_number"),
         customer_id=customer.id if customer else None,
@@ -310,16 +322,19 @@ def finalize(code):
     db.session.flush()
 
     subtotal, tax = 0.0, 0.0
+    sold_items = {}
     for it in s.items:
         p = it.product
         if p.stock_qty < it.quantity:
             db.session.rollback()
             return jsonify({"error": f"Stock changed for {p.name}"}), 400
-        db.session.add(InvoiceItem(
+        line = InvoiceItem(
             invoice_id=inv.id, product_id=p.id,
             quantity=it.quantity, unit_price=it.unit_price,
             gst_rate=it.gst_rate, line_total=it.line_total, tax_amount=it.tax_amount,
-        ))
+        )
+        db.session.add(line)
+        sold_items.setdefault(p.id, []).append(line)
         p.stock_qty -= it.quantity
         db.session.add(StockMovement(
             product_id=p.id, change=-it.quantity, reason="sale",
@@ -327,6 +342,32 @@ def finalize(code):
         ))
         subtotal += it.line_total
         tax += it.tax_amount
+
+    # The reward lines, and the stock they take. In a savepoint so a
+    # misconfigured offer costs the floor a promotion rather than a sale.
+    free_items = []
+    if outcome.awards or outcome.notices:
+        mark = db.session.begin_nested()
+        keep = (subtotal, tax)
+        try:
+            for line, product, qty in promotions.apply_to_invoice(
+                    inv, outcome, sold_items, user_id=s.salesperson_id):
+                product.stock_qty -= qty
+                db.session.add(StockMovement(
+                    product_id=product.id, change=-qty,
+                    reason=promotions.MOVEMENT_REASON,
+                    reference=inv.invoice_number))
+                subtotal += line.line_total
+                tax += line.tax_amount
+                free_items.append({"name": product.name, "sku": product.sku,
+                                   "qty": qty})
+            mark.commit()
+        except Exception:                            # noqa: BLE001
+            mark.rollback()
+            subtotal, tax = keep
+            free_items = []
+            current_app.logger.warning("promotions skipped for this sale",
+                                       exc_info=True)
 
     if is_interstate:
         inv.igst = round(tax, 2)
@@ -360,7 +401,12 @@ def finalize(code):
     s.invoice_id = inv.id
     s.updated_at = datetime.utcnow()
     db.session.commit()
-    return jsonify({"success": True, "invoice_id": inv.id, "invoice_number": inv.invoice_number})
+    return jsonify({"success": True, "invoice_id": inv.id,
+                    "invoice_number": inv.invoice_number,
+                    # …and what the salesperson has to fetch off the shelf before
+                    # the customer leaves. A promotion nobody hands over is one
+                    # the shop has paid for and the customer never received.
+                    "free_items": free_items})
 
 
 @floor_bp.route("/s/<code>/cancel", methods=["POST"])

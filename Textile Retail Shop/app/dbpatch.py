@@ -74,6 +74,15 @@ COLUMNS = [
     ("invoices", "company_id", "INTEGER"),
     ("invoices", "location_id", "INTEGER"),
     ("invoices", "counter_id", "INTEGER"),
+    # What a promotion did to a bill line — see app/promotions.py. The promotion
+    # TABLES are new and create_all builds them; these four sit on a table that
+    # already existed, which is exactly what this file is for.
+    ("invoice_items", "promo_application_id", "INTEGER"),
+    ("invoice_items", "promo_role", "VARCHAR(16)"),
+    ("invoice_items", "promo_qty", "FLOAT"),
+    ("invoice_items", "promo_value", "FLOAT"),
+    # Free goods kept after the purchase that earned them was returned.
+    ("credit_notes", "promo_clawback", "FLOAT"),
 ]
 
 

@@ -630,9 +630,25 @@ essa-intake/
 
 The **POS** button beside **Warehouse** in the nav bar opens the Taqua Silks
 retail shop: billing counter, floor sales on a phone, invoices, shop stock,
-customers, staff and shop reports. It is the Flask app in
+customers, staff, **promotions** and shop reports. It is the Flask app in
 `Textile Retail Shop/`, with its own SQLite database (`textile_shop.db`) and its
 own login — sign in there the first time with `admin` / `admin123`.
+
+**Promotions** are a configurable engine rather than a coded offer. An admin
+writes a scheme — *buy 3 from LADIES-CHUDITHAR → 1 LEGGINGS free* — out of
+conditions, rewards and places, and the till applies it by itself: the free item
+appears on the billing screen as the cart is built, prints on the bill at ₹0
+marked with the scheme that gave it, **comes off stock with its own movement
+against the same bill**, and is recorded for reporting and audit. A free garment
+is a real product leaving inventory, so it is billed as a line and moved as one;
+what it is never is a discount that quietly costs the shop stock nothing knows
+about. The engine checks the reward is actually on the shelf before promising it
+and says so at the counter when it isn't, respects store and counter mapping,
+caps repeats per bill, refuses to let one purchase earn two schemes unless
+stacking is ticked, and re-checks the offer when a qualifying garment is
+returned. Nothing about the example scheme is in the code — see the shop's
+README for the row structure. `python "Textile Retail Shop/test_promotions.py"`
+runs the whole thing end to end, acceptance case included.
 
 It is not a second server. `backend/app/pos_mount.py` imports it and mounts it
 as WSGI under this API at `/pos`, so both halves answer on one port. That is

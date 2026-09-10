@@ -231,6 +231,7 @@ EXAMPLES = [
     "gst for this month",
     "which items are running low",
     "returns last 7 days",
+    "what did the offers give away this month",
     "கடந்த மாதம் விற்பனை எவ்வளவு",
     "இருப்பு குறைவான பொருட்கள்",
 ]

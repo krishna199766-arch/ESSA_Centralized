@@ -3,7 +3,7 @@ from flask import (Blueprint, render_template, request, redirect, url_for, flash
 from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
-from app import places, transfers, warehouse_items
+from app import places, promotions, transfers, warehouse_items
 from app.models import (Product, Customer, Invoice, InvoiceItem, InvoicePayment,
                         StockMovement, LoyaltyTxn, User, PAYMENT_METHODS)
 from app.utils import generate_number
@@ -83,6 +83,65 @@ POST_KEYS = ("company_id", "location_id", "counter_id")
 def _chosen():
     """(company, location, counter) for this till — each None until picked."""
     return places.resolve(*(session.get(k) for k in POST_KEYS))
+
+
+def _place():
+    """Where this till is, in the shape the promotion engine reads.
+
+    Includes the warehouse the frame was opened from, so an offer configured for
+    one warehouse's branches does not run at another's — the same narrowing
+    places.picker_options already does to the branch list.
+    """
+    company, location, counter = _chosen()
+    return promotions.Place(warehouse_id=places.current_scope(), company=company,
+                            location=location, counter=counter)
+
+
+def _cart_lines(data):
+    """The paid lines a request is offering, as the engine wants them.
+
+    Reward lines are dropped if a caller sends any: what the customer gets free
+    is decided here, from the products they are paying for, and a page that
+    could add its own free lines could bill the shop's stock away.
+    """
+    items = data.get("items")
+    if isinstance(items, str):
+        import json
+        items = json.loads(items or "[]")
+    out = []
+    for it in items or []:
+        if (it.get("promo_role") or it.get("free")):
+            continue
+        out.append({"product_id": it.get("product_id"),
+                    "quantity": it.get("quantity")})
+    return out
+
+
+@pos_bp.route("/api/promotions", methods=["POST"])
+@login_required
+def api_promotions():
+    """What this cart has earned, as the cashier builds it.
+
+    Called on every cart change so a free item appears while the customer is
+    still at the counter, and so an offer that cannot be honoured says why
+    there and then. Advisory only — `checkout` runs the same evaluation again
+    against its own reading of the cart, and that is the one that bills.
+    """
+    data = request.get_json(silent=True) or request.form
+    choices = data.get("choices") or {}
+    if isinstance(choices, str):
+        import json
+        choices = json.loads(choices or "{}")
+    try:
+        outcome = promotions.evaluate(_cart_lines(data), place=_place(),
+                                      choices=choices)
+    except Exception as exc:                        # noqa: BLE001
+        # A promotion is a bonus; a till that cannot bill because an offer is
+        # misconfigured is worse than one that quietly runs no offers. The
+        # counter shows nothing and the sale goes through.
+        current_app.logger.warning("promotion evaluation failed", exc_info=True)
+        return jsonify({"awards": [], "notices": [], "error": str(exc)})
+    return jsonify(outcome.to_json())
 
 
 @pos_bp.route("/")
@@ -250,6 +309,27 @@ def checkout():
         if company is None:
             company = places.default_company()
 
+        # ---- what this cart has earned ---------------------------------------
+        # Worked out BEFORE anything is written, and from the products the
+        # customer is paying for rather than from anything the page sent about
+        # free items. Two reasons it has to be here and not further down:
+        #
+        #   * it reads stock, and every line below reduces it. Asked after the
+        #     sale had come off the shelf it would see the shop as three garments
+        #     poorer and could refuse a reward the customer had plainly earned.
+        #   * it is the same reading the counter was shown while the cart was
+        #     being built, so the till and the bill agree.
+        #
+        # A misconfigured offer must never cost the shop a sale, so the whole
+        # evaluation is allowed to fail and the bill goes through without it.
+        try:
+            outcome = promotions.evaluate(_cart_lines(data), place=_place(),
+                                          choices=(data.get("promotion_choices") or {}))
+        except Exception:                            # noqa: BLE001
+            current_app.logger.warning("promotions skipped for this bill",
+                                       exc_info=True)
+            outcome = promotions.Outcome([], [])
+
         inv = Invoice(
             invoice_number=generate_number("INV", Invoice, "invoice_number"),
             customer_id=customer_id,
@@ -268,23 +348,12 @@ def checkout():
         subtotal = 0.0
         total_tax = 0.0
 
-        for it in items:
-            pid = int(it["product_id"])
-            qty = float(it["quantity"])
-            product = Product.query.get(pid)
-            if not product or product.stock_qty < qty:
-                db.session.rollback()
-                return jsonify({"error": f"Insufficient stock for {product.name if product else 'product'}"}), 400
-            unit_price = float(it.get("unit_price", product.selling_price))
-            line_total = qty * unit_price  # taxable
-            tax = round(line_total * product.gst_rate / 100.0, 2)
-
-            db.session.add(InvoiceItem(
-                invoice_id=inv.id, product_id=pid,
-                quantity=qty, unit_price=unit_price,
-                gst_rate=product.gst_rate,
-                line_total=line_total, tax_amount=tax,
-            ))
+        # Stock leaves the building in exactly one place, whether it was sold or
+        # given away. `where` is the branch it comes off, and `why` is what the
+        # ledger will say about it — a free garment under a promotion is not a
+        # sale, and a movement that called it one would make the promotion
+        # invisible to every stock question afterwards.
+        def take_stock(product, qty, why):
             product.stock_qty -= qty
             # …and out of the branch it was rung at. The shop's total above is
             # what the till sells against and what every screen reads; this is
@@ -297,14 +366,74 @@ def checkout():
             # a table added last week says zero would be the software arguing
             # with the room.
             if location is not None:
-                transfers.move(location.id, pid, -qty)
+                transfers.move(location.id, product.id, -qty)
             db.session.add(StockMovement(
-                product_id=pid, change=-qty, reason="sale",
+                product_id=product.id, change=-qty, reason=why,
                 reference=inv.invoice_number
                           + (f" @ {location.name}" if location is not None else "")
             ))
+
+        # Every paid line, by product, so the promotion can mark which of them
+        # earned it. A list per product because a till may bill the same garment
+        # on two lines at two prices.
+        sold_items = {}
+
+        for it in items:
+            if it.get("promo_role") or it.get("free"):
+                # Free lines are not accepted from the page. They are worked out
+                # below, from the products actually being paid for.
+                continue
+            pid = int(it["product_id"])
+            qty = float(it["quantity"])
+            product = Product.query.get(pid)
+            if not product or product.stock_qty < qty:
+                db.session.rollback()
+                return jsonify({"error": f"Insufficient stock for {product.name if product else 'product'}"}), 400
+            unit_price = float(it.get("unit_price", product.selling_price))
+            line_total = qty * unit_price  # taxable
+            tax = round(line_total * product.gst_rate / 100.0, 2)
+
+            line = InvoiceItem(
+                invoice_id=inv.id, product_id=pid,
+                quantity=qty, unit_price=unit_price,
+                gst_rate=product.gst_rate,
+                line_total=line_total, tax_amount=tax,
+            )
+            db.session.add(line)
+            sold_items.setdefault(pid, []).append(line)
+            take_stock(product, qty, "sale")
             subtotal += line_total
             total_tax += tax
+
+        # ---- promotions, written onto the bill --------------------------------
+        # A reward line is a real invoice line at a real quantity, so its stock
+        # moves exactly as a sold one does — through the same `take_stock`,
+        # against this same bill, under its own reason.
+        #
+        # Inside a SAVEPOINT so that an offer that blows up here undoes only
+        # itself. Without one, a half-written application would ride along on the
+        # commit below and the bill would carry a promotion nobody can account
+        # for; with the outer rollback instead, a bad scheme would cost the shop
+        # the sale. Neither is acceptable at a counter with a customer at it.
+        promo_free_value = 0.0
+        if outcome.awards or outcome.notices:
+            mark = db.session.begin_nested()
+            before = (subtotal, total_tax)
+            try:
+                for line, product, qty in promotions.apply_to_invoice(
+                        inv, outcome, sold_items, place=_place(),
+                        user_id=current_user.id):
+                    take_stock(product, qty, promotions.MOVEMENT_REASON)
+                    subtotal += line.line_total
+                    total_tax += line.tax_amount
+                    promo_free_value += line.promo_value or 0
+                mark.commit()
+            except Exception:                        # noqa: BLE001
+                mark.rollback()
+                subtotal, total_tax = before
+                promo_free_value = 0.0
+                current_app.logger.warning("promotions skipped for this bill",
+                                           exc_info=True)
 
         # apply discount to subtotal proportionally to keep tax reasonable
         if discount > subtotal:
@@ -377,7 +506,17 @@ def checkout():
                         "total": inv.total, "payment_method": inv.payment_method,
                         # what to hand back, so the counter can say it out loud
                         # instead of the cashier working it out on the counter
-                        "change": inv.change_given})
+                        "change": inv.change_given,
+                        # …and what to put in the bag that nobody paid for, for
+                        # the same reason: it is the other thing that has to
+                        # physically happen before the customer walks away.
+                        "free_items": [
+                            {"name": l.product.name, "sku": l.product.sku,
+                             "qty": l.quantity,
+                             "scheme": l.promo_application.scheme_name
+                                       if l.promo_application else ""}
+                            for l in inv.items if l.promo_role == "reward"],
+                        "promo_benefit": round(promo_free_value, 2)})
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500

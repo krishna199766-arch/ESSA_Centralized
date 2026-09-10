@@ -79,6 +79,14 @@
       {% if note.loyalty_reversed %}
       <tr><td class="text-muted">Loyalty points taken back</td><td class="text-end">{{ '%.0f'|format(note.loyalty_reversed) }} pts</td></tr>
       {% endif %}
+      {# The free goods the customer is keeping after returning what earned them.
+         Its own line and not folded into the discount, because it is neither a
+         discount nor a tax adjustment — it is the price of goods that were given
+         away on the strength of a purchase that has now been undone. #}
+      {% if note.promo_clawback %}
+      <tr><td class="text-muted">Free items kept, no longer earned</td>
+        <td class="text-end">- {{ note.promo_clawback|inr }}</td></tr>
+      {% endif %}
       <tr class="fw-bold"><td>Refunded</td><td class="text-end">{{ note.total|inr }}</td></tr>
     </table>
   </div>

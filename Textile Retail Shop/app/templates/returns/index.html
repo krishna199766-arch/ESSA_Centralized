@@ -59,8 +59,14 @@
         </tr></thead>
         <tbody>
           {% for it in invoice.items %}
-          <tr {% if it.returnable_qty <= 0 %}class="text-muted"{% endif %}>
-            <td>{{ it.product.name }}<br><small class="text-muted">{{ it.product.sku }}</small></td>
+          <tr class="{% if it.returnable_qty <= 0 %}text-muted{% endif %} {% if it.promo_role == 'reward' %}table-success{% endif %}">
+            <td>{{ it.product.name }}
+              {% if it.promo_role == 'reward' %}
+              <span class="badge text-bg-success">{{ 'FREE' if it.is_free_item else 'OFFER' }}</span>
+              {% elif it.promo_qty %}
+              <span class="badge text-bg-light border" title="{{ it.promo_qty }} of these earned a promotion">earned an offer</span>
+              {% endif %}
+              <br><small class="text-muted">{{ it.product.sku }}</small></td>
             <td class="text-end">{{ it.unit_price|inr }}</td>
             <td class="text-end">{{ it.quantity }}</td>
             <td class="text-end">{{ it.returned_qty or '—' }}</td>
@@ -84,6 +90,13 @@
       </table>
     </div>
   </div>
+
+  {# What the marked quantities do to the promotions on this bill, worked out as
+     the boxes are filled in. Here rather than after the fact: a free garment
+     that has to come back, or be paid for, changes what the customer is being
+     offered — and agreeing a refund figure and then reducing it is how a
+     counter argument starts. #}
+  <div id="promoWarn" class="d-none mb-3"></div>
 
   <div class="card p-3">
     <div class="row g-3">
@@ -135,5 +148,62 @@
     </tbody>
   </table>
 </div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{# Only where there is a bill on screen carrying promotions. The `if` is INSIDE
+   the block, not around it: a Jinja block is resolved when the template is
+   compiled, so one wrapped in a condition still overrides the parent's — the
+   condition would decide nothing and the page would carry a script referring to
+   an invoice that isn't there. #}
+{% if invoice and invoice.promotions %}
+<script>
+// What these quantities would do to the bill's promotions, asked of the server
+// as the boxes are filled in. It calls the same function the POST will
+// (promotions.review_return), so the warning here and what happens on submit
+// cannot disagree — and if this request fails, the POST still checks.
+const REVIEW_URL = "{{ url_for('returns.api_review') }}";
+const INVOICE_ID = {{ invoice.id }};
+let reviewTimer = null;
+
+function markedQuantities(){
+  const out = {};
+  document.querySelectorAll('input[name^="qty_"]').forEach((el) => {
+    const qty = parseFloat(el.value) || 0;
+    if (qty > 0) out[el.name.slice(4)] = qty;
+  });
+  return out;
+}
+
+async function reviewPromotions(){
+  const box = document.getElementById('promoWarn');
+  const taking = markedQuantities();
+  const clear = () => { box.className = 'd-none mb-3'; box.innerHTML = ''; };
+  if (!Object.keys(taking).length){ clear(); return; }
+  try {
+    const r = await fetch(REVIEW_URL, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({invoice_id: INVOICE_ID, taking}),
+    });
+    const j = await r.json();
+    const findings = (j.findings || []).filter((f) => f.unearned_qty > 0);
+    if (!findings.length){ clear(); return; }
+    const blocking = findings.some((f) => f.policy === 'require_return' && f.kept_qty > 0);
+    box.className = 'alert alert-' + (blocking ? 'danger' : 'warning') + ' mb-3';
+    box.innerHTML = '<strong><i class="bi bi-gift"></i> This return breaks a promotion</strong>'
+      + findings.map((f) => `<div class="mt-1">${f.message}</div>`).join('')
+      + (j.clawback > 0 ? `<div class="mt-2">The refund will be reduced by
+           <strong>₹${Number(j.clawback).toFixed(2)}</strong>.</div>` : '');
+  } catch (e){ /* advisory only — the POST checks it again either way */ }
+}
+
+document.querySelectorAll('input[name^="qty_"]').forEach((el) => {
+  el.addEventListener('input', () => {
+    clearTimeout(reviewTimer);
+    reviewTimer = setTimeout(reviewPromotions, 250);
+  });
+});
+</script>
 {% endif %}
 {% endblock %}

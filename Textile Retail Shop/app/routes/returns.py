@@ -15,6 +15,11 @@ sale touched:
             customer actually spent comes down.
   commission the staff member on the ORIGINAL sale loses the credit — not
             whoever happens to be handling the return. See routes/staff.py.
+  promotion a free item was earned by buying something. Hand that something
+            back and it is not earned any more, so the promotions on the bill
+            are re-checked and what the customer no longer qualifies for is
+            either returned with it, charged for, or written off — whichever the
+            scheme says. See app/promotions.review_return.
 
 Nothing can come back twice: every line is capped at what it was sold for, less
 what has already been credited.
@@ -25,7 +30,7 @@ from flask import (Blueprint, render_template, request, redirect, url_for,
                    flash, jsonify, current_app)
 from flask_login import login_required, current_user
 
-from app import db
+from app import db, promotions
 from app.models import (CreditNote, CreditNoteItem, Invoice, InvoiceItem,
                         LoyaltyTxn, Product, StockMovement)
 from app.routes.pos import resolve_staff
@@ -48,6 +53,31 @@ def index():
             flash(f"No invoice matches '{q}'.", "warning")
     recent = CreditNote.query.order_by(CreditNote.id.desc()).limit(10).all()
     return render_template("returns/index.html", q=q, invoice=invoice, recent=recent)
+
+
+@returns_bp.route("/api/review", methods=["POST"])
+@login_required
+def api_review():
+    """What the marked quantities would do to this bill's promotions.
+
+    Asked by the returns screen as the boxes are filled in, so the consequence
+    of taking back a qualifying garment is on screen BEFORE the credit note is
+    raised — not discovered as a smaller refund after the customer has agreed a
+    figure.
+    """
+    data = request.get_json(silent=True) or {}
+    inv = Invoice.query.get(int(data.get("invoice_id") or 0))
+    if inv is None:
+        return jsonify({"findings": [], "clawback": 0.0})
+    taking = {int(k): float(v) for k, v in (data.get("taking") or {}).items()
+              if float(v or 0) > 0}
+    findings = promotions.review_return(inv, taking)
+    return jsonify({
+        "findings": [f.to_json() for f in findings],
+        "clawback": round(sum(f.clawback for f in findings), 2),
+        "blocked": [f.to_json() for f in findings
+                    if f.policy == "require_return" and f.kept_qty > 0],
+    })
 
 
 @returns_bp.route("/create", methods=["POST"])
@@ -76,6 +106,21 @@ def create():
 
     if not taking:
         flash("Nothing was marked for return.", "warning")
+        return redirect(url_for("returns.index", q=inv.invoice_number))
+
+    # ---- what this does to the promotions on the bill ------------------------
+    # Checked before the note is written, because one of the answers is "not
+    # like this": a scheme set to `require_return` will not let the qualifying
+    # purchase go back without the free item that came with it.
+    marked = {item.id: qty for item, qty, _ in taking}
+    findings = promotions.review_return(inv, marked)
+    blocked = [f for f in findings
+               if f.policy == "require_return" and f.kept_qty > 0]
+    if blocked:
+        for f in blocked:
+            flash(f.message, "danger")
+        flash("Add the free item(s) to this return, or ask a manager to change "
+              "the scheme's return rule.", "warning")
         return redirect(url_for("returns.index", q=inv.invoice_number))
 
     note = CreditNote(
@@ -130,7 +175,26 @@ def create():
     else:
         note.cgst = round(tax / 2, 2)
         note.sgst = round(tax / 2, 2)
-    note.total = round(goods - discount_back + tax, 2)
+
+    # Free goods the customer keeps but has stopped qualifying for. Taken off
+    # the refund rather than left alone: the garment was given on the strength
+    # of a purchase that has now been undone, and a shop that refunds the
+    # purchase AND lets the free item walk has paid twice for one sale.
+    #
+    # It is not tax and it is not a discount, so it reduces the refund without
+    # touching either — the GST reversed is the GST on the goods that actually
+    # came back. Reversing tax on a free item would be reversing tax nobody
+    # charged, since a reward line is billed at zero (see app/promotions.py).
+    #
+    # Capped at what is being refunded, so a credit note never comes out
+    # negative. A return that would owe the shop money is a conversation at the
+    # counter, not a document that reads like a sale — but the shortfall is said
+    # out loud below rather than quietly absorbed.
+    refundable = round(goods - discount_back + tax, 2)
+    wanted = promotions.settle_return(note, findings, user_id=current_user.id)
+    clawback = min(wanted, refundable)
+    note.promo_clawback = clawback
+    note.total = round(refundable - clawback, 2)
 
     # Loyalty: take back what this refund earned, and correct what was spent.
     customer = inv.customer
@@ -150,6 +214,13 @@ def create():
 
     db.session.commit()
     flash(f"Return recorded — {note.number}, {note.total:.2f} refunded.", "success")
+    for f in findings:
+        if f.unearned_qty > 0:
+            flash(f.message, "warning")
+    if wanted > clawback:
+        flash(f"₹{wanted - clawback:.2f} of free goods could not be recovered "
+              f"from this refund — the return was worth less than the promotion "
+              f"it broke.", "warning")
     return redirect(url_for("returns.view_note", nid=note.id))
 
 

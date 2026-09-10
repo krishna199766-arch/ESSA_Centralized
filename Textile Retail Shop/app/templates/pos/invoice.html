@@ -103,15 +103,28 @@
         <tr><th>#</th><th>Item</th><th>HSN</th><th class="text-end">Qty</th><th class="text-end">Rate</th><th class="text-end">GST%</th><th class="text-end">Amount</th></tr>
       </thead>
       <tbody>
+        {# A free garment is a line on the bill like any other — it left stock,
+           it is under warranty, and it can be returned. What it is NOT is a
+           mystery: the line says which scheme put it there, so a customer
+           querying a bill and a manager auditing one read the same answer. #}
         {% for it in inv.items %}
         <tr>
           <td>{{ loop.index }}</td>
-          <td>{{ it.product.name }}<br><small class="text-muted">SKU {{ it.product.sku }}</small></td>
+          <td>{{ it.product.name }}
+            {% if it.promo_role == 'reward' %}
+            <span class="badge bg-success">{{ 'FREE' if it.is_free_item else 'OFFER' }}</span>
+            {% endif %}
+            <br><small class="text-muted">SKU {{ it.product.sku }}</small>
+            {% if it.promo_role == 'reward' and it.promo_application %}
+            <br><small class="text-success">Promotion: {{ it.promo_application.scheme_name }}
+              ({{ it.promo_application.scheme_code }})</small>
+            {% endif %}
+          </td>
           <td>{{ it.product.hsn_code }}</td>
           <td class="text-end">{{ it.quantity }} {{ it.product.unit }}</td>
-          <td class="text-end">{{ it.unit_price|inr }}</td>
+          <td class="text-end">{% if it.is_free_item %}—{% else %}{{ it.unit_price|inr }}{% endif %}</td>
           <td class="text-end">{{ it.gst_rate }}%</td>
-          <td class="text-end">{{ it.line_total|inr }}</td>
+          <td class="text-end">{% if it.is_free_item %}<strong>FREE</strong>{% else %}{{ it.line_total|inr }}{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -131,6 +144,18 @@
         {% endif %}
         {% if inv.loyalty_redeemed %}<tr><td>Loyalty redeemed ({{ inv.loyalty_redeemed }} pts)</td><td class="text-end">- {{ inv.loyalty_redeemed|inr }}</td></tr>{% endif %}
         <tr class="invoice-total-row"><td>TOTAL</td><td class="text-end">{{ inv.total|inr }}</td></tr>
+        {# What the promotions on this bill were worth. Below the total and not
+           inside it, because nothing was charged for them — it is not a discount
+           on this bill, it is goods handed over at no price. Showing it as a
+           discount line would make the arithmetic above stop adding up. #}
+        {% if inv.promotions %}
+        <tr><td colspan="2" class="text-success small">
+          {% for a in inv.promotions %}
+          {{ a.scheme_name }}{% if a.times_applied > 1 %} × {{ a.times_applied }}{% endif %}
+          — {{ a.reward_qty }} item(s) worth {{ a.benefit_value|inr }}, free.<br>
+          {% endfor %}
+        </td></tr>
+        {% endif %}
         {% if inv.loyalty_earned %}<tr><td colspan="2" class="text-success small">You earned {{ inv.loyalty_earned }} loyalty points.</td></tr>{% endif %}
       </table>
     </div>

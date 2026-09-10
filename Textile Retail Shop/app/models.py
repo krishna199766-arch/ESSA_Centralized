@@ -429,6 +429,35 @@ class InvoiceItem(db.Model):
     tax_amount = db.Column(db.Float, default=0.0)
     product = db.relationship("Product")
 
+    # What a promotion did to this line. All null on an ordinary sale, which is
+    # nearly every line — see app/promotions.py.
+    #
+    # The line stays a NORMAL invoice line either way: a free garment is a real
+    # product leaving stock at a price of zero, not an annotation on the bill. So
+    # the promotion is recorded ON it rather than in a parallel table of free
+    # goods, and every screen that already reads invoice items — the print, the
+    # delivery desk, returns, the stock ledger — keeps working without knowing
+    # promotions exist.
+    promo_application_id = db.Column(
+        db.Integer, db.ForeignKey("promotion_applications.id"), index=True)
+    #: `qualifying` — this line helped earn the promotion.
+    #: `reward`     — this line IS the promotion.
+    promo_role = db.Column(db.String(16))
+    #: How much of `quantity` the promotion actually used. A cart of 5 chudithars
+    #: earning one set of 3 has qualified 3 of them, and a report that counted the
+    #: whole line would say the scheme moved goods it never touched.
+    promo_qty = db.Column(db.Float, default=0.0)
+    #: What was given away on this line, at the price it would have sold for.
+    #: Stored rather than derived: `unit_price` is 0 on a free line and the
+    #: product's selling price changes, so nothing else remembers what the
+    #: customer was handed. 0 on a qualifying line — it was paid for in full.
+    promo_value = db.Column(db.Float, default=0.0)
+
+    @property
+    def is_free_item(self):
+        """A line the customer was not charged for, under a scheme."""
+        return self.promo_role == "reward" and not (self.unit_price or 0)
+
     @property
     def returned_qty(self):
         """How much of this line has already come back on a credit note."""
@@ -492,6 +521,10 @@ class CreditNote(db.Model):
     total = db.Column(db.Float, default=0.0)         # what the customer gets back
 
     loyalty_reversed = db.Column(db.Float, default=0.0)
+    #: Free goods the customer keeps but no longer qualifies for, charged back
+    #: against this refund. 0 on every return that breaks no promotion, which is
+    #: nearly all of them — see app/promotions.review_return.
+    promo_clawback = db.Column(db.Float, default=0.0)
     refund_method = db.Column(db.String(16), default="cash")
     reason = db.Column(db.String(256))
 
@@ -521,6 +554,334 @@ class CreditNoteItem(db.Model):
 
     product = db.relationship("Product")
     invoice_item = db.relationship("InvoiceItem", backref="credit_lines")
+
+
+# ---------- Sales promotion schemes ----------
+#
+# Six tables where one would have done for "buy 3 chudithars, get a leggings",
+# and that is the whole point. A scheme written as columns on one row can express
+# exactly the offer somebody thought of first; the next one — two categories to
+# qualify, a choice of three rewards, one branch only — needs a schema change and
+# a new branch in the billing code. So the offer is decomposed into the things it
+# is actually made of:
+#
+#     PromotionScheme          the offer, its validity, its limits
+#       PromotionCondition     one group that has to be bought  ("any 3 of…")
+#         PromotionConditionItem   a product or a category that satisfies it
+#       PromotionReward        one thing that is then given     ("1 of…, free")
+#         PromotionRewardItem      a product or a category it may be
+#       PromotionPlace         where the offer runs (no rows = everywhere)
+#
+# and what happened is recorded separately from what was configured:
+#
+#     PromotionApplication     this scheme, on this bill, this many times
+#     PromotionAudit           every promotion event, including the refusals
+#
+# The engine in app/promotions.py reads that structure and knows nothing about
+# any particular offer. Adding "buy 2 get 1" is data.
+
+#: What the customer gets. On the SCHEME rather than on each reward, because it
+#: is the one word that describes the offer — a scheme does not hand out one item
+#: free and another at 10% off.
+SCHEME_TYPES = ("buy_get_free", "buy_get_percent", "buy_get_price")
+
+#: How the reward item is picked when the scheme allows more than one.
+REWARD_SELECTION = ("specific", "cheapest", "dearest", "choose")
+
+#: What to do when the reward is not on the shelf (§ stock validation).
+#: `block` — no free item is added and the till says why.
+#: `substitute` — the next eligible reward that IS in stock is offered instead.
+OUT_OF_STOCK_ACTIONS = ("block", "substitute")
+
+#: What happens to the free goods when a qualifying item is returned.
+RETURN_POLICIES = ("reclaim_value", "require_return", "keep")
+
+#: Which side of the offer an invoice line was on.
+PROMO_ROLES = ("qualifying", "reward")
+
+
+class PromotionScheme(db.Model):
+    """One offer the shop is running.
+
+    `priority` decides who gets a cart first when several schemes could claim the
+    same garments — lower runs earlier, as a numbered list reads. A scheme that
+    claims an item takes it out of the pool, so the next scheme sees only what is
+    left; that is what stops one purchase earning two rewards. `stackable` opts a
+    scheme out of both halves of that: it reads the whole cart and reserves
+    nothing, which is a deliberate second benefit rather than an accident.
+    """
+    __tablename__ = "promotion_schemes"
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(32), unique=True, nullable=False, index=True)
+    name = db.Column(db.String(128), nullable=False)
+    scheme_type = db.Column(db.String(24), nullable=False, default="buy_get_free")
+
+    #: Null at either end means open — a scheme with no end date runs until it is
+    #: switched off, which is what a standing offer is.
+    start_date = db.Column(db.Date, index=True)
+    end_date = db.Column(db.Date, index=True)
+    active = db.Column(db.Boolean, default=True, index=True)
+
+    priority = db.Column(db.Integer, default=100, index=True)
+    #: How many times one bill may earn this. Null = as often as it qualifies.
+    max_applications = db.Column(db.Integer)
+    stackable = db.Column(db.Boolean, default=False)
+
+    reward_selection = db.Column(db.String(16), default="cheapest")
+    out_of_stock = db.Column(db.String(16), default="block")
+    return_policy = db.Column(db.String(16), default="reclaim_value")
+
+    terms = db.Column(db.Text)
+
+    created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+
+    created_by = db.relationship("User", foreign_keys=[created_by_id])
+    updated_by = db.relationship("User", foreign_keys=[updated_by_id])
+    conditions = db.relationship("PromotionCondition", backref="scheme", lazy=True,
+                                 cascade="all, delete-orphan",
+                                 order_by="PromotionCondition.sort_order")
+    rewards = db.relationship("PromotionReward", backref="scheme", lazy=True,
+                              cascade="all, delete-orphan",
+                              order_by="PromotionReward.sort_order")
+    places = db.relationship("PromotionPlace", backref="scheme", lazy=True,
+                             cascade="all, delete-orphan")
+    applications = db.relationship("PromotionApplication", backref="scheme",
+                                   lazy=True)
+
+    def runs_on(self, day):
+        """Is `day` inside this scheme's validity? Open ends are always inside."""
+        if self.start_date and day < self.start_date:
+            return False
+        if self.end_date and day > self.end_date:
+            return False
+        return True
+
+    def status(self, today=None):
+        """`active` · `scheduled` · `expired` · `inactive` — for the admin list.
+
+        Derived, never stored: a scheme whose end date has passed is expired
+        whether or not anybody remembered to untick Active, and a stored flag
+        would have to be swept by something that runs.
+        """
+        today = today or date.today()
+        if not self.active:
+            return "inactive"
+        if self.start_date and today < self.start_date:
+            return "scheduled"
+        if self.end_date and today > self.end_date:
+            return "expired"
+        return "active"
+
+
+class PromotionCondition(db.Model):
+    """One group of goods that has to be bought.
+
+    A scheme with two conditions means BOTH — "2 chudithars AND 1 dupatta" — and
+    each condition's own item rows mean ANY of these. That is the whole grammar,
+    and it covers every example in the brief without a rule engine: quantity,
+    product, category and mixed schemes are all conditions with different rows
+    under them.
+    """
+    __tablename__ = "promotion_conditions"
+    id = db.Column(db.Integer, primary_key=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("promotion_schemes.id"),
+                          nullable=False, index=True)
+    min_qty = db.Column(db.Float, nullable=False, default=1.0)
+    #: What the cashier is shown when the till explains why a free item appeared.
+    #: Left blank it is written from the rows themselves.
+    label = db.Column(db.String(128))
+    sort_order = db.Column(db.Integer, default=0)
+
+    items = db.relationship("PromotionConditionItem", backref="condition",
+                            lazy=True, cascade="all, delete-orphan")
+
+
+class PromotionConditionItem(db.Model):
+    """A product, or a whole category, that counts towards a condition."""
+    __tablename__ = "promotion_condition_items"
+    id = db.Column(db.Integer, primary_key=True)
+    condition_id = db.Column(db.Integer, db.ForeignKey("promotion_conditions.id"),
+                             nullable=False, index=True)
+    # Exactly one of these is set. Pointing at the shop's own product and
+    # category rows rather than copying names: the promotion has to mean the same
+    # thing the stock ledger and the GRN mean, and a second spelling of
+    # "LADIES CHUDITHAR" is how it stops meaning it.
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), index=True)
+    category_id = db.Column(db.Integer, db.ForeignKey("categories.id"), index=True)
+
+    product = db.relationship("Product")
+    category = db.relationship("Category")
+
+    @property
+    def label(self):
+        if self.product:
+            return f"{self.product.name} ({self.product.sku})"
+        if self.category:
+            return f"any {self.category.name}"
+        return "—"
+
+
+class PromotionReward(db.Model):
+    """One thing the customer gets each time the conditions are met."""
+    __tablename__ = "promotion_rewards"
+    id = db.Column(db.Integer, primary_key=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("promotion_schemes.id"),
+                          nullable=False, index=True)
+    qty = db.Column(db.Float, nullable=False, default=1.0)
+    #: The percentage off, or the fixed price, depending on the scheme's type.
+    #: Ignored entirely by `buy_get_free`, where the answer is always zero.
+    value = db.Column(db.Float, default=0.0)
+    sort_order = db.Column(db.Integer, default=0)
+
+    items = db.relationship("PromotionRewardItem", backref="reward", lazy=True,
+                            cascade="all, delete-orphan")
+
+
+class PromotionRewardItem(db.Model):
+    """A product, or a category, this reward may be satisfied from."""
+    __tablename__ = "promotion_reward_items"
+    id = db.Column(db.Integer, primary_key=True)
+    reward_id = db.Column(db.Integer, db.ForeignKey("promotion_rewards.id"),
+                          nullable=False, index=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"), index=True)
+    category_id = db.Column(db.Integer, db.ForeignKey("categories.id"), index=True)
+
+    product = db.relationship("Product")
+    category = db.relationship("Category")
+
+    @property
+    def label(self):
+        if self.product:
+            return f"{self.product.name} ({self.product.sku})"
+        if self.category:
+            return f"any {self.category.name}"
+        return "—"
+
+
+class PromotionPlace(db.Model):
+    """Where a scheme runs. A scheme with NO rows runs everywhere.
+
+    The four columns are the same four the till already answers with — the
+    warehouse the frame was opened from, and the company / location / counter
+    picked on it (see app/places.py). A row matches when every column it fills in
+    matches the till; a row that fills in only `location_id` is "this branch, any
+    counter". So one offer at one till and one offer across a whole company are
+    the same shape of record, and neither needs its own flag on the scheme.
+    """
+    __tablename__ = "promotion_places"
+    id = db.Column(db.Integer, primary_key=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("promotion_schemes.id"),
+                          nullable=False, index=True)
+    #: The WAREHOUSE the till was opened from. Not a foreign key — it names a row
+    #: in the warehouse's database, which this shop only ever reads.
+    warehouse_id = db.Column(db.Integer, index=True)
+    company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), index=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    counter_id = db.Column(db.Integer, db.ForeignKey("counters.id"), index=True)
+
+    company = db.relationship("Company")
+    location = db.relationship("Location")
+    counter = db.relationship("Counter")
+
+    @property
+    def label(self):
+        bits = [self.company.name if self.company else None,
+                self.location.name if self.location else None,
+                self.counter.name if self.counter else None]
+        if self.warehouse_id and not any(bits):
+            return f"warehouse #{self.warehouse_id}"
+        return " / ".join(b for b in bits if b) or "everywhere"
+
+
+class PromotionApplication(db.Model):
+    """One scheme, on one bill, applied this many times.
+
+    The scheme's code and name are COPIED here, and that is not duplication: a
+    scheme gets renamed, re-priced and switched off, and a bill from March has to
+    keep saying what the customer was actually given. `scheme_id` is the live
+    link for reporting; the two text columns are the receipt.
+
+    Store, till, cashier and date are NOT copied — they are on the invoice, which
+    is one row away and cannot disagree with itself.
+    """
+    __tablename__ = "promotion_applications"
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey("invoices.id"),
+                           nullable=False, index=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("promotion_schemes.id"),
+                          index=True)
+    scheme_code = db.Column(db.String(32))
+    scheme_name = db.Column(db.String(128))
+
+    times_applied = db.Column(db.Integer, default=1)
+    qualifying_qty = db.Column(db.Float, default=0.0)
+    reward_qty = db.Column(db.Float, default=0.0)
+    #: What the reward goods were worth at the price they would have sold for.
+    benefit_value = db.Column(db.Float, default=0.0)
+
+    #: `applied` · `reduced` · `reversed` — what a later return did to it.
+    status = db.Column(db.String(16), default="applied", index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    invoice = db.relationship("Invoice",
+                              backref=db.backref("promotions", lazy=True,
+                                                 cascade="all, delete-orphan"))
+    lines = db.relationship("InvoiceItem", backref="promo_application", lazy=True)
+
+    @property
+    def reward_lines(self):
+        return [l for l in self.lines if l.promo_role == "reward"]
+
+    @property
+    def qualifying_lines(self):
+        return [l for l in self.lines if l.promo_role == "qualifying"]
+
+
+class PromotionAudit(db.Model):
+    """Every promotion event, including the ones where nothing was given away.
+
+    Separate from the application because the interesting events have no
+    application to hang off: a scheme that qualified and was refused for want of
+    stock, or one whose reward was substituted, leaves no free line on any bill
+    — and those are precisely the ones somebody asks about later. A log that only
+    recorded successes could never answer "why did this customer not get theirs".
+    """
+    __tablename__ = "promotion_audit"
+    id = db.Column(db.Integer, primary_key=True)
+    scheme_id = db.Column(db.Integer, db.ForeignKey("promotion_schemes.id"),
+                          index=True)
+    scheme_code = db.Column(db.String(32))
+    scheme_name = db.Column(db.String(128))
+    #: Null for an event that never became a bill — a refusal at the counter.
+    invoice_id = db.Column(db.Integer, db.ForeignKey("invoices.id"), index=True)
+    application_id = db.Column(db.Integer,
+                               db.ForeignKey("promotion_applications.id"), index=True)
+
+    #: applied · blocked_no_stock · substituted · reduced · reversed
+    event = db.Column(db.String(24), nullable=False, index=True)
+    detail = db.Column(db.Text)
+
+    times_applied = db.Column(db.Integer, default=0)
+    qualifying_qty = db.Column(db.Float, default=0.0)
+    reward_qty = db.Column(db.Float, default=0.0)
+    benefit_value = db.Column(db.Float, default=0.0)
+
+    # Where it happened. Copied here ONLY because a refusal has no invoice to
+    # read them off — on an `applied` row they repeat the bill, harmlessly.
+    company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), index=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    counter_id = db.Column(db.Integer, db.ForeignKey("counters.id"), index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    invoice = db.relationship("Invoice")
+    user = db.relationship("User")
+    location = db.relationship("Location")
+    counter = db.relationship("Counter")
 
 
 # ---------- Delivery ----------
