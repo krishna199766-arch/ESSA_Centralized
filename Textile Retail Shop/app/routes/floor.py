@@ -15,7 +15,7 @@ from flask import (
 from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
-from app import promotions, warehouse_items
+from app import billing_numbers, promotions, warehouse_items
 from app.models import (
     SaleSession, SaleSessionItem, Product, Customer,
     Invoice, InvoiceItem, StockMovement, LoyaltyTxn
@@ -309,8 +309,23 @@ def finalize(code):
         current_app.logger.warning("promotions skipped for this sale", exc_info=True)
         outcome = promotions.Outcome([], [])
 
+    # Floor SALES — a phone cart built while walking the shop — is not a till,
+    # and it has no counter, so it has no storey mapped to it and bills on the
+    # shop's plain INV- series exactly as it always has. That is the honest
+    # answer rather than guessing a floor from the salesperson: the bill prefix
+    # says which register a sale belongs in, and inventing one would file sales
+    # under a floor nobody chose. (If these ever need their own series, the
+    # answer is a floor picker on the phone, not a guess here.)
+    #
+    # What HAS changed is that the number now comes from the same backend
+    # allocator the counter uses, so two salespeople finalising at once cannot
+    # land on the same one — see app/billing_numbers.py.
+    number, prefix, fin_year, seq = billing_numbers.allocate(None)
     inv = Invoice(
-        invoice_number=generate_number("INV", Invoice, "invoice_number"),
+        invoice_number=number,
+        bill_prefix=prefix,
+        fin_year=fin_year,
+        bill_seq=seq,
         customer_id=customer.id if customer else None,
         cashier_id=s.salesperson_id,
         staff_id=s.salesperson_id,

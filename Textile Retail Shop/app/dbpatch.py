@@ -83,6 +83,15 @@ COLUMNS = [
     ("invoice_items", "promo_value", "FLOAT"),
     # Free goods kept after the purchase that earned them was returned.
     ("credit_notes", "promo_clawback", "FLOAT"),
+    # Which storey a till stands on, and how a bill's number was built — see
+    # app/billing_numbers.py. Nullable throughout: every till and every bill that
+    # predates floors has no answer, and the plain INV- series they were numbered
+    # on is still a series.
+    ("counters", "floor_id", "INTEGER"),
+    ("invoices", "floor_id", "INTEGER"),
+    ("invoices", "fin_year", "VARCHAR(8)"),
+    ("invoices", "bill_prefix", "VARCHAR(8)"),
+    ("invoices", "bill_seq", "INTEGER"),
 ]
 
 

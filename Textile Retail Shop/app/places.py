@@ -35,7 +35,7 @@ from app import db
 # because it only ever runs at startup; `stores_of_warehouse` below runs on every
 # picker draw, which is a request.
 from app import warehouse_items as _wh
-from app.models import Company, Counter, Location
+from app.models import Company, Counter, Floor, Location
 
 #: The counter every location starts with. A shop with one till should not have
 #: to invent a name for it before it can bill anything.
@@ -255,7 +255,17 @@ def picker_options():
                                             .order_by(Company.name).all()],
         "locations": [{"id": l.id, "name": l.name, "company_id": l.company_id}
                       for l in locations],
-        "counters": [{"id": x.id, "name": x.name, "location_id": x.location_id}
+        # The storeys of each branch, and the bill prefix each one bills on. The
+        # prefix travels with the option because the till SHOWS it — a cashier
+        # picking "First Floor" should see TF before they take a rupee, not
+        # discover it on the printed bill.
+        "floors": [{"id": f.id, "name": f.name, "prefix": f.prefix,
+                    "location_id": f.location_id}
+                   for f in Floor.query.filter_by(active=True)
+                                       .order_by(Floor.sort_order, Floor.name).all()
+                   if allowed is None or f.location_id in keep],
+        "counters": [{"id": x.id, "name": x.name, "location_id": x.location_id,
+                      "floor_id": x.floor_id}
                      for x in Counter.query.filter_by(active=True)
                                            .order_by(Counter.name).all()
                      # a till at a branch this warehouse does not supply is not
@@ -264,17 +274,26 @@ def picker_options():
     }
 
 
-def resolve(company_id=None, location_id=None, counter_id=None):
-    """The three rows a till has chosen, each None if it has not chosen one.
+def resolve(company_id=None, location_id=None, floor_id=None, counter_id=None):
+    """The four rows a till has chosen, each None if it has not chosen one.
 
     A counter that does not belong to the chosen location is dropped rather than
     kept, and so is a location that does not belong to the chosen company: a
     till that reads "ESSA GARMENTS / TIRUPUR / Counter 2" where Counter 2 is at
     another branch is worse than one that reads nothing, because it looks
     answered.
+
+    The FLOOR is the one level that can also be worked out rather than chosen. A
+    till belongs to a storey, so a session naming only the counter still knows
+    which floor it is on — and that is the ordinary case, because the mapping is
+    what decides the bill prefix and the cashier should not have to restate it.
+    An explicit floor that disagrees with the till's own is dropped, for the same
+    reason as everything else here: better to ask again than to look answered and
+    print the wrong series.
     """
     company = db.session.get(Company, company_id) if company_id else None
     location = db.session.get(Location, location_id) if location_id else None
+    floor = db.session.get(Floor, floor_id) if floor_id else None
     counter = db.session.get(Counter, counter_id) if counter_id else None
     # A branch outside this till's warehouse is dropped the same way, and for the
     # same reason: a session that still names Karur after the frame was opened
@@ -284,10 +303,19 @@ def resolve(company_id=None, location_id=None, counter_id=None):
     allowed = stores_of_warehouse(current_scope())
     if location is not None and allowed is not None \
             and " ".join((location.name or "").split()).lower() not in allowed:
-        location, counter = None, None
+        location, floor, counter = None, None, None
     if location is not None and company is not None and location.company_id \
             and location.company_id != company.id:
-        location, counter = None, None
+        location, floor, counter = None, None, None
+    if floor is not None and (location is None or floor.location_id != location.id):
+        floor = None
     if counter is not None and (location is None or counter.location_id != location.id):
         counter = None
-    return company, location, counter
+    if counter is not None and floor is not None and counter.floor_id \
+            and counter.floor_id != floor.id:
+        # The till says it is on another storey. The till is the one standing in
+        # the building, so the chosen floor is what gives way.
+        floor = None
+    if floor is None and counter is not None and counter.floor_id:
+        floor = db.session.get(Floor, counter.floor_id)      # mapped, not picked
+    return company, location, floor, counter

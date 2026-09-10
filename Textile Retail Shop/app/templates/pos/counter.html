@@ -56,12 +56,38 @@
         <span id="pbGstin" class="text-muted">{{ (chosen_company or default_company).gstin or '' }}</span></span>
       <span><span class="text-muted">LOCATION</span>
         <b id="pbLocation">{{ chosen_location.name if chosen_location else 'Select Location' }}</b></span>
+      <span><span class="text-muted">FLOOR</span>
+        <b id="pbFloor">{{ chosen_floor.name if chosen_floor else 'Not mapped' }}</b></span>
       <span><span class="text-muted">COUNTER</span>
         <b id="pbCounter">{{ chosen_counter.name if chosen_counter else 'Select Counter' }}</b></span>
     </div>
-    <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal"
-            data-bs-target="#placeModal"><i class="bi bi-shop"></i> Change</button>
+    <div class="d-flex align-items-center gap-2">
+      {# The number the next bill will carry, on the billing screen, before any
+         money is taken. It is what the floor mapping is FOR — a till that has
+         been left set to the wrong storey is only discoverable if the series it
+         is about to print is on screen while somebody is using it.
+
+         It is the next number, not a reserved one. Reserving it for a cart that
+         is then abandoned would leave a hole in a statutory series, and "what
+         happened to TG26-007" is a question with no good answer; the committed
+         bill carries the authority and the till repaints from it. #}
+      <span id="billNoBox" class="badge {{ 'text-bg-dark' if next_bill.mapped else 'text-bg-secondary' }}"
+            style="font-size:.95rem"
+            title="{{ 'Next bill on ' ~ next_bill.floor if next_bill.mapped else 'This till is not mapped to a floor, so it bills on the shop’s plain series' }}">
+        Bill No: <span id="pbBillNo">{{ next_bill.number }}</span>
+      </span>
+      <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal"
+              data-bs-target="#placeModal"><i class="bi bi-shop"></i> Change</button>
+    </div>
   </div>
+  {% if not next_bill.mapped %}
+  <div id="pbUnmapped" class="small mt-1" style="color:#8a6d3b">
+    <i class="bi bi-exclamation-triangle"></i>
+    This till is not mapped to a floor, so its bills are numbered
+    <code>{{ next_bill.number }}</code> rather than <code>TG{{ next_bill.fin_year or '' }}-001</code>.
+    A manager can map it under <b>Floors &amp; tills</b>.
+  </div>
+  {% endif %}
 </div>
 
 <div class="modal fade" id="placeModal" tabindex="-1">
@@ -75,9 +101,17 @@
       <div class="mb-2"><label class="form-label small mb-1">Location</label>
         <select id="pmLocation" class="form-select"></select>
         <div class="form-text">Kept in step with the warehouse's own list of branches.</div></div>
+      <div class="mb-2"><label class="form-label small mb-1">Floor</label>
+        <select id="pmFloor" class="form-select"></select>
+        <div class="form-text">Decides the bill prefix — Ground Floor bills read
+          <code>TG…</code>, First Floor <code>TF…</code>. Choosing a floor narrows
+          the tills below to the ones standing on it.</div></div>
       <div class="mb-2"><label class="form-label small mb-1">Counter</label>
-        <select id="pmCounter" class="form-select"></select></div>
+        <select id="pmCounter" class="form-select"></select>
+        <div class="form-text">A till already mapped to a floor sets the floor by
+          itself — the mapping is what the bill number comes from.</div></div>
       <div class="small text-muted">Current: <span id="pmCurrent">-None-</span></div>
+      <div class="small mt-1">Next bill: <code id="pmBillNo">{{ next_bill.number }}</code></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
@@ -527,6 +561,11 @@ function addProduct(p){
   const id = String(p.id);
   const stock = parseFloat(p.stock);
   if (!(stock > 0)){ alert(`"${p.name}" is out of stock.`); return; }
+  // The first scan of a sale is the moment the bill number on screen starts
+  // mattering, and it is also the moment it is most likely to be stale — another
+  // till on this floor may have billed since this page was drawn. One small
+  // request per sale, at the only point anybody is about to read it.
+  if (cart.size === 0) refreshBillNumber();
   if (cart.has(id)){
     if (cart.get(id).qty + 1 > stock){ alert('Insufficient stock'); return; }
     cart.get(id).qty += 1;
@@ -1073,6 +1112,7 @@ async function submitSale(payments, btn){
   let picked = {
     company_id: {{ chosen_company.id if chosen_company else 'null' }},
     location_id: {{ chosen_location.id if chosen_location else 'null' }},
+    floor_id: {{ chosen_floor.id if chosen_floor else 'null' }},
     counter_id: {{ chosen_counter.id if chosen_counter else 'null' }},
   };
   const $ = (id) => document.getElementById(id);
@@ -1081,7 +1121,7 @@ async function submitSale(payments, btn){
     const none = new Option(blank, '');
     sel.add(none);
     rows.forEach((r) => {
-      const o = new Option(r.name, r.id);
+      const o = new Option(r.label || r.name, r.id);
       if (String(chosen) === String(r.id)) o.selected = true;
       sel.add(o);
     });
@@ -1091,26 +1131,56 @@ async function submitSale(payments, btn){
     const locs = PLACES.locations.filter((l) =>
       !picked.company_id || !l.company_id || String(l.company_id) === String(picked.company_id));
     fill($('pmLocation'), locs, picked.location_id, 'Location…');
+
+    // The floor carries its prefix into the dropdown, so the consequence of the
+    // choice is legible at the moment it is made rather than on the printed bill.
+    const floors = (PLACES.floors || [])
+      .filter((f) => String(f.location_id) === String(picked.location_id))
+      .map((f) => ({ id: f.id, label: `${f.name} — ${f.prefix}…` }));
+    fill($('pmFloor'), floors, picked.floor_id,
+         floors.length ? 'Any floor…' : 'no floors at this store');
+
+    // Tills narrow to the chosen floor. A till already mapped elsewhere is not
+    // offered under this floor at all — the mapping is the thing the bill number
+    // comes from, and offering a contradiction is how one gets billed.
     const tills = PLACES.counters.filter((c) =>
-      String(c.location_id) === String(picked.location_id));
+      String(c.location_id) === String(picked.location_id)
+      && (!picked.floor_id || !c.floor_id || String(c.floor_id) === String(picked.floor_id)));
     fill($('pmCounter'), tills, picked.counter_id, tills.length ? 'Counter…' : 'no counter here');
+
     const name = (rows, id) => (rows.find((r) => String(r.id) === String(id)) || {}).name;
     $('pmCurrent').textContent = [name(PLACES.companies, picked.company_id),
                                  name(PLACES.locations, picked.location_id),
+                                 name(PLACES.floors || [], picked.floor_id),
                                  name(PLACES.counters, picked.counter_id)]
       .filter(Boolean).join(' / ') || '-None-';
   };
   $('pmCompany').addEventListener('change', (e) => {
-    picked = { company_id: e.target.value || null, location_id: null, counter_id: null };
+    picked = { company_id: e.target.value || null, location_id: null,
+               floor_id: null, counter_id: null };
     draw();
   });
   $('pmLocation').addEventListener('change', (e) => {
     picked.location_id = e.target.value || null;
+    picked.floor_id = null;
     picked.counter_id = null;
+    draw();
+  });
+  $('pmFloor').addEventListener('change', (e) => {
+    picked.floor_id = e.target.value || null;
+    // A till on another storey cannot stay chosen under this one.
+    const till = PLACES.counters.find((c) => String(c.id) === String(picked.counter_id));
+    if (till && till.floor_id && String(till.floor_id) !== String(picked.floor_id)) {
+      picked.counter_id = null;
+    }
     draw();
   });
   $('pmCounter').addEventListener('change', (e) => {
     picked.counter_id = e.target.value || null;
+    // A mapped till decides its own floor. Reflected here immediately so the
+    // dialog shows the series it is about to bill on, not the one just picked.
+    const till = PLACES.counters.find((c) => String(c.id) === String(picked.counter_id));
+    if (till && till.floor_id) picked.floor_id = till.floor_id;
     draw();
   });
   $('pmSelect').addEventListener('click', async () => {
@@ -1123,16 +1193,45 @@ async function submitSale(payments, btn){
     // a counter that belongs to another branch, and the strip has to say what
     // the next bill will actually carry
     picked = { company_id: d.company && d.company.id, location_id: d.location && d.location.id,
-               counter_id: d.counter && d.counter.id };
+               floor_id: d.floor && d.floor.id, counter_id: d.counter && d.counter.id };
     $('pbCompany').textContent = d.company ? d.company.name : 'Select Company';
     $('pbGstin').textContent = d.company ? (d.company.gstin || '') : '';
     $('pbLocation').textContent = d.location ? d.location.name : 'Select Location';
+    $('pbFloor').textContent = d.floor ? d.floor.name : 'Not mapped';
     $('pbCounter').textContent = d.counter ? d.counter.name : 'Select Counter';
+    paintBillNumber(d.next_bill);
     draw();
     bootstrap.Modal.getInstance($('placeModal')).hide();
   });
   draw();
 })();
+
+// ---- the bill number ------------------------------------------------------
+// Shown, never entered. There is no input for it anywhere on this screen and
+// nothing here can change it: the series comes from the till's floor mapping and
+// the number is taken by the server inside the transaction that writes the bill.
+function paintBillNumber(next){
+  if (!next) return;
+  const box = document.getElementById('billNoBox');
+  document.getElementById('pbBillNo').textContent = next.number;
+  const pm = document.getElementById('pmBillNo');
+  if (pm) pm.textContent = next.number;
+  box.className = 'badge ' + (next.mapped ? 'text-bg-dark' : 'text-bg-secondary');
+  box.title = next.mapped
+    ? 'Next bill on ' + (next.floor || 'this floor')
+    : 'This till is not mapped to a floor, so it bills on the shop’s plain series';
+  const warn = document.getElementById('pbUnmapped');
+  if (warn) warn.classList.toggle('d-none', !!next.mapped);
+}
+
+// After a sale, so the strip shows the number the NEXT customer will get rather
+// than the one that has just been printed and walked out of the door.
+async function refreshBillNumber(){
+  try {
+    const r = await fetch(`${SHOP_ROOT}/pos/api/next-bill`);
+    if (r.ok) paintBillNumber(await r.json());
+  } catch (e){ /* the strip keeps its last reading; the bill decides anyway */ }
+}
 
 </script>
 {% endblock %}

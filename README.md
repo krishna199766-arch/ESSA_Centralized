@@ -634,6 +634,21 @@ customers, staff, **promotions** and shop reports. It is the Flask app in
 `Textile Retail Shop/`, with its own SQLite database (`textile_shop.db`) and its
 own login — sign in there the first time with `admin` / `admin123`.
 
+**Bills are numbered by the floor they were rung on.** Each till is mapped to a
+storey, and each storey keeps its own running series — the ground floor counts
+`TG26-001, TG26-002…` while the first floor is independently on `TF26-001`. The
+cashier never types a number and there is no field that could change one: the
+till shows what the next bill will be called, and the backend takes the real one
+inside the same transaction that writes the sale, so two counters billing at the
+same moment cannot land on the same number and a sale that fails gives its number
+back rather than leaving a hole. `26` is the financial year it started in, and
+the series rolls to `TG27-001` on 1 April with nothing having to run overnight.
+The floor-to-prefix mapping is master data under **Floors & tills**, so a fifth
+floor or a second store is typing rather than deploying. A till nobody has mapped
+yet keeps billing on the shop's plain `INV-` series and says so.
+`python "Textile Retail Shop/test_bill_numbers.py"` runs twenty simultaneous
+checkouts and asserts twenty distinct numbers, no gaps, no failed sales.
+
 **Promotions** are a configurable engine rather than a coded offer. An admin
 writes a scheme — *buy 3 from LADIES-CHUDITHAR → 1 LEGGINGS free* — out of
 conditions, rewards and places, and the till applies it by itself: the free item

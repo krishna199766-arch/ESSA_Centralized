@@ -48,6 +48,10 @@ MODULES = [
      "label": "Alteration", "owns": ["alterations."], "manager": False,
      "blurb": "Garments out for tailoring, and what each tailor is holding"},
 
+    {"key": "stores", "endpoint": "stores.index", "icon": "bi-building",
+     "label": "Floors & tills", "owns": ["stores."], "manager": True,
+     "blurb": "Which storey each till bills from, and what its bills are called"},
+
     {"key": "promotions", "endpoint": "promotions.index", "icon": "bi-gift",
      "label": "Promotions", "owns": ["promotions."], "manager": True,
      "blurb": "Offers the till applies by itself, and what they have given away"},

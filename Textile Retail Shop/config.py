@@ -33,6 +33,21 @@ class Config:
         f"sqlite:///{BASE_DIR / 'textile_shop.db'}",
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # How long a till waits for another till's write before giving up.
+    #
+    # SQLite allows one writer at a time, and its default behaviour when it finds
+    # the database busy is to fail AT ONCE rather than wait — which at a shop
+    # with two counters means the second cashier's sale dies with "database is
+    # locked" while the first one's is still committing. A timeout turns that
+    # into a wait of a few milliseconds, which is what it should always have
+    # been. Fifteen seconds is far longer than any bill takes and short enough
+    # that a genuinely stuck database still surfaces as an error.
+    #
+    # Only for SQLite: Postgres has proper row locking and this parameter does
+    # not exist there.
+    if SQLALCHEMY_DATABASE_URI.startswith("sqlite"):
+        SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": {"timeout": 15}}
     # Re-read templates from disk on every request so edits appear on a refresh
     # (otherwise Flask caches them until the server restarts).
     TEMPLATES_AUTO_RELOAD = True
@@ -61,3 +76,10 @@ class Config:
     LOYALTY_MIN_BILL = float(os.environ.get("LOYALTY_MIN_BILL", "500"))
 
     LOW_STOCK_THRESHOLD = int(os.environ.get("LOW_STOCK_THRESHOLD", "5"))
+
+    # The month a financial year opens on — April, for India. It decides the two
+    # digits in a floor bill number (TG**26**-001 is the year that began in April
+    # 2026) and therefore when each floor's series restarts at 001. Config rather
+    # than a constant because a business that closes its books in January is
+    # still a business; see app/billing_numbers.py.
+    FY_START_MONTH = int(os.environ.get("FY_START_MONTH", "4"))

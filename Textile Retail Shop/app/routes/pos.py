@@ -3,10 +3,9 @@ from flask import (Blueprint, render_template, request, redirect, url_for, flash
 from flask_login import login_required, current_user
 from datetime import datetime
 from app import db
-from app import places, promotions, transfers, warehouse_items
+from app import billing_numbers, places, promotions, transfers, warehouse_items
 from app.models import (Product, Customer, Invoice, InvoiceItem, InvoicePayment,
                         StockMovement, LoyaltyTxn, User, PAYMENT_METHODS)
-from app.utils import generate_number
 
 pos_bp = Blueprint("pos", __name__)
 
@@ -77,11 +76,11 @@ def parse_payments(data):
 #: at one branch are two counters, and the same cashier moving between them must
 #: not carry the first one's drawer to the second. It also has to outlast a
 #: reload — a picker that forgets on every refresh gets set wrong, or ignored.
-POST_KEYS = ("company_id", "location_id", "counter_id")
+POST_KEYS = ("company_id", "location_id", "floor_id", "counter_id")
 
 
 def _chosen():
-    """(company, location, counter) for this till — each None until picked."""
+    """(company, location, floor, counter) — each None until picked or mapped."""
     return places.resolve(*(session.get(k) for k in POST_KEYS))
 
 
@@ -92,7 +91,7 @@ def _place():
     one warehouse's branches does not run at another's — the same narrowing
     places.picker_options already does to the branch list.
     """
-    company, location, counter = _chosen()
+    company, location, _floor, counter = _chosen()
     return promotions.Place(warehouse_id=places.current_scope(), company=company,
                             location=location, counter=counter)
 
@@ -163,45 +162,76 @@ def counter():
     """
     customers = Customer.query.order_by(Customer.name).all()
     staff = User.query.filter(User.active.is_(True)).order_by(User.full_name).all()
-    company, location, till = _chosen()
+    company, location, storey, till = _chosen()
     return render_template("pos/counter.html",
                            customers=customers, staff=staff,
                            places=places.picker_options(),
                            chosen_company=company, chosen_location=location,
-                           chosen_counter=till,
+                           chosen_floor=storey, chosen_counter=till,
+                           next_bill=billing_numbers.peek(till),
                            default_company=places.default_company())
+
+
+def _place_json(company, location, storey, till):
+    """What the till is billing as, and what its next bill will be called.
+
+    The bill number travels with the place because it is DECIDED by it — a
+    cashier moving a till from Ground to First has to see TF appear, there and
+    then, or the first they know of a wrong series is a printed bill.
+    """
+    return {
+        "company": {"id": company.id, "name": company.name,
+                    "gstin": company.gstin or ""} if company else None,
+        "location": {"id": location.id, "name": location.name} if location else None,
+        "floor": {"id": storey.id, "name": storey.name,
+                  "prefix": storey.prefix} if storey else None,
+        "counter": {"id": till.id, "name": till.name} if till else None,
+        "next_bill": billing_numbers.peek(till),
+        "options": places.picker_options(),
+    }
 
 
 @pos_bp.route("/place", methods=["GET", "POST"])
 @login_required
 def place():
-    """Read or set which company, location and counter this till is billing as.
+    """Read or set which company, location, floor and counter this till bills as.
 
-    POST takes the three ids and answers with what it actually settled on, which
+    POST takes the four ids and answers with what it actually settled on, which
     is not always what was sent: a counter belonging to another branch is dropped
-    rather than stored. The till redraws from the answer, so what it shows is
-    what the next bill will carry — never what was merely asked for.
+    rather than stored, and so is a floor the chosen till is not on. The till
+    redraws from the answer, so what it shows is what the next bill will carry —
+    never what was merely asked for.
     """
     if request.method == "POST":
         data = request.get_json(silent=True) or request.form
         for key in POST_KEYS:
             raw = data.get(key)
             session[key] = int(raw) if str(raw or "").strip().isdigit() else None
-        company, location, till = places.resolve(*(session.get(k) for k in POST_KEYS))
+        company, location, storey, till = places.resolve(
+            *(session.get(k) for k in POST_KEYS))
         # store back what survived, so the session never holds a pairing the
         # screen has already been told is impossible
         session["company_id"] = company.id if company else None
         session["location_id"] = location.id if location else None
+        session["floor_id"] = storey.id if storey else None
         session["counter_id"] = till.id if till else None
     else:
-        company, location, till = _chosen()
-    return jsonify({
-        "company": {"id": company.id, "name": company.name,
-                    "gstin": company.gstin or ""} if company else None,
-        "location": {"id": location.id, "name": location.name} if location else None,
-        "counter": {"id": till.id, "name": till.name} if till else None,
-        "options": places.picker_options(),
-    })
+        company, location, storey, till = _chosen()
+    return jsonify(_place_json(company, location, storey, till))
+
+
+@pos_bp.route("/api/next-bill")
+@login_required
+def api_next_bill():
+    """The number the next bill on this till would carry.
+
+    A look, not a reservation — see billing_numbers.peek. The till shows it so
+    the cashier can read the series off the screen before taking money; the
+    number that counts is the one on the committed bill, which the checkout
+    returns.
+    """
+    _company, _location, _storey, till = _chosen()
+    return jsonify(billing_numbers.peek(till))
 
 
 def resolve_staff(value):
@@ -305,7 +335,7 @@ def checkout():
         # falls back to the default rather than being left blank: a tax invoice
         # with no entity on it is not a tax invoice, and a till nobody has
         # configured is the normal state of a shop that only has one company.
-        company, location, till = _chosen()
+        company, location, storey, till = _chosen()
         if company is None:
             company = places.default_company()
 
@@ -330,8 +360,25 @@ def checkout():
                                        exc_info=True)
             outcome = promotions.Outcome([], [])
 
+        # ---- the bill number -------------------------------------------------
+        # Taken from the till's own series, at the backend, inside this
+        # transaction — see app/billing_numbers.py. Never sent by the page and
+        # never typed: a bill number is the shop's statutory record of the sale,
+        # and a cashier who could choose one could raise two bills with the same
+        # number or skip a number nobody can then account for.
+        #
+        # Allocating HERE, before the lines are written, is what makes two tills
+        # on one floor safe: the series' row is locked for the rest of this
+        # transaction, so the second till waits and gets the next number rather
+        # than the same one. A till on another floor is on another row and never
+        # waits at all.
+        number, prefix, fin_year, seq = billing_numbers.allocate(till)
+
         inv = Invoice(
-            invoice_number=generate_number("INV", Invoice, "invoice_number"),
+            invoice_number=number,
+            bill_prefix=prefix,
+            fin_year=fin_year,
+            bill_seq=seq,
             customer_id=customer_id,
             cashier_id=current_user.id,
             staff_id=staff.id,
@@ -340,6 +387,7 @@ def checkout():
             is_interstate=is_interstate,
             company_id=company.id if company else None,
             location_id=location.id if location else None,
+            floor_id=storey.id if storey else None,
             counter_id=till.id if till else None,
         )
         db.session.add(inv)
@@ -547,6 +595,7 @@ def invoice_list():
     date_to   = request.args.get("to") or ""
     cashier   = request.args.get("cashier", type=int)
     payment   = request.args.get("payment") or ""
+    series    = (request.args.get("series") or "").strip().upper()
     min_amt   = request.args.get("min", type=float)
     max_amt   = request.args.get("max", type=float)
 
@@ -568,21 +617,48 @@ def invoice_list():
     if dt: query = query.filter(func.date(Invoice.invoice_date) <= dt)
     if cashier: query = query.filter(Invoice.cashier_id == cashier)
     if payment: query = query.filter(Invoice.payment_method == payment)
+    # On the prefix the bill was BUILT with, not on the text of its number: a
+    # floor whose prefix was changed later still returns the bills it raised, and
+    # a LIKE on the number would quietly miss them.
+    if series: query = query.filter(Invoice.bill_prefix == series)
     if min_amt is not None: query = query.filter(Invoice.total >= min_amt)
     if max_amt is not None: query = query.filter(Invoice.total <= max_amt)
 
-    invoices = query.order_by(Invoice.invoice_date.desc()).limit(500).all()
+    # Ordered by the SEQUENCE within a chosen series, because that is the whole
+    # question somebody filtering to one floor is asking — "…001, …002, …003,
+    # and is anything missing". Across all floors the sequences interleave and
+    # mean nothing together, so those stay in date order.
+    if series:
+        invoices = query.order_by(Invoice.fin_year.desc(),
+                                  Invoice.bill_seq.desc()).limit(500).all()
+    else:
+        invoices = query.order_by(Invoice.invoice_date.desc()).limit(500).all()
     summary = {
         "count": len(invoices),
         "total": sum(i.total for i in invoices),
         "tax":   sum(i.cgst + i.sgst + i.igst for i in invoices),
     }
     cashiers = User.query.filter_by(active=True).order_by(User.full_name).all()
+
+    # What the series dropdown offers: every prefix that has actually been billed
+    # on, named by the floor it belongs to. Built from the bills rather than from
+    # the floor master so a series that predates a rename, or one whose floor has
+    # since been removed, is still selectable — the bills exist either way.
+    from app.models import Floor as _Floor
+    named = {f.prefix: f"{f.location.name} · {f.name}"
+             for f in _Floor.query.all() if f.location}
+    used = [p for (p,) in db.session.query(Invoice.bill_prefix)
+            .filter(Invoice.bill_prefix.isnot(None)).distinct().all() if p]
+    series_options = sorted(
+        (p, f"{p} — {named.get(p, 'the shop’s own series' if p == billing_numbers.FALLBACK_PREFIX else 'no floor uses this now')}")
+        for p in used)
+
     return render_template(
         "pos/invoices.html",
         invoices=invoices, summary=summary, cashiers=cashiers,
         q=q, date_from=date_from, date_to=date_to,
         cashier_id=cashier, payment=payment,
+        series=series, series_options=series_options,
         min_amt=min_amt if min_amt is not None else "",
         max_amt=max_amt if max_amt is not None else "",
     )

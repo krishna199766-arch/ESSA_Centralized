@@ -40,6 +40,20 @@
         {% endfor %}
       </select>
     </div>
+    {# The series filter. "Show me every Ground Floor bill this year, in order"
+       is the question a bill series exists to be able to answer, and this is
+       where somebody asks it. Filtered on the prefix the bill was BUILT with,
+       not on the text of the number — a floor whose prefix was changed later
+       still returns the bills it actually raised. #}
+    <div class="col-6 col-md-3 col-lg-2">
+      <label class="form-label small mb-1">Bill series</label>
+      <select class="form-select form-select-sm" name="series">
+        <option value="">All floors</option>
+        {% for p, label in series_options %}
+        <option value="{{ p }}" {% if series == p %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
     <div class="col-6 col-md-2 col-lg-1">
       <label class="form-label small mb-1">Min ₹</label>
       <input class="form-control form-control-sm" type="number" step="0.01" name="min" value="{{ min_amt }}">
@@ -65,14 +79,16 @@
     <table class="table table-hover mb-0 align-middle">
       <thead>
         <tr>
-          <th>#</th><th>Date</th><th>Customer</th><th>Cashier</th>
+          <th>#</th><th>Floor</th><th>Date</th><th>Customer</th><th>Cashier</th>
           <th>Payment</th><th class="text-end">Total</th><th></th>
         </tr>
       </thead>
       <tbody>
         {% for i in invoices %}
         <tr>
-          <td>{{ i.invoice_number }}</td>
+          <td><code>{{ i.invoice_number }}</code></td>
+          <td class="small">{% if i.floor %}{{ i.floor.name }}
+            {% else %}<span class="text-muted">—</span>{% endif %}</td>
           <td>{{ i.invoice_date.strftime('%d %b %Y %H:%M') }}</td>
           <td>
             {% if i.customer %}{{ i.customer.name }}<br><small class="text-muted">{{ i.customer.phone or '' }}</small>
@@ -87,7 +103,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="text-center text-muted p-4">No invoices match your filters.</td></tr>
+        <tr><td colspan="8" class="text-center text-muted p-4">No invoices match your filters.</td></tr>
         {% endfor %}
       </tbody>
     </table>

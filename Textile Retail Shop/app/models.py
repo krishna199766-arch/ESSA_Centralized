@@ -207,6 +207,41 @@ class Location(db.Model):
     counters = db.relationship("Counter", backref="location", lazy=True)
 
 
+class Floor(db.Model):
+    """A storey of a store, and the bill series billed from it.
+
+    NOT to be confused with `app/routes/floor.py`, which is **Floor Sales** — a
+    salesperson building a cart on a phone while walking the shop. Same English
+    word, unrelated ideas: this one is a floor of a building, and the only reason
+    it is a table is that the bill number depends on it.
+
+    That is the whole job. A shop that numbers Ground Floor bills TG26-001 and
+    First Floor bills TF26-001 is keeping four separate registers, and which
+    register a bill belongs in is decided by where the till stands. So the
+    mapping lives here as data — add a floor, give it a prefix — rather than as a
+    list in the billing code that a fifth floor would have to be edited into.
+
+    `prefix` is what the bill number starts with. It is what makes the number
+    unique, so two floors given the SAME prefix deliberately share one running
+    series rather than each minting TG26-001 (see app/billing_numbers.py).
+    """
+    __tablename__ = "floors"
+    id = db.Column(db.Integer, primary_key=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"),
+                            nullable=False, index=True)
+    name = db.Column(db.String(64), nullable=False)
+    #: TG / TF / TS / TT — "Taqua Ground", "Taqua First", and so on.
+    prefix = db.Column(db.String(8), nullable=False, index=True)
+    sort_order = db.Column(db.Integer, default=0)
+    active = db.Column(db.Boolean, default=True, index=True)
+
+    location = db.relationship("Location",
+                               backref=db.backref("floors", lazy=True))
+    counters = db.relationship("Counter", backref="floor", lazy=True)
+    __table_args__ = (db.UniqueConstraint("location_id", "name",
+                                          name="uq_floor_location_name"),)
+
+
 class Counter(db.Model):
     """One till at one location. Two tills at a branch are two drawers."""
     __tablename__ = "counters"
@@ -214,9 +249,42 @@ class Counter(db.Model):
     name = db.Column(db.String(64), nullable=False)
     location_id = db.Column(db.Integer, db.ForeignKey("locations.id"),
                             nullable=False, index=True)
+    #: Which storey this till stands on, and therefore which bill series it
+    #: draws from. Nullable, and that is not an oversight: every till that
+    #: existed before floors did has no answer, and a till on a shop floor
+    #: nobody has mapped yet must keep billing — on the shop's plain INV- series
+    #: — rather than refusing a customer because a master is incomplete.
+    floor_id = db.Column(db.Integer, db.ForeignKey("floors.id"), index=True)
     active = db.Column(db.Boolean, default=True, index=True)
     __table_args__ = (db.UniqueConstraint("location_id", "name",
                                           name="uq_counter_location_name"),)
+
+
+class BillSequence(db.Model):
+    """The running number behind one bill series — TG26-001, TG26-002, …
+
+    One row per (prefix, financial year), and that pair is the scope for a
+    reason: the bill number IS `prefix + year + number`, so anything sharing
+    those two must share the counter or the two tills would mint the same
+    string. Keying the series on the floor instead would let two floors
+    configured with the same prefix both produce TG26-001 — a duplicate bill
+    number, which is the one thing this table exists to prevent.
+
+    The number is handed out by an atomic `UPDATE … SET last_number =
+    last_number + 1`, never by reading it and adding one in Python. See
+    app/billing_numbers.py for why that distinction is the whole point.
+    """
+    __tablename__ = "bill_sequences"
+    id = db.Column(db.Integer, primary_key=True)
+    prefix = db.Column(db.String(8), nullable=False)
+    #: "26" for the year starting April 2026. Empty for a series that does not
+    #: reset annually — the shop's own INV- numbering is one.
+    fin_year = db.Column(db.String(8), nullable=False, default="")
+    last_number = db.Column(db.Integer, nullable=False, default=0)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint("prefix", "fin_year",
+                                          name="uq_bill_sequence"),)
 
 
 class LocationStock(db.Model):
@@ -310,9 +378,21 @@ class Invoice(db.Model):
     company_id = db.Column(db.Integer, db.ForeignKey("companies.id"), index=True)
     location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
     counter_id = db.Column(db.Integer, db.ForeignKey("counters.id"), index=True)
+    # Which storey it was billed from, and the three pieces its number was built
+    # out of. The number itself is `invoice_number` above and stays the one thing
+    # anybody quotes; these are kept beside it because a bill series has to be
+    # auditable — "show me every bill on the TG series this financial year, in
+    # sequence, and prove none is missing" cannot be answered by taking a string
+    # apart with a regular expression, and would stop being answerable at all the
+    # first time a floor's prefix was changed.
+    floor_id = db.Column(db.Integer, db.ForeignKey("floors.id"), index=True)
+    fin_year = db.Column(db.String(8), index=True)
+    bill_prefix = db.Column(db.String(8), index=True)
+    bill_seq = db.Column(db.Integer)
     company = db.relationship("Company")
     location = db.relationship("Location")
     counter = db.relationship("Counter")
+    floor = db.relationship("Floor")
     payment_status = db.Column(db.String(16), default="paid")  # paid/pending
     is_interstate = db.Column(db.Boolean, default=False)
     notes = db.Column(db.String(256))

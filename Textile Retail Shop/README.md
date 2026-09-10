@@ -4,7 +4,7 @@ A complete Flask-based retail management system for Taqua Silks with GST-complia
 
 ## Features
 
-- **POS / Billing** — cart-based sales, SKU search/scan, GST split (CGST/SGST/IGST auto-detected by state), printable tax invoice with HSN codes and GSTIN.
+- **POS / Billing** — cart-based sales, SKU search/scan, GST split (CGST/SGST/IGST auto-detected by state), printable tax invoice with HSN codes and GSTIN. Each till is mapped to the storey it stands on, and its bills are numbered from that floor's own series — `TG26-001` on the ground floor, `TF26-001` on the first — automatically, by the backend, with the number shown on screen before the sale is taken. See **Floor-wise bill numbers** below.
 - **Delivery** — the collection desk. Scan the bill (QR or number), scan every garment as it goes in the bag, and the handover is recorded against the bills it covers. Part collection is a first-class answer, so the balance stays owed and shows on a "still to collect" list; a piece tag can only go out once; and a piece nobody can scan needs a manager and a reason, both printed on the delivery note. Moves no stock and no money — the sale already did both.
 - **Inventory** — products with categories, fabric/color/size, HSN codes, GST rate, cost/selling price, stock, reorder levels, low-stock highlighting, full stock-movement audit log.
 - **Promotions** — a configurable offer engine, not a hard-coded offer. An admin writes a scheme (*buy 3 from LADIES-CHUDITHAR → 1 LEGGINGS free*) and the till applies it by itself: the free item appears on the billing screen as the cart is built, is billed at ₹0, comes off stock with its own movement against the same bill, and is recorded for reporting and audit. Quantity, product, category and mixed schemes are all the same rows in a different arrangement, so a new offer is data rather than code. See **Promotions** below.
@@ -36,6 +36,7 @@ python run.py               # starts dev server at http://localhost:8000
 Set environment variables (or edit `config.py`) for your shop:
 
 - `SHOP_NAME`, `SHOP_ADDRESS`, `SHOP_PHONE`, `SHOP_GSTIN`, `SHOP_STATE_CODE`
+- `FY_START_MONTH` (default 4 — April, which decides the `26` in `TG26-001`)
 - `LOYALTY_EARN_RATE` (default 1% of bill), `LOYALTY_POINT_VALUE` (₹ per point)
 - `SECRET_KEY` (set this in production)
 - `DATABASE_URL` (SQLite by default, PostgreSQL supported)
@@ -53,8 +54,10 @@ Textile Retail Shop/
 │   ├── seed.py           # sample data
 │   ├── utils.py          # role decorator, number generator
 │   ├── promotions.py     # the promotion engine: what a cart earned, and in stock
+│   ├── billing_numbers.py# floor → prefix → financial year → next bill number
+│   ├── places.py         # company / store / floor / till, and what a till bills as
 │   ├── routes/           # blueprints: auth/main/inventory/pos/customers/staff/
-│   │                     #   reports/returns/promotions/floor/delivery
+│   │                     #   reports/returns/promotions/stores/floor/delivery
 │   ├── templates/        # Jinja templates (Bootstrap 5)
 │   └── static/           # css, manifest
 ```
@@ -65,10 +68,74 @@ No test framework and no test dependency — each file is a script that builds w
 it needs, asserts in plain prose, and runs against a throwaway database.
 
 ```bash
+python test_bill_numbers.py    # floor series, and 20 tills billing at once
 python test_promotions.py      # the promotion engine, end to end
 python test_delivery.py        # goods leave only when handed over
 python test_warehouse_sync.py  # needs a warehouse database beside the shop
 ```
+
+## Floor-wise bill numbers
+
+```
+POS → floor → prefix → financial year → next running number → bill number
+Ground Floor POS →  TG  →      26      →       001          →  TG26-001
+```
+
+Each floor of a store keeps **its own running series**, so the ground floor
+counts `TG26-001, TG26-002, …` while the first floor is independently on
+`TF26-001`. A cashier never types a bill number and there is no field on the
+screen that could change one.
+
+**The mapping is data.** A floor is a row with a prefix on it, under **Floors &
+tills**; a till is put on a floor there, and that is what decides the prefix. A
+fifth floor, a second store, or a different set of letters is typing, not
+deploying — nothing in the billing path knows the words "Ground" or "TG". A store
+with no floors set up yet gets a one-click **Add the four standard floors**
+(Ground TG · First TF · Second TS · Third TT), which writes exactly the rows
+somebody would have typed.
+
+**The financial year is the year it started in** — April to March, so a bill rung
+in September 2026 reads `26` and still does the following March. On 1 April it
+becomes `TG27-001` with nothing having to run overnight: the year is part of the
+series' key, so the first bill of the new year opens a new counter on its own.
+`FY_START_MONTH` moves the boundary for a business that closes its books
+elsewhere.
+
+**The series is keyed on (prefix, financial year), not on the floor.** The bill
+number *is* prefix + year + number, so anything sharing those two must share one
+counter — otherwise two floors configured with the same prefix would each hand
+out `TG26-001`. Two floors on one prefix therefore share one register, which the
+Floors screen warns about, because it is almost always a typo.
+
+**No duplicates, and no gaps.** The number comes from a row in `bill_sequences`,
+handed out by an atomic `UPDATE … SET last_number = last_number + 1` — never by
+reading the last number and adding one in Python, which is how two tills both
+write `TG26-008`. It is allocated inside the same transaction as the sale, so a
+bill that fails half-way gives its number back rather than leaving a hole in a
+statutory series. `test_bill_numbers.py` runs twenty simultaneous checkouts
+through the real HTTP path and asserts twenty distinct numbers, no gaps, and no
+failed sales.
+
+Making that hold on SQLite needed two settings on the shop's own database (see
+`app/__init__._enable_concurrent_writes`): write-ahead logging, and **billing
+requests only** beginning their transaction as writers. A transaction that reads
+and then writes has to upgrade its lock, and SQLite refuses that upgrade
+*immediately* rather than waiting — measured at one failed sale in five under
+contention, and unfixable by retrying, because the retry re-reads the same stale
+snapshot. Only the two billing endpoints take the lock up front, so a manager's
+report — or the ask bar's wait on an external model — never blocks a till.
+Postgres needs none of it; it has real row locking.
+
+**Nothing is rewritten.** Every bill keeps its own copy of the prefix, financial
+year and sequence it was built from, so "show me the TG series this year, in
+order, and prove none is missing" survives a floor being renamed or its prefix
+changed. The invoice register filters on that, and **Bill series** lists every
+series and where it has got to.
+
+**Tills that aren't mapped keep working.** A counter on no floor bills the shop's
+plain `INV-000001` series exactly as it always has, and the billing screen says
+so rather than refusing a customer over an incomplete master. Floor *sales* — the
+phone cart, which is not a till and has no counter — stay on that series too.
 
 ## Promotions
 

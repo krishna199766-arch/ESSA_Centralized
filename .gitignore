@@ -21,6 +21,12 @@ android/local.properties
 
 # The shop's own database, and the backups taken before anything destructive.
 Textile Retail Shop/textile_shop.db
+# SQLite's write-ahead log and its shared-memory index. They appear beside the
+# database once WAL is on — which the shop turns on so two tills can bill at the
+# same moment (see the shop's app/__init__._enable_concurrent_writes) — and they
+# are working files of a running database, never source.
+*.db-wal
+*.db-shm
 *.db.bak*
 
 # The shop's virtualenvs. `backend/.venv/` is ignored above; these were missed

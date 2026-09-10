@@ -60,8 +60,14 @@ def _place():
     The same session keys the billing counter uses, so a desk configured once is
     configured for both — and read through `places.resolve`, so a counter that
     belongs to another branch is dropped rather than shown.
+
+    The floor `resolve` also returns is dropped here. A handover happens where
+    the customer is standing and moves neither stock nor money, so which storey
+    it was on decides nothing — unlike a bill, whose number comes from it.
     """
-    return places.resolve(*(session.get(k) for k in POST_KEYS))
+    company, location, _floor, counter = places.resolve(
+        *(session.get(k) for k in POST_KEYS))
+    return company, location, counter
 
 
 def resolve_tag(code):
