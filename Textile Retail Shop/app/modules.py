@@ -27,6 +27,10 @@ MODULES = [
      "label": "Inventory", "owns": ["inventory."], "manager": False,
      "blurb": "What the shop holds, with the warehouse QR on every item"},
 
+    {"key": "audits", "endpoint": "audits.index", "icon": "bi-clipboard-check",
+     "label": "Stock audit", "owns": ["audits."], "manager": False,
+     "blurb": "Count a floor, item by item, and see where the books disagree"},
+
     {"key": "checker", "endpoint": "checker.index", "icon": "bi-search",
      "label": "Stock check", "owns": ["checker."], "manager": False,
      "blurb": "Scan or filter to find an item and where it is"},

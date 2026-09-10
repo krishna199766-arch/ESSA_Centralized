@@ -94,16 +94,23 @@ def format_number(prefix, fin_year, seq, pad=FLOOR_PAD):
     return f"{prefix}{fin_year}-{int(seq):0{pad}d}"
 
 
-def series_for(counter, when=None):
-    """(prefix, fin_year, pad) for a till — the series its next bill belongs to.
+def series_for(storey, when=None):
+    """(prefix, fin_year, pad) for a FLOOR — the series its next bill belongs to.
 
-    A till mapped to a floor bills on that floor's series. One that is not bills
-    on the shop's plain series, and says nothing about floors at all; see
-    FALLBACK_PREFIX.
+    Takes the floor, not the till, and that distinction is the whole of a bug
+    this once had. The till's mapping is only one of the two ways a floor is
+    settled: `places.resolve` uses the till's storey where it has one, and the
+    floor the cashier picked where it has not. Deriving the series from the till
+    here while the BILL recorded the resolved floor meant an unmapped counter
+    printed "Ground Floor" at the top and a plain INV- number beside it — two
+    answers to one question, on a document that is somebody's tax record.
+
+    So both come from the same value now. A floor with no prefix, or one that has
+    been switched off, falls back to the shop's plain series along with no floor
+    at all; see FALLBACK_PREFIX.
     """
-    floor = getattr(counter, "floor", None) if counter is not None else None
-    if floor is not None and floor.active and (floor.prefix or "").strip():
-        return floor.prefix.strip().upper(), financial_year(when), FLOOR_PAD
+    if storey is not None and storey.active and (storey.prefix or "").strip():
+        return storey.prefix.strip().upper(), financial_year(when), FLOOR_PAD
     return FALLBACK_PREFIX, "", FALLBACK_PAD
 
 
@@ -118,7 +125,7 @@ def _qualified(table):
     return f"{db.metadata.schema}.{table}" if db.metadata.schema else table
 
 
-def _highest_existing(prefix, fin_year, pad):
+def _highest_existing(prefix, fin_year, pad, column=None):
     """The largest number already used on this series, or 0.
 
     Only ever read when the series row is first created, and it is what stops a
@@ -126,10 +133,13 @@ def _highest_existing(prefix, fin_year, pad):
     plain INV- series that is every bill it has ever raised. Scanned rather than
     assumed: `max(id)` is not the same question, and has not been since the first
     invoice was deleted.
+
+    `column` is which document's numbers to look through, defaulting to bills.
     """
+    column = Invoice.invoice_number if column is None else column
     pattern = re.compile(rf"^{re.escape(prefix)}{re.escape(fin_year)}-(\d+)$")
-    rows = db.session.query(Invoice.invoice_number).filter(
-        Invoice.invoice_number.like(f"{prefix}{fin_year}-%")).all()
+    rows = db.session.query(column).filter(
+        column.like(f"{prefix}{fin_year}-%")).all()
     best = 0
     for (number,) in rows:
         found = pattern.match((number or "").strip())
@@ -145,7 +155,33 @@ def _highest_existing(prefix, fin_year, pad):
 _OPEN_ATTEMPTS = 4
 
 
-def _series_row(prefix, fin_year, pad):
+def next_document_number(prefix, column, pad=FALLBACK_PAD):
+    """The next number for a document that is not a bill — `AUD-000001`.
+
+    The same series row and the same atomic increment the till uses, offered to
+    anything else that numbers a document. `utils.generate_number` — which the
+    credit note, the delivery and the alteration still use — takes the last
+    row's id and adds one, and two people saving at the same moment therefore
+    get the same number; on a document raised once a day that is rare rather
+    than impossible, and rare is how it stays believed.
+
+    `column` is the model column the existing numbers live in, so a series
+    opened for the first time on a shop that already has documents starts above
+    them rather than re-issuing what is already printed.
+    """
+    row = _series_row(prefix, "", pad, column=column)
+    table = _qualified(BillSequence.__tablename__)
+    db.session.execute(
+        text(f"UPDATE {table} SET last_number = last_number + 1 WHERE id = :id"),
+        {"id": row.id})
+    seq = db.session.execute(
+        text(f"SELECT last_number FROM {table} WHERE id = :id"),
+        {"id": row.id}).scalar()
+    db.session.expire(row)
+    return format_number(prefix, "", seq, pad)
+
+
+def _series_row(prefix, fin_year, pad, column=None):
     """The `bill_sequences` row for this series, created at the right start.
 
     The only genuinely contended moment in this file, and it happens once per
@@ -172,7 +208,8 @@ def _series_row(prefix, fin_year, pad):
         mark = db.session.begin_nested()
         try:
             row = BillSequence(prefix=prefix, fin_year=fin_year,
-                               last_number=_highest_existing(prefix, fin_year, pad))
+                               last_number=_highest_existing(prefix, fin_year,
+                                                             pad, column))
             db.session.add(row)
             mark.commit()
             return row
@@ -184,17 +221,19 @@ def _series_row(prefix, fin_year, pad):
     raise RuntimeError(f"could not open the {prefix}{fin_year} bill series")
 
 
-def allocate(counter, when=None):
-    """Take the next number on this till's series. THE call that hands one out.
+def allocate(storey, when=None):
+    """Take the next number on this floor's series. THE call that hands one out.
 
     Returns (bill_number, prefix, fin_year, seq).
 
-    Called from inside the transaction that is writing the bill, and it holds
-    that series' row until the transaction ends — which is what serialises two
-    tills on the same floor, and what gives the number back if the sale fails.
-    A till on another floor is on another row and never waits.
+    `storey` is the floor the bill is being raised on, as `places.resolve`
+    settled it — the same value the invoice records. Called from inside the
+    transaction that is writing the bill, and it holds that series' row until
+    the transaction ends: that is what serialises two tills on one floor, and
+    what gives the number back if the sale fails. A till on another floor is on
+    another row and never waits.
     """
-    prefix, fin_year, pad = series_for(counter, when)
+    prefix, fin_year, pad = series_for(storey, when)
     row = _series_row(prefix, fin_year, pad)
     table = _qualified(BillSequence.__tablename__)
 
@@ -216,8 +255,8 @@ def allocate(counter, when=None):
     return format_number(prefix, fin_year, seq, pad), prefix, fin_year, int(seq)
 
 
-def peek(counter, when=None):
-    """What the next bill on this till would be, WITHOUT taking it.
+def peek(storey, when=None):
+    """What the next bill on this floor would be, WITHOUT taking it.
 
     For the billing screen, which shows the number before the sale is committed.
     It is a look, not a reservation, and the difference matters: reserving the
@@ -226,15 +265,17 @@ def peek(counter, when=None):
     till shows this as the next number and the committed bill carries the
     authority — on a quiet floor they are always the same, and on a busy one the
     cashier sees the real number on the bill a second later.
+
+    Takes the same resolved floor `allocate` does, so what the screen promises
+    and what the bill gets cannot come from different places.
     """
-    prefix, fin_year, pad = series_for(counter, when)
+    prefix, fin_year, pad = series_for(storey, when)
     row = BillSequence.query.filter_by(prefix=prefix, fin_year=fin_year).first()
     seq = (row.last_number if row else _highest_existing(prefix, fin_year, pad)) + 1
     return {"number": format_number(prefix, fin_year, seq, pad),
             "prefix": prefix, "fin_year": fin_year, "seq": seq,
             "mapped": prefix != FALLBACK_PREFIX,
-            "floor": (counter.floor.name
-                      if counter is not None and counter.floor else None)}
+            "floor": storey.name if storey is not None else None}
 
 
 #: The four storeys the brief names, with the prefixes it gives them. Offered by

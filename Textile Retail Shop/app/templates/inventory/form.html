@@ -131,6 +131,21 @@
       </select>
     </div>
     <div class="col-md-3"><label class="form-label">Fabric</label><input class="form-control" name="fabric" value="{{ product.fabric if product else '' }}" placeholder="cotton, silk..."></div>
+    {# Which storey the item is held on — where somebody goes to find it, and
+       what a floor-wise stock count covers. A place, not a quantity: the shop
+       keeps one stock figure per product. Usually filled in by the count itself
+       (scanning a garment on a floor records it there); this is the deliberate
+       way to say it, or to move an item between floors. #}
+    <div class="col-md-3"><label class="form-label">Held on floor</label>
+      <select class="form-select" name="floor_id">
+        <option value="">— not placed —</option>
+        {% for f in floors %}
+        <option value="{{ f.id }}" {% if product and product.floor_id == f.id %}selected{% endif %}>
+          {{ f.location.name if f.location else '' }} · {{ f.name }}</option>
+        {% endfor %}
+      </select>
+      <div class="form-text">Where a stock audit will expect to count it.</div>
+    </div>
     <div class="col-md-3"><label class="form-label">Color</label><input class="form-control" name="color" value="{{ product.color if product else '' }}"></div>
     <div class="col-md-3"><label class="form-label">Size</label><input class="form-control" name="size" value="{{ product.size if product else '' }}"></div>
     <div class="col-md-3"><label class="form-label">Unit</label>

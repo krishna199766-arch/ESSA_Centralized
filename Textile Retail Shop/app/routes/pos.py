@@ -175,7 +175,7 @@ def counter():
                            places=places.picker_options(),
                            chosen_company=company, chosen_location=location,
                            chosen_floor=storey, chosen_counter=till,
-                           next_bill=billing_numbers.peek(till),
+                           next_bill=billing_numbers.peek(storey),
                            default_company=places.default_company())
 
 
@@ -193,7 +193,7 @@ def _place_json(company, location, storey, till):
         "floor": {"id": storey.id, "name": storey.name,
                   "prefix": storey.prefix} if storey else None,
         "counter": {"id": till.id, "name": till.name} if till else None,
-        "next_bill": billing_numbers.peek(till),
+        "next_bill": billing_numbers.peek(storey),
         "options": places.picker_options(),
     }
 
@@ -237,8 +237,8 @@ def api_next_bill():
     number that counts is the one on the committed bill, which the checkout
     returns.
     """
-    _company, _location, _storey, till = _chosen()
-    return jsonify(billing_numbers.peek(till))
+    _company, _location, storey, _till = _chosen()
+    return jsonify(billing_numbers.peek(storey))
 
 
 def resolve_staff(value):
@@ -368,18 +368,24 @@ def checkout():
             outcome = promotions.Outcome([], [])
 
         # ---- the bill number -------------------------------------------------
-        # Taken from the till's own series, at the backend, inside this
-        # transaction — see app/billing_numbers.py. Never sent by the page and
-        # never typed: a bill number is the shop's statutory record of the sale,
-        # and a cashier who could choose one could raise two bills with the same
-        # number or skip a number nobody can then account for.
+        # Taken from the series of the FLOOR this sale is being rung on, at the
+        # backend, inside this transaction — see app/billing_numbers.py. Never
+        # sent by the page and never typed: a bill number is the shop's
+        # statutory record of the sale, and a cashier who could choose one could
+        # raise two bills with the same number or skip a number nobody can then
+        # account for.
+        #
+        # `storey` and nothing else, because it is also what the invoice records
+        # three lines below. Deriving the number from the TILL's mapping while
+        # the bill recorded the resolved floor is exactly how a bill came to
+        # print "Ground Floor" at its head and INV-000013 beside it.
         #
         # Allocating HERE, before the lines are written, is what makes two tills
         # on one floor safe: the series' row is locked for the rest of this
         # transaction, so the second till waits and gets the next number rather
         # than the same one. A till on another floor is on another row and never
         # waits at all.
-        number, prefix, fin_year, seq = billing_numbers.allocate(till)
+        number, prefix, fin_year, seq = billing_numbers.allocate(storey)
 
         inv = Invoice(
             invoice_number=number,

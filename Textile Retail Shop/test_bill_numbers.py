@@ -142,52 +142,52 @@ with app.app_context():
 
     print("\n-- which series a till bills on --")
     check("a till on the Ground Floor bills TG",
-          billing_numbers.series_for(tg_till)[:2], ("TG", year))
-    check("…the First Floor, TF", billing_numbers.series_for(tf_till)[:2], ("TF", year))
-    check("…the Second, TS", billing_numbers.series_for(ts_till)[:2], ("TS", year))
-    check("…the Third, TT", billing_numbers.series_for(tt_till)[:2], ("TT", year))
+          billing_numbers.series_for(tg_till.floor)[:2], ("TG", year))
+    check("…the First Floor, TF", billing_numbers.series_for(tf_till.floor)[:2], ("TF", year))
+    check("…the Second, TS", billing_numbers.series_for(ts_till.floor)[:2], ("TS", year))
+    check("…the Third, TT", billing_numbers.series_for(tt_till.floor)[:2], ("TT", year))
     check("a till on no floor bills the shop's plain series",
-          billing_numbers.series_for(loose)[:2], ("INV", ""))
+          billing_numbers.series_for(loose.floor)[:2], ("INV", ""))
     check("…and so does no till at all",
           billing_numbers.series_for(None)[:2], ("INV", ""))
 
     print("\n-- each floor counts on its own --")
     # Straight from the brief: three bills on the ground floor and two on the
     # first, and neither knows the other exists.
-    got = [billing_numbers.allocate(tg_till)[0] for _ in range(3)]
+    got = [billing_numbers.allocate(tg_till.floor)[0] for _ in range(3)]
     check("Ground Floor: 001, 002, 003", got,
           [f"TG{year}-001", f"TG{year}-002", f"TG{year}-003"])
-    got = [billing_numbers.allocate(tf_till)[0] for _ in range(2)]
+    got = [billing_numbers.allocate(tf_till.floor)[0] for _ in range(2)]
     check("First Floor starts at its own 001", got,
           [f"TF{year}-001", f"TF{year}-002"])
-    check("Second Floor too", billing_numbers.allocate(ts_till)[0], f"TS{year}-001")
-    check("Third Floor too", billing_numbers.allocate(tt_till)[0], f"TT{year}-001")
+    check("Second Floor too", billing_numbers.allocate(ts_till.floor)[0], f"TS{year}-001")
+    check("Third Floor too", billing_numbers.allocate(tt_till.floor)[0], f"TT{year}-001")
     check("…and the ground floor carried on where it was",
-          billing_numbers.allocate(tg_till)[0], f"TG{year}-004")
+          billing_numbers.allocate(tg_till.floor)[0], f"TG{year}-004")
 
     print("\n-- two tills on ONE floor share its series --")
     # They must: the number is the register, and a floor is one register however
     # many drawers stand on it.
     check("a second Ground Floor till takes the next number, not 001",
-          billing_numbers.allocate(tg_till2)[0], f"TG{year}-005")
+          billing_numbers.allocate(tg_till2.floor)[0], f"TG{year}-005")
 
     print("\n-- the parts are kept, not just the string --")
-    number, prefix, fin, seq = billing_numbers.allocate(tg_till)
+    number, prefix, fin, seq = billing_numbers.allocate(tg_till.floor)
     check("allocate hands back what the number was built from",
           (number, prefix, fin, seq), (f"TG{year}-006", "TG", year, 6))
 
     print("\n-- looking is not taking --")
-    peeked = billing_numbers.peek(tg_till)
+    peeked = billing_numbers.peek(tg_till.floor)
     check("peek says what is next", peeked["number"], f"TG{year}-007")
     check("…twice, because it reserved nothing",
-          billing_numbers.peek(tg_till)["number"], f"TG{year}-007")
+          billing_numbers.peek(tg_till.floor)["number"], f"TG{year}-007")
     check("…and the next allocation is still that number",
-          billing_numbers.allocate(tg_till)[0], f"TG{year}-007")
+          billing_numbers.allocate(tg_till.floor)[0], f"TG{year}-007")
     check("peek on an unmapped till says it is not mapped",
-          (billing_numbers.peek(loose)["mapped"],
-           billing_numbers.peek(loose)["number"]), (False, "INV-000001"))
+          (billing_numbers.peek(loose.floor)["mapped"],
+           billing_numbers.peek(loose.floor)["number"]), (False, "INV-000001"))
     check("…and on a mapped one, names the floor",
-          billing_numbers.peek(tg_till)["floor"], "Ground Floor")
+          billing_numbers.peek(tg_till.floor)["floor"], "Ground Floor")
     db.session.commit()
 
     print("\n-- a series opened on a shop that already has bills --")
@@ -206,7 +206,7 @@ with app.app_context():
     db.session.add(attic_till)
     db.session.commit()
     check("a brand-new series carries on above the bills already raised",
-          billing_numbers.allocate(attic_till)[0], f"TZ{year}-043")
+          billing_numbers.allocate(attic_till.floor)[0], f"TZ{year}-043")
     # …and the shop's own INV- series, which is where every upgrading shop's
     # history actually lives.
     db.session.add(Invoice(invoice_number="INV-000817", cashier_id=admin.id,
@@ -220,9 +220,9 @@ with app.app_context():
     # Nothing has to run at midnight on 1 April: the year is part of the key, so
     # the first bill of the new year opens a new row on its own.
     check("next April is TG27-001",
-          billing_numbers.allocate(tg_till, when=date(2027, 4, 1))[0], "TG27-001")
+          billing_numbers.allocate(tg_till.floor, when=date(2027, 4, 1))[0], "TG27-001")
     check("…and the old year is untouched",
-          billing_numbers.peek(tg_till)["number"], f"TG{year}-008")
+          billing_numbers.peek(tg_till.floor)["number"], f"TG{year}-008")
     db.session.commit()
 
 
@@ -286,9 +286,46 @@ with app.app_context():
     check("the same cashier on the First Floor bills TF",
           body.get("invoice_number"), f"TF{year}-003")
 
+    print("\n-- an UNMAPPED till, with the floor picked at the counter --")
+    # The bug this section exists for. `places.resolve` settles the floor two
+    # ways: off the till's own mapping, or off the floor the cashier picked. The
+    # bill recorded the resolved floor while the NUMBER was derived from the
+    # till, so a counter on no floor printed "Ground Floor" at its head and a
+    # plain INV- number beside it — one document, two answers.
+    unmapped = Counter(name="Trolley till", location_id=ids["shop"])
+    db.session.add(unmapped)
+    db.session.commit()
+    client.post("/pos/place", json={"location_id": ids["shop"],
+                                    "floor_id": ids["floor_tg"],
+                                    "counter_id": unmapped.id})
+    r = client.post("/pos/checkout", json={
+        "staff_code": "ravi",
+        "items": [{"product_id": ids["saree"], "quantity": 1, "unit_price": 2000.0}],
+        "payments": [{"method": "cash", "amount": 2100.0, "tendered": 2100.0}],
+    })
+    body = r.get_json()
+    ok("the sale bills", r.status_code == 200 and body.get("success"),
+       f"{r.status_code}: {body}")
+    if body and body.get("success"):
+        inv = db.session.get(Invoice, body["invoice_id"])
+        check("the picked floor decides the number, not the till's blank mapping",
+              inv.invoice_number[:2], "TG")
+        check("…and the bill's floor is the one it was numbered from",
+              (inv.floor_id, inv.bill_prefix), (ids["floor_tg"], "TG"))
+        ok("…so the head of the bill and its number cannot disagree",
+           inv.floor.prefix == inv.bill_prefix,
+           f"printed {inv.floor.name} / numbered {inv.invoice_number}")
+
+    # …and with no floor picked either, it is the plain series and says so.
+    client.post("/pos/place", json={"location_id": ids["shop"],
+                                    "floor_id": None, "counter_id": unmapped.id})
+    nb = client.get("/pos/api/next-bill").get_json()
+    check("no floor at all — the plain series, and the till says so",
+          (nb["mapped"], nb["prefix"]), (False, "INV"))
+
     print("\n-- a sale that fails gives its number back --")
     before = billing_numbers.peek(
-        db.session.get(Counter, ids["tf"]))["number"]
+        db.session.get(Counter, ids["tf"]).floor)["number"]
     r = client.post("/pos/checkout", json={
         "staff_code": "ravi",
         "items": [{"product_id": ids["saree"], "quantity": 99999,
@@ -296,7 +333,7 @@ with app.app_context():
         "payments": [{"method": "cash", "amount": 1.0, "tendered": 1.0}],
     })
     ok("the sale is refused", r.status_code == 400, str(r.status_code))
-    after = billing_numbers.peek(db.session.get(Counter, ids["tf"]))["number"]
+    after = billing_numbers.peek(db.session.get(Counter, ids["tf"]).floor)["number"]
     check("…and the next bill is still the number the failed one would have had",
           after, before)
 
@@ -450,9 +487,9 @@ with app.app_context():
     # file, and carrying on where they were is the correct answer rather than
     # restarting at 001 because a till arrived from upstairs.
     check("…so the till bills on that floor's series",
-          billing_numbers.peek(tills["CBE-POS"])["prefix"], "TG")
+          billing_numbers.peek(tills["CBE-POS"].floor)["prefix"], "TG")
     check("…and the one upstairs on its own",
-          billing_numbers.peek(tills["UPSTAIRS"])["prefix"], "TF")
+          billing_numbers.peek(tills["UPSTAIRS"].floor)["prefix"], "TF")
 
     before = (Floor.query.count(), Counter.query.count())
     places.sync_places()
@@ -471,7 +508,7 @@ with app.app_context():
           (Floor.query.count(), db.session.get(Floor, mirrored["Ground Floor"].id).name),
           (before[0], "Ground"))
     check("…and its till follows the new prefix",
-          billing_numbers.peek(db.session.get(Counter, tills["CBE-POS"].id))["number"],
+          billing_numbers.peek(db.session.get(Counter, tills["CBE-POS"].id).floor)["number"],
           f"GG{year}-001")     # a prefix nothing has billed on yet, so 001
 
     # A floor the shop added itself is left alone by all of that.
@@ -536,7 +573,7 @@ with app.app_context():
     check("the till is on the new floor",
           db.session.get(Counter, spare_id).floor_id, made.id)
     check("…so it bills on that series",
-          billing_numbers.peek(db.session.get(Counter, spare_id))["number"],
+          billing_numbers.peek(db.session.get(Counter, spare_id).floor)["number"],
           f"TX{year}-001")
 
     # A till cannot stand in another building.
@@ -571,8 +608,8 @@ with app.app_context():
     db.session.add(karur_till)
     db.session.commit()
     ok("a shared prefix continues one series rather than restarting at 001",
-       not billing_numbers.peek(karur_till)["number"].endswith("-001"),
-       billing_numbers.peek(karur_till)["number"])
+       not billing_numbers.peek(karur_till.floor)["number"].endswith("-001"),
+       billing_numbers.peek(karur_till.floor)["number"])
 
 
 print("\n" + ("=" * 60))

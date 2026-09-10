@@ -93,6 +93,9 @@ COLUMNS = [
     # well as `counters` because a shop that ran an earlier build already has
     # `floors` without them, and create_all never revisits a table it has made.
     ("counters", "wh_id", "INTEGER"),
+    # Which storey an item is held on — where you go to find it. See
+    # models.Product.floor_id; it is a place, not a quantity.
+    ("products", "floor_id", "INTEGER"),
     ("floors", "wh_id", "INTEGER"),
     ("floors", "local", "BOOLEAN"),
     ("invoices", "floor_id", "INTEGER"),

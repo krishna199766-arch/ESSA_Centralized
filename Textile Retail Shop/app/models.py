@@ -106,7 +106,20 @@ class Product(db.Model):
     pattern = db.Column(db.String(64))
     fit = db.Column(db.String(64))
     design_no = db.Column(db.String(64))
+    #: Which storey of the store this item is held on — where you go to find it.
+    #:
+    #: It is a PLACE, not a quantity. The shop's stock figure is `stock_qty` and
+    #: stays one number for the whole shop; this says where those pieces are
+    #: standing. That is enough for a floor-wise count, and it is as far as the
+    #: honest answer goes: splitting the QUANTITY across floors would mean the
+    #: till knowing which storey each sale came off, and it does not.
+    #:
+    #: Null until somebody says otherwise — which is usually the audit itself.
+    #: Counting a garment on the second floor is the act that records it there.
+    floor_id = db.Column(db.Integer, db.ForeignKey("floors.id"), index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    floor = db.relationship("Floor", backref=db.backref("products", lazy=True))
 
     @property
     def is_low_stock(self):
@@ -647,6 +660,206 @@ class CreditNoteItem(db.Model):
 
     product = db.relationship("Product")
     invoice_item = db.relationship("InvoiceItem", backref="credit_lines")
+
+
+# ---------- Physical stock audit ----------
+#
+# Counting a floor: walk it with a phone, scan every tag, say how many are
+# actually there, and see where that disagrees with the books.
+#
+# THE COUNT AND THE BOOKS ARE KEPT APART. A line records what the system
+# believed AT THE MOMENT IT WAS COUNTED and what the counter found; neither is
+# derived from the other, and nothing here touches stock. Changing the ledger is
+# a separate, later, deliberate act (`apply_adjustment`) that writes real
+# movements against the audit's number — because a count that silently corrected
+# the books would destroy the one record that is supposed to be independent of
+# them, and nobody could ever say what the shelf had actually held.
+
+#: Where an audit is in its life. `in_progress` is a floor being walked;
+#: `completed` is the walking finished; `reviewed` and `approved` are two pairs
+#: of eyes, which is the point of counting money-worth of stock; `cancelled` is
+#: a count abandoned. Only an approved audit may move stock.
+AUDIT_STATUSES = ("in_progress", "completed", "reviewed", "approved", "cancelled")
+
+#: What a counted line turned out to be.
+LINE_STATUSES = ("not_counted", "matched", "shortage", "excess")
+
+#: The reason a stock movement carries when an audit's variance is applied. Its
+#: own word, so the ledger can be asked what a count corrected without inferring
+#: it from an ordinary adjustment somebody typed.
+AUDIT_MOVEMENT_REASON = "audit"
+
+
+class StockAudit(db.Model):
+    """One physical count of one floor.
+
+    Scoped to a floor rather than to the whole shop because that is how a count
+    is actually done — one team, one storey, one afternoon — and because a
+    variance is only meaningful against the place it was counted in. A shop-wide
+    number would say stock is missing without saying where to go and look.
+    """
+    __tablename__ = "stock_audits"
+    id = db.Column(db.Integer, primary_key=True)
+    number = db.Column(db.String(32), unique=True, nullable=False, index=True)
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    floor_id = db.Column(db.Integer, db.ForeignKey("floors.id"), index=True)
+    status = db.Column(db.String(16), default="in_progress", index=True)
+    note = db.Column(db.String(256))
+
+    started_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    started_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    completed_at = db.Column(db.DateTime)
+    completed_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    reviewed_at = db.Column(db.DateTime)
+    reviewed_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    approved_at = db.Column(db.DateTime)
+    approved_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    #: When the variance was written into the ledger. Set once and never again —
+    #: it is what makes applying an adjustment idempotent, so a double-clicked
+    #: button cannot move the same stock twice.
+    adjusted_at = db.Column(db.DateTime)
+    adjusted_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+
+    location = db.relationship("Location")
+    floor = db.relationship("Floor")
+    started_by = db.relationship("User", foreign_keys=[started_by_id])
+    completed_by = db.relationship("User", foreign_keys=[completed_by_id])
+    reviewed_by = db.relationship("User", foreign_keys=[reviewed_by_id])
+    approved_by = db.relationship("User", foreign_keys=[approved_by_id])
+    adjusted_by = db.relationship("User", foreign_keys=[adjusted_by_id])
+    lines = db.relationship("StockAuditLine", backref="audit", lazy=True,
+                            cascade="all, delete-orphan",
+                            order_by="StockAuditLine.id")
+
+    @property
+    def counted_lines(self):
+        return [l for l in self.lines if l.physical_qty is not None]
+
+    @property
+    def summary(self):
+        """The figures at the head of the screen, worked out in one place.
+
+        Derived rather than stored: a stored total is a second answer to a
+        question the lines already answer, and the two would disagree the first
+        time somebody re-counted a line.
+        """
+        counted = self.counted_lines
+        return {
+            "products": len(self.lines),
+            "counted": len(counted),
+            "not_counted": len(self.lines) - len(counted),
+            "system_qty": round(sum(l.system_qty or 0 for l in self.lines), 3),
+            "physical_qty": round(sum(l.physical_qty or 0 for l in counted), 3),
+            "matched": sum(1 for l in counted if l.line_status == "matched"),
+            "shortage_lines": sum(1 for l in counted if l.line_status == "shortage"),
+            "excess_lines": sum(1 for l in counted if l.line_status == "excess"),
+            # Quantities, not line counts — "35 pieces short" is the number
+            # somebody acts on; "3 lines short" is not.
+            "shortage": round(-sum(l.difference for l in counted
+                                   if l.difference < 0), 3),
+            "excess": round(sum(l.difference for l in counted
+                                if l.difference > 0), 3),
+            "value_variance": round(sum(l.value_variance for l in counted), 2),
+        }
+
+    @property
+    def is_open(self):
+        return self.status == "in_progress"
+
+    @property
+    def adjustable_lines(self):
+        """Counted lines whose gap this count is entitled to write into stock.
+
+        Excludes anything found off its own floor: that line is a finding about
+        WHERE a garment was, not a census of how many the shop has, and applying
+        it would write off every piece still sitting on the floor it belongs to.
+        See audits.apply_adjustment.
+        """
+        return [l for l in self.counted_lines
+                if l.difference and not l.found_off_floor]
+
+    @property
+    def can_adjust(self):
+        """Approved, not yet applied, and with something it may apply."""
+        return (self.status == "approved" and self.adjusted_at is None
+                and bool(self.adjustable_lines))
+
+
+class StockAuditLine(db.Model):
+    """One product on one count — what the books said, and what was on the shelf.
+
+    `system_qty`, `purchase_qty` and `sales_qty` are FROZEN when the line is
+    created and never refreshed. Re-deriving them later would turn a count into a
+    report on today's figures and destroy the only thing it was for: a variance
+    is the gap between what was believed at a moment and what was there at that
+    moment. `sku` and `name` are copied for the same reason — a product renamed
+    afterwards must not rewrite what the counter saw.
+
+    The live attributes (size, colour, material) are NOT copied. They are how you
+    find the garment on the rack, they do not change, and reading them through
+    the product keeps one description of an item rather than a stale second one.
+    """
+    __tablename__ = "stock_audit_lines"
+    id = db.Column(db.Integer, primary_key=True)
+    audit_id = db.Column(db.Integer, db.ForeignKey("stock_audits.id"),
+                         nullable=False, index=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("products.id"),
+                           nullable=False, index=True)
+    sku = db.Column(db.String(64))
+    name = db.Column(db.String(128))
+
+    #: What the shop's books said when this line was opened.
+    system_qty = db.Column(db.Float, default=0.0)
+    #: How the books got there — every piece in, and every piece out, off the
+    #: movement ledger. They reconcile: purchase − sales IS system_qty, because
+    #: the ledger is what stock is made of. Kept so the screen can show the
+    #: working rather than asserting a figure.
+    purchase_qty = db.Column(db.Float, default=0.0)
+    sales_qty = db.Column(db.Float, default=0.0)
+
+    #: What was actually on the floor. Null means nobody has counted it yet,
+    #: which is a different thing from counting it and finding none.
+    physical_qty = db.Column(db.Float)
+    counted_at = db.Column(db.DateTime)
+    counted_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    #: How many times its tag was read. A second scan does not add a line — it
+    #: says "you have already counted this", which is what stops a rack being
+    #: walked twice and counted twice.
+    scans = db.Column(db.Integer, default=0)
+    note = db.Column(db.String(256))
+    #: Set when the garment was counted here but belongs to another storey. The
+    #: count still stands — it is where the piece IS — and this is the finding.
+    found_off_floor = db.Column(db.Boolean, default=False)
+
+    product = db.relationship("Product")
+    counted_by = db.relationship("User")
+    __table_args__ = (db.UniqueConstraint("audit_id", "product_id",
+                                          name="uq_audit_line_product"),)
+
+    @property
+    def difference(self):
+        """Physical − system. 0 while uncounted, which is not a variance."""
+        if self.physical_qty is None:
+            return 0.0
+        return round(self.physical_qty - (self.system_qty or 0), 3)
+
+    @property
+    def line_status(self):
+        if self.physical_qty is None:
+            return "not_counted"
+        d = self.difference
+        return "matched" if d == 0 else ("excess" if d > 0 else "shortage")
+
+    @property
+    def value_variance(self):
+        """What the gap is worth, at what the shop sells the item for.
+
+        Priced at the selling price rather than at cost because the question a
+        shortage raises is what walked out of the door, and that is what it
+        would have been sold for.
+        """
+        price = (self.product.selling_price if self.product else 0) or 0
+        return round(self.difference * price, 2)
 
 
 # ---------- Sales promotion schemes ----------

@@ -17,7 +17,8 @@ from sqlalchemy import func
 from app import db
 from app.models import (Alteration, CreditNote, Category, Counter, Customer,
                         Invoice, InvoiceItem, Location, LoyaltyTxn, Product,
-                        PromotionApplication, PromotionAudit, User)
+                        PromotionApplication, PromotionAudit, StockAudit,
+                        StockAuditLine, User)
 
 
 def _inv_in(start, end):
@@ -411,6 +412,72 @@ def promotion_daily(start, end):
                     "than shown as zero."}
 
 
+def stock_audits(start, end):
+    """Physical counts taken in the period, and what each one found.
+
+    Dated by when the count STARTED — that is when the shelf was looked at, and
+    an audit approved a fortnight later still describes the day it was walked.
+    """
+    rows = (StockAudit.query
+            .filter(func.date(StockAudit.started_at) >= start,
+                    func.date(StockAudit.started_at) <= end)
+            .order_by(StockAudit.id.desc()).all())
+    out = []
+    for a in rows:
+        s = a.summary
+        out.append([a.number,
+                    a.floor.name if a.floor else "—",
+                    a.location.name if a.location else "—",
+                    a.started_at.strftime("%d-%m-%Y"),
+                    a.started_by.full_name if a.started_by else "—",
+                    f"{s['counted']}/{s['products']}",
+                    s["system_qty"], s["physical_qty"],
+                    s["shortage"], s["excess"], s["matched"],
+                    a.status.replace("_", " "),
+                    a.adjusted_at.strftime("%d-%m-%Y") if a.adjusted_at else "—"])
+    return {"columns": ["Audit", "Floor", "Store", "Started", "By",
+                        "Counted", "System qty", "Physical qty",
+                        "Shortage", "Excess", "Matched", "Status", "Applied"],
+            "rows": out,
+            "totals": {"Shortage": round(sum(r[8] for r in out), 3),
+                       "Excess": round(sum(r[9] for r in out), 3)},
+            "note": "A count changes no stock on its own. “Applied” is the date "
+                    "an approved count corrected the books — a blank there means "
+                    "the variance was found and the figures were left alone."}
+
+
+def stock_audit_lines(start, end):
+    """Every counted line, product by product — the detail behind the summary."""
+    rows = (db.session.query(StockAuditLine, StockAudit)
+            .join(StockAudit, StockAudit.id == StockAuditLine.audit_id)
+            .filter(func.date(StockAudit.started_at) >= start,
+                    func.date(StockAudit.started_at) <= end,
+                    StockAuditLine.physical_qty.isnot(None))
+            .order_by(StockAudit.id.desc(), StockAuditLine.id).all())
+    out = []
+    for line, audit in rows:
+        p = line.product
+        out.append([audit.number, audit.floor.name if audit.floor else "—",
+                    line.sku, line.name,
+                    p.category.name if p and p.category else "—",
+                    " · ".join(x for x in ((p.size if p else None),
+                                           (p.color if p else None),
+                                           (p.fabric if p else None)) if x) or "—",
+                    line.purchase_qty, line.sales_qty, line.system_qty,
+                    line.physical_qty, line.difference,
+                    line.line_status.replace("_", " "),
+                    _money(line.value_variance)])
+    return {"columns": ["Audit", "Floor", "SKU", "Item", "Category",
+                        "Attributes", "Purchase", "Sales", "System",
+                        "Physical", "Diff", "Status", "Value"],
+            "rows": out,
+            "totals": {"Lines": len(out),
+                       "Value of the gap": _money(sum(r[12] for r in out))},
+            "note": "Only lines somebody actually counted. Purchase − Sales is "
+                    "the system figure: that is how the books got there, off the "
+                    "movement ledger. The gap is priced at the selling price."}
+
+
 def promotion_audit(start, end):
     """Every promotion event, including the ones that gave nothing away.
 
@@ -543,6 +610,17 @@ REPORTS = {
         "keywords": ["promotion daily", "offer daily", "promotion by date",
                      "promotions by date", "promotion date wise",
                      "promotion trend", "offers by date"]},
+    "stock_audits": {
+        "label": "Physical stock audits", "run": stock_audits, "dated": True,
+        "blurb": "Counts taken per floor, with shortage and excess",
+        "keywords": ["stock audit", "physical stock", "physical count",
+                     "stock count", "audit floor", "floor count",
+                     "இருப்பு சரிபார்ப்பு"]},
+    "stock_audit_lines": {
+        "label": "Stock audit detail", "run": stock_audit_lines, "dated": True,
+        "blurb": "Every counted item: purchase, sales, system, physical, gap",
+        "keywords": ["audit detail", "count detail", "stock variance",
+                     "shortage detail", "excess detail", "stock difference"]},
     "promotion_audit": {
         "label": "Promotion audit", "run": promotion_audit, "dated": True,
         "blurb": "Every promotion event, including offers refused for no stock",

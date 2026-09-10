@@ -6,7 +6,8 @@ A complete Flask-based retail management system for Taqua Silks with GST-complia
 
 - **POS / Billing** — cart-based sales, SKU search/scan, GST split (CGST/SGST/IGST auto-detected by state), printable tax invoice with HSN codes and GSTIN. Each till is mapped to the storey it stands on, and its bills are numbered from that floor's own series — `TG26-001` on the ground floor, `TF26-001` on the first — automatically, by the backend, with the number shown on screen before the sale is taken. See **Floor-wise bill numbers** below.
 - **Delivery** — the collection desk. Scan the bill (QR or number), scan every garment as it goes in the bag, and the handover is recorded against the bills it covers. Part collection is a first-class answer, so the balance stays owed and shows on a "still to collect" list; a piece tag can only go out once; and a piece nobody can scan needs a manager and a reason, both printed on the delivery note. Moves no stock and no money — the sale already did both.
-- **Inventory** — products with categories, fabric/color/size, HSN codes, GST rate, cost/selling price, stock, reorder levels, low-stock highlighting, full stock-movement audit log.
+- **Inventory** — products with categories, fabric/color/size, HSN codes, GST rate, cost/selling price, stock, reorder levels, low-stock highlighting, full stock-movement audit log, and which floor each item is held on.
+- **Physical stock audit** — count a floor item by item, by QR scan or search, against what the books say. Shows purchase and sales quantities so the system figure explains itself, records shortage and excess per line, and — only once approved — corrects stock through real movements rather than by overwriting a number. See **Physical stock audit** below.
 - **Promotions** — a configurable offer engine, not a hard-coded offer. An admin writes a scheme (*buy 3 from LADIES-CHUDITHAR → 1 LEGGINGS free*) and the till applies it by itself: the free item appears on the billing screen as the cart is built, is billed at ₹0, comes off stock with its own movement against the same bill, and is recorded for reporting and audit. Quantity, product, category and mixed schemes are all the same rows in a different arrangement, so a new offer is data rather than code. See **Promotions** below.
 - **Customers (CRM)** — profiles, purchase history, GSTIN support for B2B, loyalty points ledger with configurable earn rate + redemption.
 - **Suppliers & Purchase Orders** — supplier records, create POs, one-click "Receive" that adds to stock and updates cost price.
@@ -55,6 +56,7 @@ Textile Retail Shop/
 │   ├── utils.py          # role decorator, number generator
 │   ├── promotions.py     # the promotion engine: what a cart earned, and in stock
 │   ├── billing_numbers.py# floor → prefix → financial year → next bill number
+│   ├── audits.py         # counting a floor, and what may then move stock
 │   ├── places.py         # company / store / floor / till, and what a till bills as
 │   ├── routes/           # blueprints: auth/main/inventory/pos/customers/staff/
 │   │                     #   reports/returns/promotions/stores/floor/delivery
@@ -69,6 +71,7 @@ it needs, asserts in plain prose, and runs against a throwaway database.
 
 ```bash
 python test_mounted.py         # every screen still builds when `app` isn't ours
+python test_stock_audit.py     # counting a floor, and what it refuses to adjust
 python test_bill_numbers.py    # floor series, and 20 tills billing at once
 python test_promotions.py      # the promotion engine, end to end
 python test_delivery.py        # goods leave only when handed over
@@ -83,6 +86,57 @@ standalone. That shipped once. This one swaps the package away exactly as the
 mount does and then asks for every screen, so it cannot ship again. Every
 `from app…` in this codebase belongs at module level; see `app/places.py` and
 `backend/app/pos_mount.py` for the long version.
+
+## Physical stock audit
+
+Count a floor against the books:
+
+```
+select floor → scan each tag → the system says what it believes →
+enter what is there → complete → review → approve → apply to stock
+```
+
+**A count is not an adjustment, and that separation is the whole module.**
+Scanning a rack records what the shelf held against what the books said, and
+changes no stock at all. Deciding to believe the count is a *later, approved*
+act that writes one **stock movement per product** against the audit's number —
+never a silently rewritten figure. If a count corrected the books as it went,
+there would be no independent record of what was ever actually on the floor,
+which is the only thing an audit exists to produce.
+
+**It shows its working.** Every line carries *purchase → sales → system stock →
+physical → difference*, and the first two come off the movement ledger, so
+`purchase − sales` **is** the system figure. Nothing has to be taken on trust
+during the one job that exists not to.
+
+**Scan-driven, with everything a scan needs to show.** A tag resolves through the
+same entry point the till uses — SKU, printed barcode, warehouse QR or a
+per-piece code — and answers with the product, its category and every attribute
+(size, colour, material, pattern, fit, type, design no, MRP, cost, selling
+price), what the books say, and how they got there. Scanning something already
+counted says so rather than quietly doubling the shelf. A camera works for a
+phone walking the floor; a search box covers a tag that will not scan.
+
+**What a floor's stock means here.** The shop keeps **one quantity per product**
+— the figure the till sells against — and this does not invent a per-floor one:
+splitting the number across storeys would need the till to know which floor each
+sale came off, and it does not. What a floor has is the set of products *held* on
+it (`Product.floor_id`, a place), so a floor's count is a count of the garments
+that live there. **The count is what builds that mapping**: scanning a garment on
+the second floor is the act that records it there.
+
+That follows through into one rule worth knowing. A garment found on a floor it
+does **not** belong to is counted — it is where the piece is — and flagged, but
+its variance is **not** applied to stock. That count found *where some of them
+were*, not how many the shop has; writing it into the figure would silently write
+off every piece still standing on the floor they belong to. Its own floor's count
+settles the quantity. The screen says which lines that affects before anybody
+presses Apply.
+
+Each floor shows its status (not started · in progress · completed · reviewed ·
+approved), every step is stamped with who and when, and the whole count is
+exportable as CSV, printable with signature lines, and reportable — *Physical
+stock audits* and *Stock audit detail* both answer from the ask bar.
 
 ## Floor-wise bill numbers
 

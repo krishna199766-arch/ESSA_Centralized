@@ -83,8 +83,15 @@ with app.app_context():
     db.session.add(InvoiceItem(invoice_id=inv.id, product_id=prod.id, quantity=1,
                                unit_price=2000.0, gst_rate=5.0,
                                line_total=2000.0, tax_amount=100.0))
+    # A count in progress, so the audit screens have something to draw and the
+    # scan endpoint has somewhere to put what it finds.
+    from app import audits as audit_svc
+    prod.floor_id = storey.id
     db.session.commit()
-    ids = {"loc": loc.id, "till": till.id, "inv": inv.id, "prod": prod.id}
+    audit = audit_svc.open_audit(storey, user_id=admin.id)
+
+    ids = {"loc": loc.id, "till": till.id, "inv": inv.id, "prod": prod.id,
+           "audit": audit.id}
 
 client = app.test_client()
 client.post("/login", data={"username": "admin", "password": "x"},
@@ -122,6 +129,13 @@ CHECKS = [
                                                 "quantity": 3}]}),
     ("GET", "/stores/", None),
     ("GET", "/stores/series", None),
+    ("GET", "/audits/", None),
+    ("GET", f"/audits/{ids['audit']}", None),
+    ("GET", f"/audits/{ids['audit']}?status=shortage&q=SAREE", None),
+    ("GET", f"/audits/{ids['audit']}/print", None),
+    ("GET", f"/audits/{ids['audit']}/export", None),
+    ("GET", "/audits/api/products?q=saree", None),
+    ("POST", f"/audits/{ids['audit']}/scan", {"code": "ESSA-00001"}),
     ("GET", "/promotions/", None),
     ("GET", "/promotions/new", None),
     ("GET", "/promotions/api/products?q=saree", None),

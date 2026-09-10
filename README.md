@@ -653,6 +653,18 @@ shop's plain `INV-` series and says so.
 `python "Textile Retail Shop/test_bill_numbers.py"` runs twenty simultaneous
 checkouts and asserts twenty distinct numbers, no gaps, no failed sales.
 
+**Physical stock audit** counts a floor against the books. Pick a storey, scan
+each tag — the same QR the warehouse printed — and the screen answers with the
+product, every attribute, what the books say and *how they got there*: purchase
+in, sales out, and the system figure those two produce. Enter what is actually
+there and the shortage or excess is worked out per line and per floor. Counting
+changes no stock; only an **approved** count may correct it, and when it does it
+writes one stock movement per product against the audit's number, so the
+correction is a row somebody can find and question. A garment found on the wrong
+floor is counted and flagged but deliberately **not** adjusted — that count found
+where some of them were, not how many the shop has.
+`python "Textile Retail Shop/test_stock_audit.py"` covers it, guards included.
+
 **Promotions** are a configurable engine rather than a coded offer. An admin
 writes a scheme — *buy 3 from LADIES-CHUDITHAR → 1 LEGGINGS free* — out of
 conditions, rewards and places, and the till applies it by itself: the free item

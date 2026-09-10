@@ -6,7 +6,7 @@ from flask_login import login_required, current_user
 from sqlalchemy import func
 from app import db
 from app import warehouse_items
-from app.models import Product, Category, StockMovement
+from app.models import Floor, Product, Category, StockMovement
 from app.master_categories import SECTION_ORDER, grouped_categories
 from app.utils import role_required
 
@@ -81,6 +81,12 @@ def lookup_barcode_online(code):
         pass
 
     return {"found": False, "code": code}
+
+
+def _floors():
+    """Every storey a product can be placed on, ordered as a building is."""
+    return (Floor.query.filter_by(active=True)
+            .order_by(Floor.location_id, Floor.sort_order, Floor.name).all())
 
 
 @inventory_bp.route("/")
@@ -163,6 +169,7 @@ def new_product():
                 color=request.form.get("color", ""),
                 size=request.form.get("size", ""),
                 fabric=request.form.get("fabric", ""),
+                floor_id=request.form.get("floor_id", type=int) or None,
             )
             db.session.add(p)
             db.session.flush()
@@ -177,7 +184,8 @@ def new_product():
             db.session.rollback()
             flash(f"Error: {e}", "danger")
     return render_template("inventory/form.html", product=None,
-                           category_groups=category_groups, prefill=prefill)
+                           category_groups=category_groups, prefill=prefill,
+                           floors=_floors())
 
 
 @inventory_bp.route("/<int:pid>/edit", methods=["GET", "POST"])
@@ -201,6 +209,7 @@ def edit_product(pid):
         p.color = request.form.get("color", "")
         p.size = request.form.get("size", "")
         p.fabric = request.form.get("fabric", "")
+        p.floor_id = request.form.get("floor_id", type=int) or None
         if p.stock_qty != old_stock:
             db.session.add(StockMovement(
                 product_id=p.id, change=p.stock_qty - old_stock,
@@ -214,7 +223,8 @@ def edit_product(pid):
     # stale list of them would be worse than none.
     units = warehouse_items.fetch_units(p.warehouse_id) if p.warehouse_id else []
     return render_template("inventory/form.html", product=p, units=units,
-                           category_groups=grouped_categories())
+                           category_groups=grouped_categories(),
+                           floors=_floors())
 
 
 @inventory_bp.route("/<int:pid>/delete", methods=["POST"])

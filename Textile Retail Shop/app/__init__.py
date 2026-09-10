@@ -161,6 +161,7 @@ def create_app(config_class=Config):
     from app.routes.delivery import delivery_bp
     from app.routes.promotions import promotions_bp
     from app.routes.stores import stores_bp
+    from app.routes.audits import audits_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
@@ -176,6 +177,7 @@ def create_app(config_class=Config):
     app.register_blueprint(delivery_bp, url_prefix="/delivery")
     app.register_blueprint(promotions_bp, url_prefix="/promotions")
     app.register_blueprint(stores_bp, url_prefix="/stores")
+    app.register_blueprint(audits_bp, url_prefix="/audits")
 
     # A product detailed and posted from the warehouse's mobile app should be in
     # the shop by the time anyone looks, without a restart or a button. Checking

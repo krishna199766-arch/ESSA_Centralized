@@ -73,7 +73,7 @@
          bill carries the authority and the till repaints from it. #}
       <span id="billNoBox" class="badge {{ 'text-bg-dark' if next_bill.mapped else 'text-bg-secondary' }}"
             style="font-size:.95rem"
-            title="{{ 'Next bill on ' ~ next_bill.floor if next_bill.mapped else 'This till is not mapped to a floor, so it bills on the shop’s plain series' }}">
+            title="{{ 'Next bill on ' ~ next_bill.floor if next_bill.mapped else 'No floor is set for this till, so it bills on the shop’s plain series' }}">
         Bill No: <span id="pbBillNo">{{ next_bill.number }}</span>
       </span>
       <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal"
@@ -83,9 +83,10 @@
   {% if not next_bill.mapped %}
   <div id="pbUnmapped" class="small mt-1" style="color:#8a6d3b">
     <i class="bi bi-exclamation-triangle"></i>
-    This till is not mapped to a floor, so its bills are numbered
-    <code>{{ next_bill.number }}</code> rather than <code>TG{{ next_bill.fin_year or '' }}-001</code>.
-    A manager can map it under <b>Floors &amp; tills</b>.
+    No floor is set for this till, so its bills are numbered
+    <code>{{ next_bill.number }}</code> rather than from a floor's own series.
+    Press <b>Change</b> and pick the floor you are on — or ask a manager to put
+    this till on one for good, in the warehouse's <b>Locations</b> screen.
   </div>
   {% endif %}
 </div>
