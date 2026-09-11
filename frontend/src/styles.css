@@ -1968,3 +1968,75 @@ table.items tbody tr.sel { background: var(--brand-100); }
   padding-left: var(--sp-4); border-left: 1px solid var(--line); }
 .lockids .lockids { margin-bottom: var(--sp-2); }
 .locempty { color: var(--muted); padding: 2px 0 var(--sp-1); font-style: italic; }
+
+/* ==========================================================================
+   Physical Stock Audit
+   --------------------------------------------------------------------------
+   A counting screen, and the shape follows from that: a rail of filters that
+   says WHAT is being counted, a strip of four figures that says how it is
+   going, a wide grid read across one row per item, and an action bar at the
+   foot carrying the reason and the steps between counting and correcting.
+
+   The grid is the screen. It gets its own scroll container rather than riding
+   the body's, so the four figures and the scan box stay put while a thousand
+   rows move under them — on a count you look at the tally constantly, and a
+   total that scrolls off is a total nobody reads.
+   ========================================================================== */
+.psafilters { padding: var(--sp-3); display: flex; flex-direction: column;
+  gap: var(--sp-3); overflow-y: auto; }
+.psafilters .row { display: grid; grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2) var(--sp-3); align-items: end; }
+.psafilters .field { margin: 0; min-width: 0; }
+.psafilters .field select, .psafilters .field input { width: 100%; }
+.psanote { color: var(--muted); line-height: var(--lh); margin: 0; }
+.psanote.warn { color: var(--warn); }
+
+/* A tickbox row reads label-first, like the reference screen and like a form
+   somebody fills in: the name of the thing, then the state of it. */
+.psacheck { display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-sm); cursor: pointer; padding: 3px 0; }
+.psacheck span { flex: 1; min-width: 0; }
+.psacheck input { width: auto; accent-color: var(--brand); cursor: pointer; }
+
+/* ---------- the tally ---------- */
+.psastrip { display: flex; align-items: stretch; gap: var(--sp-5);
+  flex-wrap: wrap; padding: var(--sp-3) 0 var(--sp-2);
+  border-bottom: 1px solid var(--line); }
+.psatile { display: flex; align-items: baseline; gap: var(--sp-3); }
+.psatile-l { font-size: var(--fs-xs); text-transform: uppercase;
+  letter-spacing: .5px; color: var(--muted); font-weight: 700; }
+/* Tabular figures, so a column of counts lines up digit under digit — the one
+   thing an auditor does with these numbers is compare them. */
+.psatile-v { font-size: var(--fs-xl); font-weight: 700;
+  font-variant-numeric: tabular-nums; }
+.psatile-v.ok { color: var(--ok); }
+.psatile-v.danger { color: var(--danger); }
+.psatile-s { font-size: var(--fs-md); color: var(--muted); font-weight: 600; }
+.psaid { display: flex; align-items: center; gap: var(--sp-2); }
+.psalegend { color: var(--muted); line-height: var(--lh);
+  padding: var(--sp-2) 0 0; margin: 0; }
+
+/* ---------- the grid ---------- */
+.psascan { margin: 0; flex: 1 1 320px; max-width: 420px; }
+.psascan input { width: 100%; }
+.psagrid { overflow: auto; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--panel);
+  margin-top: var(--sp-2); }
+.psagrid table.items { min-width: 1180px; }
+.psagrid table.items th { white-space: nowrap; }
+.psagrid table.items td { white-space: nowrap; }
+/* The count box is the only writable cell and says so — every other column on
+   the row is a fact about the item, and typing into one would be a mistake. */
+.psagrid td.num input { text-align: right; background: var(--brand-50);
+  border-color: transparent; }
+.psagrid td.num input:hover { border-color: var(--line-strong); }
+.psagrid td.num input:focus { background: var(--panel); }
+.psadiff { margin-left: 6px; font-variant-numeric: tabular-nums;
+  font-weight: 700; color: var(--muted); }
+
+/* ---------- the foot ---------- */
+.psafoot { display: flex; align-items: flex-end; gap: var(--sp-3);
+  flex-wrap: wrap; padding: var(--sp-3) 0 var(--gutter);
+  border-top: 1px solid var(--line); margin-top: var(--sp-3); }
+.psareason { margin: 0; flex: 1 1 340px; max-width: 560px; }
+.psareason input { width: 100%; }

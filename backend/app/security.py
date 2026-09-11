@@ -57,6 +57,10 @@ WAREHOUSE_SCOPED = {
     # this list, because somebody physically walked them. Two counts of two
     # warehouses appearing as one would be a count of nothing.
     "stock_audit",
+    # The counted stocktake, for the same reason and rather more so: its variance
+    # is measured against ONE building's balances, and a count that spanned two
+    # would report each as short by whatever the other holds.
+    "physical_audit",
     "labelprint", "outward", "inward", "returns", "deadstock", "reports",
 }
 
@@ -116,6 +120,13 @@ POLICY = [
     # module was written for. Its own prefix, so it is not governed by the
     # inventory screen's grants even though it reads through them.
     (r"^/api/stock-audit", "user", "user", "stock_audit"),
+    # Correcting the books off a count is the one act in this module that moves
+    # stock, and it is admin — matched off ABOVE the prefix it sits inside, or the
+    # floor would inherit it. Everything else here is floor work: walking a rack,
+    # typing what is on it, and saying the sheet is finished are all done by the
+    # people who count, and none of them changes a balance.
+    (r"^/api/physical-audit/[0-9]+/apply", "admin", "admin", "physical_audit"),
+    (r"^/api/physical-audit", "user", "user", "physical_audit"),
     # What things sell for. READ by the floor — a price is on every screen that
     # quotes one — and CHANGED only by admin, because it is money and a bulk
     # change moves thousands of them at once. Not warehouse-scoped: a product is

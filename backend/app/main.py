@@ -12,7 +12,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from .database import Base, engine
 from . import models  # noqa: F401  (register tables)
 from .routers import (documents, suppliers, purchases, purchase_orders,
-                      inventory, outward, pricing, stock_audit,
+                      inventory, outward, pricing, stock_audit, physical_audit,
                       payments, returns, reports, settings, auth, masters, lr,
                       bundles, dashboard, master_data, labels, dead_stock,
                       notifications, voice, users, locations, catalogues)
@@ -590,6 +590,7 @@ app.include_router(suppliers.router)
 app.include_router(purchase_orders.router)
 app.include_router(pricing.router)
 app.include_router(stock_audit.router)
+app.include_router(physical_audit.router)
 app.include_router(purchases.router)
 app.include_router(inventory.router)
 app.include_router(outward.router)

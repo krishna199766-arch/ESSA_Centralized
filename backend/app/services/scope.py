@@ -102,6 +102,15 @@ def audit_sessions(query, warehouse_id):
                include_unassigned=False)
 
 
+def physical_audits(query, warehouse_id):
+    """Counted stocktakes of this building. Scoped exactly as `audit_sessions`
+    is, and for the same reason: somebody walked THESE racks, so a count with no
+    warehouse is not "might be ours" — and one warehouse's count appearing inside
+    another's screen would be measured against the wrong shelves."""
+    return own(query, models.PhysicalAudit.warehouse_id, warehouse_id,
+               include_unassigned=False)
+
+
 def purchase_orders(query, warehouse_id):
     """Orders raised here.
 

@@ -97,6 +97,17 @@ const J = async (r) => {
   return r.json()
 }
 
+// A JSON POST that keeps the server's sentence when it refuses.
+//
+// The pattern below it — `.then(async r => { … throw Object.assign(…) })` — is
+// written out by hand at forty call sites and is the same eight lines each time.
+// One screen whose every action can legitimately be refused with a reason worth
+// reading is enough to justify naming it.
+const PJ = (url, body) => fetch(url, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body || {}),
+}).then(J)
+
 // One file, as multipart. No Content-Type is set on purpose: the browser has to
 // write it itself so it can add the multipart boundary, and setting it by hand
 // produces a body the server cannot parse.
@@ -678,6 +689,43 @@ export const api = {
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('audit'), { detail: j.detail }); return j }),
   auditDropScan: (id, scanId) => fetch(`/api/stock-audit/${id}/scans/${scanId}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('audit'), { detail: j.detail }); return j }),
+
+  // ------------------------------------------------------------------------
+  //  Physical Stock Audit — counting the warehouse by QUANTITY
+  //  ----------------------------------------------------------------------
+  //  The other audit, and not a bigger version of the one above. That one asks
+  //  "is this on the shelf" and answers per tag; this asks "how many are there"
+  //  over a filtered set of stock and ends in a variance somebody approves.
+  //
+  //  Every call here carries the server's own sentence on refusal rather than a
+  //  status code, because most of them CAN refuse for a reason a person needs to
+  //  read — the count is closed, the item is outside the filters, no change
+  //  reason was given. `PJ` is that: J, plus the detail.
+  // ------------------------------------------------------------------------
+  psaOptions: () => fetch('/api/physical-audit/options').then(J),
+  psaPreview: (filters) => PJ('/api/physical-audit/preview', { filters }),
+  psaCurrent: () => fetch('/api/physical-audit/current').then(J),
+  psaList: () => fetch('/api/physical-audit').then(J),
+  psaGet: (id) => fetch(`/api/physical-audit/${id}`).then(J),
+  psaOpen: (filters, note) => PJ('/api/physical-audit/open', { filters, note: note || null }),
+  // A blank qty CLEARS the row — "nobody has counted this" is a real state and
+  // is not the same as zero. See services/physical_audit.clear.
+  psaCount: (id, lineId, qty, note) =>
+    PJ(`/api/physical-audit/${id}/lines/${lineId}/count`,
+      { qty: qty === '' || qty == null ? null : Number(qty), note }),
+  psaScan: (id, code, qty) => PJ(`/api/physical-audit/${id}/scan`, { code, qty: qty || 1 }),
+  psaAdd: (id, productId) => PJ(`/api/physical-audit/${id}/add/${productId}`, {}),
+  psaDropLine: (id, lineId) => fetch(`/api/physical-audit/${id}/lines/${lineId}`,
+    { method: 'DELETE' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('psa'), { detail: j.detail }); return j }),
+  psaUpload: (id, rows) => PJ(`/api/physical-audit/${id}/upload`, { rows }),
+  psaSync: (id) => PJ(`/api/physical-audit/${id}/synchronize`, {}),
+  psaStatus: (id, status) => PJ(`/api/physical-audit/${id}/status`, { status }),
+  psaApply: (id, reason) => PJ(`/api/physical-audit/${id}/apply`, { reason }),
+  psaReason: (id, change_reason) => fetch(`/api/physical-audit/${id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ change_reason }) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('psa'), { detail: j.detail }); return j }),
 
   poExtractStatus: () => fetch('/api/purchase-orders/extract/status').then(J),
   poExtract: (file) => { const fd = new FormData(); fd.append('file', file)

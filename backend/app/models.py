@@ -816,6 +816,145 @@ class AuditScan(Base):
     product = relationship("Product")
 
 
+class PhysicalAudit(Base):
+    """A counted stocktake of a warehouse: how many are there, against how many
+    the books say — and, once somebody approves it, the correction.
+
+    THE SECOND AUDIT, AND DELIBERATELY NOT THE FIRST ONE AGAIN. `AuditSession`
+    above asks *is this item on the shelf* — one row per tag read, a presence
+    check somebody walks a rack with a phone to answer. This asks *how many*, and
+    that is a different document: it is opened over a defined SET of stock (the
+    filters on the left of the screen, snapshotted in `scope`), every line
+    carries a figure whether or not anybody has been to look at it yet, and the
+    gap between counted and expected is the finding. Folding the two together
+    would mean one of the two questions could no longer be asked.
+
+    A COUNT IS STILL NOT AN ADJUSTMENT. Counting writes nothing to the ledger.
+    The variance becomes real stock only through `apply` — after the count has
+    been completed, reviewed and approved — and then only as StockMovement rows
+    carrying `change_reason`, never as a silent write of a balance. That is the
+    same rule `AuditSession` keeps and the same one the shop's own audit keeps
+    (Textile Retail Shop/app/audits.py); this module is the one that finally has
+    a way THROUGH it, rather than an exception to it.
+
+    `scope` is the filter set the count was opened over, kept as JSON. A count of
+    "MENS / BRAND=YUVA / SIZE=XL" that later reads as a count of the whole
+    warehouse would report every other rack as missing, so what was being counted
+    is part of the record rather than something to reconstruct afterwards.
+    """
+    __tablename__ = "physical_audits"
+    id = Column(Integer, primary_key=True)
+    code = Column(String, index=True)                  # PSA-00001
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), index=True)
+    #: counting | completed | reviewed | approved | cancelled
+    status = Column(String, default="counting", index=True)
+    note = Column(String)
+    #: Why the books are being corrected — the box at the foot of the screen. It
+    #: rides onto every movement `apply` writes, because an adjustment nobody can
+    #: explain six months later is an adjustment nobody can defend.
+    change_reason = Column(String)
+    #: What was being counted: {warehouse, supplier, brand, size, …}. See above.
+    scope = Column(JSON)
+    started_at = Column(DateTime, default=now)
+    started_by = Column(String)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String)
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(String)
+    approved_at = Column(DateTime, nullable=True)
+    approved_by = Column(String)
+    #: When the variance was written into the ledger. Set once, and checked
+    #: before writing, so an approved count cannot correct the same shelf twice.
+    applied_at = Column(DateTime, nullable=True)
+    applied_by = Column(String)
+
+    warehouse = relationship("Warehouse")
+    lines = relationship("PhysicalAuditLine", back_populates="audit",
+                         cascade="all, delete-orphan",
+                         order_by="PhysicalAuditLine.id")
+
+    @property
+    def is_open(self):
+        return self.status == "counting"
+
+
+class PhysicalAuditLine(Base):
+    """One stock item on a count: what the books said, and what was on the shelf.
+
+    EVERY DESCRIPTIVE FIELD IS COPIED, NOT JOINED, for the reason `AuditScan`
+    gives above and one more: this grid is read across, so the brand, size and
+    design a counter was looking at when they typed a figure have to be the ones
+    that print on the variance report months later. A product re-detailed in the
+    meantime must not rewrite what somebody counted.
+
+    `counted_qty` IS NULL UNTIL SOMEBODY LOOKS. Null and zero are the two
+    findings a count must never confuse — "nobody has been to this rack" and "the
+    rack is empty" — and only the first may be left out of an adjustment. A
+    single quantity box cannot say the first, which is why `clear_count` exists
+    as its own action rather than as typing a blank.
+
+    `uan` is this system's own unique article number, which is `Product.sku`
+    (ESSA-00001). The reference ERP's grid shows it beside Barcode because the
+    two are different identifiers with different owners: the barcode is the
+    supplier's, printed on the garment before it ever reached us, and is
+    routinely blank or shared; the UAN is ours and is never either.
+    """
+    __tablename__ = "physical_audit_lines"
+    id = Column(Integer, primary_key=True)
+    audit_id = Column(Integer, ForeignKey("physical_audits.id"), index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+
+    # --- identity, as it stood when the line was made ---
+    uan = Column(String, index=True)               # our SKU, ESSA-00001
+    barcode = Column(String, index=True)           # the supplier's, if there is one
+    description = Column(String)
+    section = Column(String)                       # category_section: MENS | LADIES | …
+    category = Column(String)
+    brand = Column(String)
+    size = Column(String)
+    design_no = Column(String)
+    color = Column(String)
+
+    # --- the books, frozen when the line appeared ---
+    system_qty = Column(Float, default=0.0)        # "Stock" on the grid
+    cost_price = Column(Float)                     # weighted-average cost, here
+    net_price = Column(Float)                      # what it sells for
+
+    # --- what was found ---
+    #: NULL until counted. See the class note — this is the load-bearing null.
+    counted_qty = Column(Float, nullable=True)
+    #: How many times a tag for this line was read or uploaded. A count typed by
+    #: hand leaves it at zero, which is itself worth seeing on a variance report.
+    scans = Column(Integer, default=0)
+    #: opened | scanned | uploaded | added — how this line got onto the count. A
+    #: line that arrived by SCAN and not from the filtered set is stock found
+    #: where the filters said it would not be, and that is a finding in itself.
+    source = Column(String, default="opened")
+    counted_at = Column(DateTime, nullable=True)
+    counted_by = Column(String)
+    note = Column(String)
+
+    audit = relationship("PhysicalAudit", back_populates="lines")
+    product = relationship("Product")
+
+    @property
+    def difference(self):
+        """Counted minus the books. None while nobody has looked."""
+        if self.counted_qty is None:
+            return None
+        return round(float(self.counted_qty) - float(self.system_qty or 0), 3)
+
+    @property
+    def line_status(self):
+        """pending · matched · short · excess — what the row's chip says."""
+        gap = self.difference
+        if gap is None:
+            return "pending"
+        if gap == 0:
+            return "matched"
+        return "short" if gap < 0 else "excess"
+
+
 class StockMovement(Base):
     """Append-only ledger. Every stock change is a row with the running balance,
     so inventory is always reconstructable and auditable.

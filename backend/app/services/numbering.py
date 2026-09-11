@@ -61,6 +61,11 @@ DOCS = {
                     "use_year": False},
     "stock_audit": {"label": "Stock Audit",      "prefix": "AUD-",  "padding": 5,
                     "use_year": False},
+    # The counted stocktake, which is a different document from the scan-through
+    # above and must never share its series — two audits numbered AUD-00012 is
+    # exactly the confusion the two names were chosen to avoid.
+    "physical_audit": {"label": "Physical Stock Audit", "prefix": "PSA-", "padding": 5,
+                       "use_year": False},
     "pos_invoice": {"label": "POS Invoice",      "prefix": "POS-",  "padding": 5,
                     "use_year": False},
     "price_revision": {"label": "Price Revision", "prefix": "PRC-", "padding": 5,

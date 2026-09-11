@@ -7117,6 +7117,738 @@ function StockAuditView({ toast }) {
   )
 }
 
+// ==========================================================================
+//  Physical Stock Audit — counting the warehouse by quantity
+//  ------------------------------------------------------------------------
+//  The OTHER audit, and the reason both exist is that they answer different
+//  questions. The scan-through above asks "is this item on the shelf" and
+//  answers one tag at a time. This asks "HOW MANY are there" over a defined set
+//  of stock, and ends in a variance that somebody approves and that then
+//  corrects the books.
+//
+//  So it is a grid, not a scan box. A count of a rack is read across — barcode,
+//  what it is, how many the books say, how many are there — and compared down.
+//  A card per reading would make the one comparison the screen exists for the
+//  hardest thing on it.
+//
+//  THE PANEL ON THE LEFT IS NOT A SEARCH BOX. Nobody counts a warehouse; they
+//  count the MENS rack, or one brand, or one supplier's goods. What it is set to
+//  when the count is opened IS the count — it is snapshotted onto the document
+//  and the variance is only measured inside it — which is why Search (how much
+//  would this cover?) and New (start counting it) are two buttons rather than
+//  one. See services/physical_audit.
+//
+//  Nothing here moves stock. The toolbar at the foot walks a count through
+//  complete → reviewed → approved, and only then does Apply write real stock
+//  movements, carrying the change reason typed beside it.
+// ==========================================================================
+
+//: The panel, in the two columns the reference screen puts them in. Declared as
+//: data because it is eighteen near-identical fields and writing them out is
+//: eighteen chances to bind one to the wrong key — which is a filter that
+//: silently stops filtering, the failure this screen can least afford.
+//: `[key, label]`, paired across the row; `null` is a field that spans both.
+const PSA_FILTER_ROWS = [
+  [['product', 'Product'], ['brand', 'Brand']],
+  [['colour', 'Colour'], ['material', 'Material']],
+  [['pattern', 'Pattern'], ['style', 'Style']],
+  [['sleeve', 'Sleeve'], ['fit', 'Fit']],
+  [['size', 'Size'], ['type', 'Type']],
+  [['section', 'Section'], ['design', 'Design']],
+]
+
+//: What each tickbox actually does here, said in full. These are the three
+//: controls on the screen whose names come from the reference ERP and whose
+//: behaviour is this system's, so the gap between the two belongs on the screen
+//: rather than in a note somebody has to be told about.
+const PSA_TOGGLES = [
+  ['direct_edit', 'Direct Add/Remove',
+    'Lets the count take in items found outside its filters, and lets an '
+    + 'uncounted row be removed. Off, a count of one rack stays a count of that '
+    + 'rack and a stray tag is refused rather than quietly widening it.'],
+  ['show_all', 'Show All Rows',
+    'Lists every item in the count, including the ones nobody has reached yet. '
+    + 'Off, the grid shows only what has actually been counted — which is what '
+    + 'you want while working down a rack.'],
+  ['remove_sales', 'Remove Sales',
+    'Leaves a shortfall alone when at least that much was dispatched from here '
+    + 'after the row was counted. The lorry explains the gap, so correcting it '
+    + 'would write off goods that are in transit.'],
+]
+
+//: Grid column per filter key — the client-side half of PRODUCT_FILTERS in
+//: services/physical_audit. Kept here rather than shared with the server's
+//: because it maps FILTER KEY to the name the API hands back on a LINE, which is
+//: a different mapping from the server's (filter key to Product column) and
+//: would be quietly wrong if either were used for the other.
+const PRODUCT_FILTER_COLUMNS = {
+  section: 'section', brand: 'brand', size: 'size', design: 'design',
+  colour: 'colour', product: 'category',
+}
+
+// One attribute dropdown on the rail.
+//
+// AT MODULE LEVEL, NOT INSIDE THE SCREEN. A component declared inside another is
+// a NEW component type on every render, so React unmounts the old subtree and
+// mounts a fresh one — and a <select> that is remounted loses focus mid-use. The
+// screen re-renders on every keystroke in the scan box, which is exactly when
+// somebody is least able to afford the rail resetting under them.
+function PsaDropdown({ name, label, value, options, onChange }) {
+  const list = options || []
+  return (
+    <div className="field">
+      <label>{label}</label>
+      <select value={value || ''} onChange={onChange}
+        title={list.length
+          ? `Narrow to one ${label.toLowerCase()} — ${list.length} on these shelves`
+          : `No ${label.toLowerCase()} is recorded against this warehouse's stock`}>
+        <option value="">{list.length ? 'Any' : '— none recorded —'}</option>
+        {list.map((v) => <option key={v} value={v}>{v}</option>)}
+      </select>
+    </div>
+  )
+}
+
+const PSA_STATUS_BADGE = {
+  counting: 'pending', completed: 'review', reviewed: 'posted',
+  approved: 'confirmed', cancelled: 'cancelled',
+}
+//: The row chips. `pending` deliberately reads "not counted" rather than "0" —
+//: see the null-is-not-zero rule the whole module is built on.
+const PSA_LINE_BADGE = {
+  pending: ['draft', 'not counted'], matched: ['confirmed', 'matches'],
+  short: ['cancelled', 'short'], excess: ['review', 'excess'],
+}
+
+// One tile of the strip across the top. `sub` is the second figure the
+// reference screen shows beside Valid as "n + m".
+function PsaTotal({ label, value, sub, tone }) {
+  return (
+    <div className="psatile">
+      <span className="psatile-l">{label}</span>
+      <span className={'psatile-v' + (tone ? ' ' + tone : '')}>
+        {value}
+        {sub != null && <span className="psatile-s"> + {sub}</span>}
+      </span>
+    </div>
+  )
+}
+
+function PhysicalAuditView({ toast, role }) {
+  const [options, setOptions] = useState(null)
+  const [filters, setFilters] = useState({})
+  const [audit, setAudit] = useState(undefined)   // undefined = not asked yet
+  const [past, setPast] = useState([])
+  const [viewing, setViewing] = useState(null)    // a finished count being read
+  const [preview, setPreview] = useState(null)
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [reason, setReason] = useState('')
+  const [search, setSearch] = useState('')
+  const [sel, setSel] = useState(() => new Set())
+  const box = useRef(null)
+  const file = useRef(null)
+
+  const loadPast = useCallback(
+    () => api.psaList().then(setPast).catch(() => {}), [])
+  useEffect(() => {
+    api.psaOptions().then(setOptions).catch(() => setOptions({}))
+    api.psaCurrent().then((a) => { setAudit(a); setReason(a?.change_reason || '') })
+      .catch(() => setAudit(null))
+    loadPast()
+  }, [loadPast])
+
+  const shown = viewing || audit
+  const open = !viewing && shown?.status === 'counting'
+  const totals = shown?.totals || {}
+  // Once a count is open its own filters are the truth about what is being
+  // counted; the panel then narrows what is DRAWN, which is a different job. The
+  // two are the same control because they are the same question asked before and
+  // during — but the screen says which it is doing, under the buttons.
+  const live = shown ? (shown.scope || {}) : filters
+
+  const rows = useMemo(() => {
+    let list = shown?.lines || []
+    // Show All Rows is view state and only view state — never read off the
+    // count, which is why the server does not keep it. See OTHER_FILTERS.
+    if (!filters.show_all) list = list.filter((l) => l.qty != null)
+    Object.entries(PRODUCT_FILTER_COLUMNS).forEach(([key, field]) => {
+      const want = filters[key]
+      if (want) list = list.filter((l) => (l[field] || '') === want)
+    })
+    if (filters.barcode) {
+      const want = String(filters.barcode).trim().toLowerCase()
+      const kind = filters.barcode_type || 'any'
+      const hit = (l) => (kind !== 'supplier' && (l.uan || '').toLowerCase() === want)
+        || (kind !== 'uan' && (l.barcode || '').toLowerCase() === want)
+      list = list.filter(hit)
+    }
+    if (search) {
+      list = list.filter((l) => matches(l, search,
+        ['barcode', 'uan', 'product', 'section', 'brand', 'size', 'design']))
+    }
+    return list
+  }, [shown, filters, live, search])
+  const paged = usePaged(rows, 100)
+
+  const set = (key) => (e) => {
+    const el = e.target
+    setFilters((f) => ({ ...f, [key]: el.type === 'checkbox' ? el.checked : el.value }))
+    setPreview(null)
+  }
+  // What the count is narrowed BY. The three tickboxes and the tag-type selector
+  // are not narrowings — they change how counting behaves, not what is in scope —
+  // so a screen showing "3 filters set" when only they are ticked would be
+  // counting the wrong thing out loud.
+  const activeFilters = Object.entries(filters).filter(
+    ([k, v]) => v !== '' && v != null && v !== false && v !== 'any'
+      && !['show_all', 'direct_edit', 'remove_sales', 'barcode_type'].includes(k)).length
+
+  const refresh = async (id) => {
+    const fresh = await api.psaGet(id ?? shown.id)
+    if (viewing) setViewing(fresh); else setAudit(fresh)
+    return fresh
+  }
+
+  // --- the toolbar ---------------------------------------------------------
+  const doSearch = async () => {
+    // With a count open this is a filter on the grid and has already happened as
+    // the dropdowns changed. With none, it answers the question that has to be
+    // settled BEFORE a document is raised: how much is this?
+    if (shown && open) { toast(`${rows.length} of ${shown.lines.length} rows shown`, 'ok'); return }
+    setBusy(true)
+    try {
+      const p = await api.psaPreview(filters)
+      setPreview(p)
+      toast(`${p.items} item${p.items === 1 ? '' : 's'} · ${p.qty} piece${p.qty === 1 ? '' : 's'}`, 'ok')
+    } catch (e) { toast(e.detail || 'Could not read that filter set', 'err') }
+    finally { setBusy(false) }
+  }
+
+  const doNew = async () => {
+    const what = preview ? `${preview.items} items (${preview.qty} pieces)` : 'the filtered stock'
+    if (!window.confirm(
+      `Open a physical stock audit over ${what}?\n\n`
+      + 'The filters as they stand become the count — it is measured only against '
+      + 'what they cover. Counting changes no stock by itself.')) return
+    setBusy(true)
+    try {
+      const a = await api.psaOpen(filters)
+      setAudit(a); setViewing(null); setReason(''); setPreview(null); loadPast()
+      toast(`${a.code} open · ${a.lines.length} rows`, 'ok')
+    } catch (e) { toast(e.detail || 'Could not open a count', 'err') }
+    finally { setBusy(false) }
+  }
+
+  // A handheld's file: `code,qty` per line, and a bare code counts as one. CSV
+  // and plain text both, because a scanner's export is whichever its vendor
+  // chose and neither is worth refusing over a comma.
+  const doUpload = async (f) => {
+    if (!f || !shown) return
+    setBusy(true)
+    try {
+      const text = await f.text()
+      const parsed = text.split(/\r?\n/).map((line) => line.trim())
+        .filter((line) => line && !/^(code|barcode)\s*[,;\t]/i.test(line))
+        .map((line) => {
+          const [c, q] = line.split(/[,;\t]/)
+          return { code: (c || '').trim(), qty: q == null || q === '' ? 1 : Number(q) }
+        })
+        .filter((r) => r.code && !isNaN(r.qty))
+      if (!parsed.length) { toast('That file held no readable codes', 'err'); return }
+      const res = await api.psaUpload(shown.id, parsed)
+      await refresh()
+      const missed = res.unknown_count + res.off_scope_count
+      toast(`${res.applied} row${res.applied === 1 ? '' : 's'} taken`
+        + (res.added ? ` · ${res.added} added` : '')
+        + (missed ? ` · ${missed} could not be placed` : ''), missed ? 'warn' : 'ok')
+    } catch (e) { toast(e.detail || 'Could not read that file', 'err') }
+    finally { setBusy(false); if (file.current) file.current.value = '' }
+  }
+
+  const doSync = async () => {
+    setBusy(true)
+    try {
+      const r = await api.psaSync(shown.id)
+      setAudit(r.audit)
+      toast(r.refreshed || r.added
+        ? `${r.refreshed} figure${r.refreshed === 1 ? '' : 's'} updated · ${r.added} new item${r.added === 1 ? '' : 's'}`
+        : 'Already up to date', 'ok')
+    } catch (e) { toast(e.detail || 'Could not synchronize', 'err') }
+    finally { setBusy(false) }
+  }
+
+  // --- counting ------------------------------------------------------------
+  const submitCode = async (raw) => {
+    const c = (raw ?? code).trim()
+    if (!c || !shown) return
+    setCode('')
+    try {
+      const r = await api.psaScan(shown.id, c)
+      await refresh()
+      if (r.message) toast(r.message, 'warn')
+      // A gun fires one code after another; the box has to be ready for the next
+      // without anybody reaching for the mouse.
+      box.current?.focus()
+    } catch (e) { toast(e.detail || 'That tag could not be counted', 'err') }
+  }
+
+  const setCount = async (line, value) => {
+    try {
+      await api.psaCount(shown.id, line.id, value === '' ? null : value)
+      await refresh()
+    } catch (e) { toast(e.detail || 'Could not record that count', 'err') }
+  }
+
+  const dropLine = async (line) => {
+    try { await api.psaDropLine(shown.id, line.id); await refresh() }
+    catch (e) { toast(e.detail || 'Could not remove that row', 'err') }
+  }
+
+  // --- the way through -----------------------------------------------------
+  const advance = async (status, question) => {
+    if (question && !window.confirm(question)) return
+    try {
+      await api.psaStatus(shown.id, status)
+      const fresh = await refresh()
+      loadPast()
+      toast(`${fresh.code} is ${status}`, 'ok')
+    } catch (e) { toast(e.detail || 'Could not move the count on', 'err') }
+  }
+
+  const saveReason = async () => {
+    if (!shown || reason === (shown.change_reason || '')) return
+    try { await api.psaReason(shown.id, reason) }
+    catch { /* typed and not yet saved; Apply sends it again anyway */ }
+  }
+
+  const doApply = async () => {
+    if (!reason.trim()) {
+      toast('Give a change reason first — it goes onto every movement', 'err')
+      return
+    }
+    const t = shown.totals || {}
+    if (!window.confirm(
+      `Correct stock from ${shown.code}?\n\n`
+      + `${t.variance_lines} row${t.variance_lines === 1 ? '' : 's'} disagree with the books. `
+      + `This writes real stock movements and cannot be run twice.\n\n`
+      + `Reason: ${reason.trim()}`)) return
+    setBusy(true)
+    try {
+      const r = await api.psaApply(shown.id, reason.trim())
+      await refresh(); loadPast()
+      const held = r.skipped_issued + r.skipped_no_product
+      toast(`${r.moved} line${r.moved === 1 ? '' : 's'} corrected`
+        + (r.uncounted ? ` · ${r.uncounted} never counted, left alone` : '')
+        + (held ? ` · ${held} held back` : ''), 'ok')
+    } catch (e) { toast(e.detail || 'Could not correct stock', 'err') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="screen">
+      <div className="pagehead">
+        <h2>Physical Stock Audit</h2>
+        <span className="small pagesub">
+          How many are there, against how many the books say.</span>
+        <div style={{ flex: 1 }} />
+        <button className="btn" disabled={busy} onClick={doSearch}
+          title={open
+            ? 'Apply the panel to what the grid shows'
+            : 'How much stock would these filters cover? Nothing is created.'}>
+          ⌕ Search</button>
+        <button className="btn primary" disabled={busy || open} onClick={doNew}
+          title={open
+            ? `${audit.code} is already being counted here — finish or cancel it first`
+            : 'Open a count over the filters on the left'}>
+          + New</button>
+        <button className="btn" disabled={busy || !open} onClick={() => file.current?.click()}
+          title={open
+            ? 'Take counts off a handheld scanner’s file (code, qty per line). Figures replace, so the same file twice is safe.'
+            : 'Open a count first'}>
+          ⭱ Upload</button>
+        <input ref={file} type="file" accept=".csv,.txt,text/csv,text/plain" hidden
+          onChange={(e) => doUpload(e.target.files?.[0])} />
+        <button className="btn" disabled={busy || !open} onClick={doSync}
+          title={open
+            ? 'Re-read the books for rows nobody has counted, and take in stock received since'
+            : 'Open a count first'}>
+          ⟳ Synchronize</button>
+      </div>
+
+      <div className="body">
+        <Sidebar id="psa-filters" label="Filters" width={340}>
+          <div className="head"><h3>
+            {shown ? 'Narrow the grid' : 'What to count'}
+            {activeFilters > 0 && <span className="badge pending">{activeFilters}</span>}
+          </h3></div>
+          <div className="psafilters">
+            <p className="small psanote">
+              {shown
+                ? <>These narrow what the grid <b>shows</b>. What <b>{shown.code}</b> covers
+                  was fixed when it was opened.</>
+                : <>Nobody counts a warehouse. Set what is being counted — these
+                  become the count and the variance is measured only inside them.</>}
+            </p>
+
+            <div className="row">
+              <div className="field">
+                <label>Search From</label>
+                <select value="warehouse" disabled
+                  title="A count is of one building's racks. The warehouse is the one you are working inside — switch it in the header to count another.">
+                  <option value="warehouse">{shown?.warehouse || 'This warehouse'}</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>Barcode Type</label>
+                <select value={filters.barcode_type || 'any'} onChange={set('barcode_type')}
+                  title="Which tag the scan box expects. Any accepts all of them — our QR, a per-piece code, the supplier's barcode or the SKU — which is what a mixed rack needs.">
+                  <option value="any">Any tag</option>
+                  <option value="uan">Our QR / UAN</option>
+                  <option value="supplier">Supplier barcode</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="row">
+              <div className="field">
+                <label>Company</label>
+                <select value={filters.company || ''} onChange={set('company')}
+                  title="The trading entity. A count is taken inside one warehouse, which already belongs to one company, so this rarely narrows anything further.">
+                  <option value="">Any</option>
+                  {(options?.company || []).map((c) =>
+                    <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Location</label>
+                <select value={filters.location || ''} onChange={set('location')}
+                  title="The rack a carton was put away on. Many installs record nothing here, and then the list is empty rather than wrong.">
+                  <option value="">{(options?.location || []).length ? 'Any' : '— none recorded —'}</option>
+                  {(options?.location || []).map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="field">
+              <label>Supplier</label>
+              <select value={filters.supplier || ''} onChange={set('supplier')}
+                title="Count one supplier's goods — what a claim against them usually starts as">
+                <option value="">Any</option>
+                {(options?.supplier || []).map((s) =>
+                  <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+
+            {PSA_FILTER_ROWS.map((pair, i) => (
+              <div className="row" key={i}>
+                {pair.map(([k, label]) => (
+                  <PsaDropdown key={k} name={k} label={label} value={filters[k]}
+                    options={options?.[k]} onChange={set(k)} />
+                ))}
+              </div>
+            ))}
+
+            <div className="field">
+              <label>Barcode</label>
+              <input value={filters.barcode || ''} onChange={set('barcode')}
+                placeholder="one exact tag"
+                title="Count a single item — its supplier barcode or its UAN" />
+            </div>
+
+            {PSA_TOGGLES.map(([k, label, why]) => (
+              <label className="psacheck" key={k} title={why}>
+                <span>{label}</span>
+                <input type="checkbox" checked={!!filters[k]} onChange={set(k)} />
+              </label>
+            ))}
+            {/* Two of the three change what the SERVER does, and it reads them off
+                the count rather than off this panel — so once a count is open,
+                ticking them here changes nothing and the screen has to say so
+                instead of looking broken. */}
+            {shown && (filters.direct_edit !== !!live.direct_edit
+              || filters.remove_sales !== !!live.remove_sales) && (
+              <p className="small psanote warn">
+                Direct Add/Remove and Remove Sales were fixed when {shown.code} was
+                opened ({live.direct_edit ? 'on' : 'off'} / {live.remove_sales ? 'on' : 'off'}).
+                Changing them here affects the next count.
+              </p>
+            )}
+
+            <div className="filterfoot" style={{ padding: '10px 0 0' }}>
+              <span className="small" style={{ color: 'var(--muted)' }}>
+                {preview
+                  ? `${preview.items} items · ${preview.qty} pieces`
+                  : activeFilters ? `${activeFilters} filter${activeFilters === 1 ? '' : 's'} set`
+                    : 'Everything in this warehouse'}
+              </span>
+              <div style={{ flex: 1 }} />
+              <button className="btn" disabled={!Object.values(filters).some(
+                (v) => v !== '' && v != null && v !== false && v !== 'any')}
+                onClick={() => { setFilters({}); setPreview(null) }}
+                title={activeFilters ? 'Remove every filter' : 'Nothing to clear'}>
+                Clear all</button>
+            </div>
+          </div>
+        </Sidebar>
+
+        <div className="screenbody tight">
+          {audit === undefined && <div className="empty">Reading the register…</div>}
+
+          {shown && (
+            <>
+              <div className="psastrip">
+                <PsaTotal label="Available" value={money(totals.available)} />
+                <PsaTotal label="Uploaded" value={money(totals.uploaded)} tone="ok" />
+                <PsaTotal label="Valid" value={totals.valid ?? 0}
+                  sub={totals.variance_lines ?? 0} />
+                <PsaTotal label="Missing" value={money(totals.missing)}
+                  tone={totals.missing > 0 ? 'danger' : ''} />
+                <div style={{ flex: 1 }} />
+                <div className="psaid">
+                  <b>{shown.code}</b>
+                  <span className={'badge ' + (PSA_STATUS_BADGE[shown.status] || 'draft')}>
+                    {shown.status}</span>
+                  {shown.applied_at && <span className="badge posted" title={
+                    `Stock corrected ${fmtDate(shown.applied_at)} by ${shown.applied_by || 'someone'}`}>
+                    applied</span>}
+                </div>
+              </div>
+
+              {/* What the four figures mean, said once on the screen rather than
+                  left for somebody to infer from a number that looks wrong. */}
+              <p className="small psalegend">
+                <b>Available</b> what the books say · <b>Uploaded</b> what has been
+                counted · <b>Valid</b> rows that agree + rows that do not ·
+                <b> Missing</b> pieces expected and not found.
+                {totals.pending_lines > 0 && <> {totals.pending_lines} row
+                  {totals.pending_lines === 1 ? '' : 's'} not counted yet
+                  {!(filters.show_all) && <> — tick <b>Show All Rows</b> to see them</>}.</>}
+                {totals.off_scope > 0 && <> {totals.off_scope} found off-scope.</>}
+              </p>
+
+              <div className="toolbar">
+                {open && (
+                  <div className="field psascan">
+                    <input ref={box} value={code} autoFocus
+                      placeholder="Scan or type a tag — each read adds one"
+                      onChange={(e) => setCode(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') submitCode() }}
+                      title="A QR, a per-piece code, a supplier barcode or a UAN. Scanning ADDS one; typing into a row's Count box states a total." />
+                  </div>
+                )}
+                <SearchBox value={search} onChange={setSearch}
+                  placeholder="Search these rows…" style={{ maxWidth: 240 }} />
+                <div style={{ flex: 1 }} />
+                {viewing && <button className="btn" onClick={() => setViewing(null)}>
+                  Back to the open count</button>}
+              </div>
+
+              <div className="psagrid">
+                <table className="items">
+                  <thead><tr>
+                    <th style={{ width: 30 }}>
+                      <input type="checkbox" title="Select every row shown"
+                        checked={rows.length > 0 && sel.size === rows.length}
+                        onChange={(e) => setSel(e.target.checked
+                          ? new Set(rows.map((l) => l.id)) : new Set())} /></th>
+                    <th style={{ width: 54 }}>Action</th>
+                    <th style={{ width: 130 }}>Barcode</th>
+                    <th style={{ width: 110 }}>UAN</th>
+                    <th>Product</th>
+                    <th style={{ width: 90 }}>Section</th>
+                    <th style={{ width: 90 }}>Brand</th>
+                    <th style={{ width: 70 }}>Size</th>
+                    <th style={{ width: 90 }}>Design</th>
+                    <th style={{ width: 60, textAlign: 'right' }} title="How many times a tag for this row was read">Count</th>
+                    <th style={{ width: 76, textAlign: 'right' }} title="What was actually on the shelf">Qty</th>
+                    <th style={{ width: 70, textAlign: 'right' }} title="What the books said when this row was counted">Stock</th>
+                    <th style={{ width: 90, textAlign: 'right' }}>Cost Price</th>
+                    <th style={{ width: 90, textAlign: 'right' }}>Net Price</th>
+                    <th style={{ width: 96 }}>Status</th>
+                  </tr></thead>
+                  <tbody>
+                    {paged.slice.map((l) => (
+                      <tr key={l.id} className={sel.has(l.id) ? 'sel' : ''}>
+                        <td><input type="checkbox" checked={sel.has(l.id)}
+                          onChange={(e) => setSel((s) => {
+                            const next = new Set(s)
+                            e.target.checked ? next.add(l.id) : next.delete(l.id)
+                            return next
+                          })} /></td>
+                        <td>
+                          {open && l.qty != null && (
+                            <button className="rowdel" title="Clear this count — back to never counted, which is not the same as zero"
+                              onClick={() => setCount(l, '')}>⌫</button>
+                          )}
+                          {open && l.qty == null && live.direct_edit && (
+                            <button className="rowdel" title="Take this row off the count"
+                              onClick={() => dropLine(l)}>×</button>
+                          )}
+                        </td>
+                        <td><code>{l.barcode || '—'}</code></td>
+                        <td><code>{l.uan || '—'}</code></td>
+                        <td title={l.location ? 'Put away at ' + l.location : undefined}>
+                          {l.product}
+                          {l.source !== 'opened' && (
+                            <span className="small" title="Not in the filtered set — found and taken onto the count"> · off-scope</span>
+                          )}
+                        </td>
+                        <td>{l.section || '—'}</td>
+                        <td>{l.brand || '—'}</td>
+                        <td>{l.size || '—'}</td>
+                        <td>{l.design || '—'}</td>
+                        <td style={{ textAlign: 'right' }}>{l.count || ''}</td>
+                        <td className="num">
+                          {open
+                            ? <input type="number" min="0" step="1"
+                              defaultValue={l.qty ?? ''} key={l.id + ':' + l.qty}
+                              placeholder="—"
+                              title="What is on the shelf. Empty means nobody has counted it yet — which is not zero."
+                              onBlur={(e) => {
+                                const v = e.target.value
+                                if (v === (l.qty == null ? '' : String(l.qty))) return
+                                setCount(l, v)
+                              }}
+                              onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }} />
+                            : (l.qty ?? <span className="small">—</span>)}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>{l.stock}</td>
+                        <td style={{ textAlign: 'right' }}>{money(l.cost_price)}</td>
+                        <td style={{ textAlign: 'right' }}>{money(l.net_price)}</td>
+                        <td>
+                          <span className={'badge ' + PSA_LINE_BADGE[l.status][0]}>
+                            {PSA_LINE_BADGE[l.status][1]}
+                          </span>
+                          {l.difference ? <span className="small psadiff">
+                            {l.difference > 0 ? '+' : ''}{l.difference}</span> : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {rows.length === 0 && (
+                  <div className="empty" style={{ margin: 30 }}>
+                    {shown.lines.length === 0 ? 'This count has no rows.'
+                      : filters.show_all
+                        ? 'Nothing matches those filters.'
+                        : 'Nothing counted yet. Scan a tag, type into a row, or tick '
+                          + 'Show All Rows to work down the whole list.'}
+                  </div>
+                )}
+              </div>
+              <Pager {...paged} noun="row" />
+
+              {/* The foot of the screen: why the books are being changed, and the
+                  steps between counting and changing them. Laid out in the order
+                  they happen, left to right, so what comes next is where the eye
+                  already is. */}
+              <div className="psafoot">
+                <div className="field psareason">
+                  <label>Change Reason</label>
+                  <input value={reason} onChange={(e) => setReason(e.target.value)}
+                    onBlur={saveReason} disabled={!!shown.applied_at}
+                    placeholder="Why the books are being corrected"
+                    title="Goes onto every stock movement this count writes. An adjustment nobody can explain later is one nobody can defend." />
+                </div>
+                <div style={{ flex: 1 }} />
+                {shown.status === 'counting' && (
+                  <button className="btn" onClick={() => advance('completed',
+                    `Finish counting ${shown.code}? It stops taking counts and goes for review.`)}>
+                    Complete</button>
+                )}
+                {shown.status === 'completed' && (<>
+                  <button className="btn" onClick={() => advance('counting')}
+                    title="Go back and count more">Re-open</button>
+                  <button className="btn" onClick={() => advance('reviewed')}>
+                    Reviewed</button>
+                </>)}
+                {shown.status === 'reviewed' && (<>
+                  <button className="btn" onClick={() => advance('completed')}>Back</button>
+                  <button className="btn primary" onClick={() => advance('approved',
+                    `Approve ${shown.code}? Approving does not move stock — Apply does.`)}>
+                    Approve</button>
+                </>)}
+                {shown.can_apply && (
+                  <button className="btn primary" disabled={busy || !atLeast(role, 'admin')}
+                    onClick={doApply}
+                    title={atLeast(role, 'admin')
+                      ? 'Write the variance into the ledger, once, with the reason above'
+                      : 'Correcting stock needs admin access — you are signed in as ' + role}>
+                    Apply to stock</button>
+                )}
+                {['counting', 'completed', 'reviewed'].includes(shown.status) && (
+                  <button className="btn" onClick={() => advance('cancelled',
+                    `Cancel ${shown.code}? Its readings are kept but it can never correct stock.`)}>
+                    Cancel</button>
+                )}
+              </div>
+            </>
+          )}
+
+          {audit === null && !viewing && (
+            <div className="empty" style={{ marginTop: 24, maxWidth: 620 }}>
+              No count in progress. Set the filters on the left to say what is being
+              counted, press <b>Search</b> to see how much that covers, then
+              <b> New</b> to open the count.
+            </div>
+          )}
+
+          <Section id="psa-history" title={`Past counts · ${past.length}`}
+            defaultOpen={!audit}>
+            {past.length === 0
+              ? <div className="empty" style={{ marginTop: 16 }}>No counts recorded yet.</div>
+              : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="items">
+                    <thead><tr>
+                      <th style={{ width: 110 }}>Count</th>
+                      <th style={{ width: 130 }}>Started</th>
+                      <th style={{ width: 110 }}>By</th>
+                      <th style={{ width: 70, textAlign: 'right' }}>Rows</th>
+                      <th style={{ width: 90, textAlign: 'right' }}>Counted</th>
+                      <th style={{ width: 90, textAlign: 'right' }}>Missing</th>
+                      <th style={{ width: 100 }}>Status</th>
+                      <th>Reason</th>
+                    </tr></thead>
+                    <tbody>
+                      {past.map((a) => (
+                        <tr key={a.id} style={{ cursor: 'pointer' }}
+                          title="Open this count"
+                          onClick={async () => {
+                            try {
+                              const full = await api.psaGet(a.id)
+                              if (full.status === 'counting') { setViewing(null); setAudit(full) }
+                              else setViewing(full)
+                              setReason(full.change_reason || '')
+                            } catch { toast('Could not open that count', 'err') }
+                          }}>
+                          <td><b>{a.code}</b></td>
+                          <td>{fmtDate(a.started_at)}</td>
+                          <td>{a.started_by || '—'}</td>
+                          <td style={{ textAlign: 'right' }}>{a.totals?.lines ?? 0}</td>
+                          <td style={{ textAlign: 'right' }}>{a.totals?.counted_lines ?? 0}</td>
+                          <td style={{ textAlign: 'right' }}>{money(a.totals?.missing)}</td>
+                          <td>
+                            <span className={'badge ' + (PSA_STATUS_BADGE[a.status] || 'draft')}>
+                              {a.status}</span>
+                            {a.applied_at && <span className="badge posted"> applied</span>}
+                          </td>
+                          <td className="small">{a.change_reason || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+          </Section>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function LREntryView({ toast }) {
   const [rows, setRows] = useState([])
   const [docId, setDocId] = useState(null)
@@ -13407,6 +14139,14 @@ const MODULES = [
   // excess and an approval before anything moves. One word for both would send
   // people to the wrong screen.
   { key: 'stock_audit', icon: '📋', label: 'Warehouse Stock Audit', blurb: 'Scan a rack — is each item where the books say? (a store floor is counted under POS)' },
+  // The second warehouse audit, and beside the first because the pair are chosen
+  // between rather than found separately. They are two questions about the same
+  // racks: that one asks IS IT HERE, one tag at a time, and answers with a
+  // presence check; this asks HOW MANY ARE HERE over a chosen set of stock, and
+  // ends in a variance somebody approves and that then corrects the books. The
+  // labels have to carry the difference, because a menu that said "Stock Audit"
+  // twice would be picked from at random.
+  { key: 'physical_audit', icon: '🧮', label: 'Physical Stock Audit', blurb: 'Count a rack by quantity against the books, and correct what is wrong' },
   // Beside the audit because both are about the product master rather than the
   // stock in it: one asks whether the count is right, this asks what the thing
   // sells for. Admin-only to change, and the screen says so rather than hiding.
@@ -15077,6 +15817,10 @@ export default function App() {
         <ItemLocator toast={toast} />
       ) : k === 'stock_audit' ? (
         <StockAuditView toast={toast} />
+      ) : k === 'physical_audit' ? (
+        // `role` because Apply — the only act here that moves stock — is admin,
+        // and the button says so rather than failing on a press.
+        <PhysicalAuditView toast={toast} role={role} />
       ) : k === 'pricing' ? (
         <PriceChanger toast={toast} role={role} />
       ) : k === 'labelprint' ? (
