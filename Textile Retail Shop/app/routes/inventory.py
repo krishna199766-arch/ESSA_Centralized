@@ -201,8 +201,14 @@ def edit_product(pid):
         p.category_id = int(request.form["category_id"]) if request.form.get("category_id") else None
         p.hsn_code = request.form.get("hsn_code", "5208")
         p.unit = request.form.get("unit", "pcs")
-        p.cost_price = float(request.form.get("cost_price") or 0)
-        p.selling_price = float(request.form["selling_price"])
+        # A warehouse item's prices belong to the warehouse and are copied down
+        # on every sync. Ignored here rather than saved-and-reverted: a form that
+        # appears to accept a change and quietly loses it is worse than one that
+        # does not offer it. The shop's own products are untouched by any sync,
+        # so those still save.
+        if not p.warehouse_id:
+            p.cost_price = float(request.form.get("cost_price") or 0)
+            p.selling_price = float(request.form["selling_price"])
         p.gst_rate = float(request.form.get("gst_rate") or 5)
         p.stock_qty = float(request.form.get("stock_qty") or 0)
         p.reorder_level = float(request.form.get("reorder_level") or 5)

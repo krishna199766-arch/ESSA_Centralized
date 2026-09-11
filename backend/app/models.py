@@ -2132,3 +2132,96 @@ class PosTerminal(LocationProfile, Base):
     # till name at two different stores is ordinary ("Counter 1" everywhere).
     __table_args__ = (UniqueConstraint("store_id", "name",
                                        name="uq_terminal_store_name"),)
+
+
+# ---------------------------------------------------------------------------
+#  Price revisions
+#  -------------------------------------------------------------------------
+#  Changing what something sells for, one item or ten thousand.
+#
+#  A PRICE CHANGE IS AN EVENT, NOT AN EDIT. The same rule this app already
+#  applies to stock — a movement, never a silently rewritten figure — because a
+#  price carries exactly the same weight: it is what a customer was charged, it
+#  is printed on labels, and "why is this 400 when it was 500 last week" has to
+#  be answerable by looking rather than by remembering. So every change writes
+#  down what it was, what it became, who did it and why, grouped into the batch
+#  it was applied in.
+#
+#  COST IS NOT A PRICE AND IS NOT CHANGED HERE. `avg_cost` is what the goods
+#  actually cost, derived by weighted average from the GRNs that brought them in
+#  (services/inventory). Letting somebody type over it would make the one figure
+#  that is arithmetic into a figure that is an opinion, and every margin and
+#  valuation in the app reads it.
+
+#: The three fields a revision may move. Deliberately a closed list: it is what
+#: the screens offer, what the service will write, and what the history means.
+PRICE_FIELDS = ("mrp", "sale_price", "sale_discount_pct")
+
+#: How a new value is worked out from the old one.
+#:   set            — the same figure for every item
+#:   percent        — up or down by a percentage of what it is now
+#:   amount         — up or down by a fixed number of rupees
+#:   discount_off_mrp — sale price becomes MRP less a percentage
+PRICE_OPERATIONS = ("set", "percent", "amount", "discount_off_mrp")
+
+
+class PriceRevision(Base):
+    """One price change, applied to one product or to ten thousand at once.
+
+    The batch is the unit because a bulk change is one decision — "20% off all
+    ladies chudithars for the festival" — and the questions worth asking of it
+    are asked of the whole: what did we change, when, why, and put it back.
+    Recording ten thousand unrelated edits would answer none of those.
+    """
+    __tablename__ = "price_revisions"
+    id = Column(Integer, primary_key=True)
+    number = Column(String, unique=True, index=True)      # PRC-00001
+    #: mrp | sale_price | sale_discount_pct
+    field = Column(String, index=True)
+    #: set | percent | amount | discount_off_mrp
+    operation = Column(String)
+    value = Column(Float)
+    #: Round the result to the nearest this many rupees — 0 or null for none.
+    #: Retail prices are 499 and 1,290, not 487.63, and a percentage change
+    #: without rounding produces the second.
+    round_to = Column(Float)
+    #: What was picked, in words, exactly as the screen described it. Kept as
+    #: text rather than as the filter itself: a saved query would return a
+    #: different set of products when read back next year, and the one thing this
+    #: row has to say is what was done AT THE TIME.
+    scope = Column(String)
+    note = Column(String)
+
+    product_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=now, index=True)
+    created_by = Column(String)
+    #: Set when the batch was put back. A reverted revision keeps every line —
+    #: what was done and undone is more of a record than what was never done.
+    reverted_at = Column(DateTime)
+    reverted_by = Column(String)
+
+    changes = relationship("PriceChange", back_populates="revision",
+                           cascade="all, delete-orphan",
+                           order_by="PriceChange.id")
+
+
+class PriceChange(Base):
+    """One product's before and after, inside a revision.
+
+    `sku` and `description` are copied because this is a receipt: a product
+    renamed or deleted later must not rewrite what was repriced. `old_value` is
+    what makes a revert possible at all, and is the reason this is a row rather
+    than a counter.
+    """
+    __tablename__ = "price_changes"
+    id = Column(Integer, primary_key=True)
+    revision_id = Column(Integer, ForeignKey("price_revisions.id"), index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), index=True)
+    sku = Column(String, index=True)
+    description = Column(String)
+    field = Column(String)
+    old_value = Column(Float)
+    new_value = Column(Float)
+
+    revision = relationship("PriceRevision", back_populates="changes")
+    product = relationship("Product")

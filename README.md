@@ -88,6 +88,20 @@ Invoice Entry, Inventory Entry and Stock Inward in the reference application.
   works at `http://localhost:8000` on the machine running the app but *not* over
   the LAN at `http://<computer-ip>:8000`; on that origin the button says so rather
   than failing silently. Typing works everywhere.
+- **Price Changer** — what things sell for. Pick products by category, brand,
+  supplier, colour, size or a search — or tick them one at a time — then set MRP,
+  the selling price or the discount off MRP: to a figure, by a percentage, by an
+  amount, or as MRP less a percentage, rounded to the nearest ₹10 so a markdown
+  comes out at 440 rather than 441.79. **The preview is the screen**: nothing is
+  written until you have seen every before and after, and any edit to the
+  selection throws the preview away rather than showing a comparison against
+  products you are no longer changing. Every change is one numbered revision
+  (`PRC-00001`) recording what, which, when, by whom and why — with the old value
+  on every line, so a whole batch can be **put back**. Reverting is refused if a
+  later revision has touched the same prices, because that would silently discard
+  somebody's newer decision. Selling above MRP or below cost is warned about and
+  named, never silently allowed; **cost itself is not editable** — it is the
+  weighted average from the GRNs, and every margin in the app reads it.
 - **Suppliers** — suppliers and their learned formats.
 - **Masters** — product categories, agents, transporters, and the dropdown lists
   the LR Entry form uses (purchase managers; plus the fixed LR mode, transfer

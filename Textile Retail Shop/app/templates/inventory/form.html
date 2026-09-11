@@ -159,8 +159,25 @@
         {% for r in [0,5,12,18,28] %}<option value="{{ r }}" {% if product and product.gst_rate==r %}selected{% endif %}>{{ r }}%</option>{% endfor %}
       </select>
     </div>
-    <div class="col-md-3"><label class="form-label">Cost price</label><input class="form-control" name="cost_price" type="number" step="0.01" value="{{ product.cost_price if product else 0 }}"></div>
-    <div class="col-md-3"><label class="form-label">Selling price *</label><input class="form-control" name="selling_price" type="number" step="0.01" required value="{{ product.selling_price if product else '' }}"></div>
+    {# Prices on a WAREHOUSE item are the warehouse's, and are copied down on
+       every sync (app/warehouse_items._apply). Editing them here looked like it
+       worked and was silently undone the next time the warehouse was read — so
+       the boxes are shown filled and read-only, with the one place a change
+       actually sticks. A product the shop created itself is nobody else's and
+       stays fully editable. #}
+    {% set owned = product and product.warehouse_id %}
+    <div class="col-md-3"><label class="form-label">Cost price</label>
+      <input class="form-control" name="cost_price" type="number" step="0.01"
+             value="{{ product.cost_price if product else 0 }}"
+             {% if owned %}readonly{% endif %}></div>
+    <div class="col-md-3"><label class="form-label">Selling price *</label>
+      <input class="form-control" name="selling_price" type="number" step="0.01"
+             required value="{{ product.selling_price if product else '' }}"
+             {% if owned %}readonly{% endif %}>
+      {% if owned %}
+      <div class="form-text">Set in the warehouse — <b>Price Changer</b>. A change
+        made here would be undone by the next sync.</div>
+      {% endif %}</div>
     <div class="col-md-3"><label class="form-label">Stock qty</label><input class="form-control" name="stock_qty" type="number" step="0.01" value="{{ product.stock_qty if product else 0 }}"></div>
     <div class="col-md-3"><label class="form-label">Reorder level</label><input class="form-control" name="reorder_level" type="number" step="0.01" value="{{ product.reorder_level if product else 5 }}"></div>
     <div class="col-12"><label class="form-label">Description</label><textarea class="form-control" name="description" rows="2">{{ product.description if product else pf.get('description', '') }}</textarea></div>

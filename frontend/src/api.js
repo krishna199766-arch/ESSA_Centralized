@@ -584,6 +584,27 @@ export const api = {
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
   deleteStore: (id) => fetch(`/api/locations/stores/${id}`, { method: 'DELETE' })
     .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('st'), { detail: j.detail }); return j }),
+  // Price changer — what things sell for, one item or in bulk.
+  pricingOptions: () => fetch('/api/pricing/options')
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingProducts: (params) => fetch('/api/pricing/products?' + new URLSearchParams(
+      Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== '' && v != null))))
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingPreview: (body) => fetch('/api/pricing/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingApply: (body) => fetch('/api/pricing/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingRevisions: () => fetch('/api/pricing/revisions')
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingRevision: (id) => fetch(`/api/pricing/revisions/${id}`)
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingRevert: (id) => fetch(`/api/pricing/revisions/${id}/revert`, { method: 'POST' })
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+  pricingHistory: (pid) => fetch(`/api/pricing/products/${pid}/history`)
+    .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error('pr'), { detail: j.detail }); return j }),
+
   // Floors — the storey a till stands on, and the bill prefix its sales carry.
   createFloor: (body) => fetch('/api/locations/floors', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })

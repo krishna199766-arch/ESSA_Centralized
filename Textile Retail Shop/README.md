@@ -87,6 +87,19 @@ mount does and then asks for every screen, so it cannot ship again. Every
 `from app…` in this codebase belongs at module level; see `app/places.py` and
 `backend/app/pos_mount.py` for the long version.
 
+## Where prices come from
+
+The shop does **not** own its prices. `selling_price` and `cost_price` are copied
+down from the warehouse on every sync (`app/warehouse_items._apply`), so a price
+typed in here would be silently undone the next time the warehouse database
+changed — which is on almost every request. The Inventory form therefore shows
+those two boxes filled and read-only on any item that came from the warehouse,
+with a pointer to where a change actually sticks: the warehouse's **Price
+Changer**, which records every change and can put a whole batch back.
+
+A product the shop created itself has no warehouse behind it, no sync touches it,
+and its prices stay fully editable here.
+
 ## Physical stock audit
 
 Count a floor against the books:

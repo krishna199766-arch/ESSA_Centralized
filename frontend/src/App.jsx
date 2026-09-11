@@ -6504,6 +6504,384 @@ function PurchaseOrdersView({ toast }) {
 }
 
 // ==========================================================================
+//  Price Changer — what things sell for, one item or ten thousand
+//  ------------------------------------------------------------------------
+//  Three panels, in the order the job is actually done: pick the products, say
+//  what to do to them, then LOOK AT IT before it happens.
+//
+//  The preview is the whole screen, not a nicety. A bulk price change is the
+//  fastest way in this application to do serious damage: one wrong filter and
+//  ten thousand garments are repriced, and the only thing between that and a
+//  shop selling below cost is somebody being shown the before and after while
+//  they can still say no. So Apply is not reachable until a preview has been
+//  run, any edit to the selection throws the preview away, and the button says
+//  how many prices it is about to move.
+//
+//  Cost is shown and never editable. It is what the goods cost, worked out by
+//  weighted average from the GRNs that brought them in — see services/pricing.
+// ==========================================================================
+const PRICE_LABEL = { sale_price: 'Selling price', mrp: 'MRP',
+                      sale_discount_pct: 'Discount off MRP (%)' }
+const OP_LABEL = { set: 'Set to', percent: 'Change by %', amount: 'Change by INR',
+                   discount_off_mrp: 'Set to MRP less %' }
+const PRICE_FILTERS = [
+  ['category_section', 'Section'], ['category', 'Category'], ['brand', 'Brand'],
+  ['color', 'Colour'], ['size', 'Size'], ['material', 'Material'],
+]
+
+function PriceChanger({ toast, role }) {
+  const [opts, setOpts] = useState(null)
+  const [filters, setFilters] = useState({})
+  const [text, setText] = useState('')
+  const [picked, setPicked] = useState(() => new Set())
+  const [list, setList] = useState(null)
+  const [field, setField] = useState('sale_price')
+  const [op, setOp] = useState('percent')
+  const [value, setValue] = useState('')
+  const [roundTo, setRoundTo] = useState('')
+  const [note, setNote] = useState('')
+  const [prev, setPrev] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [revisions, setRevisions] = useState([])
+  const [open, setOpen] = useState(null)
+
+  const mayChange = role === 'admin' || role === 'superadmin'
+
+  const loadRevisions = useCallback(() =>
+    api.pricingRevisions().then((r) => setRevisions(r.revisions || [])).catch(() => {}), [])
+  useEffect(() => {
+    api.pricingOptions().then(setOpts)
+      .catch((e) => toast(e.detail || 'Could not read the price options', 'err'))
+    loadRevisions()
+  }, [loadRevisions, toast])
+
+  // Any edit to the selection throws the preview away. Showing a before/after
+  // that was computed against a different set of products is the one thing this
+  // screen must never do.
+  const reselect = (fn) => { setPrev(null); fn() }
+
+  const search = async () => {
+    setBusy(true)
+    try {
+      const r = await api.pricingProducts({ ...filters, q: text, limit: 300 })
+      setList(r); setPicked(new Set()); setPrev(null)
+    } catch (e) { toast(e.detail || 'Search failed', 'err') }
+    finally { setBusy(false) }
+  }
+
+  const body = () => ({
+    field, operation: op, value: Number(value),
+    round_to: roundTo === '' ? null : Number(roundTo),
+    filters, text,
+    product_ids: picked.size ? [...picked] : null,
+    note: note || null,
+  })
+
+  const runPreview = async () => {
+    if (value === '') { toast('Say what the new price should be', 'warn'); return }
+    setBusy(true)
+    try { setPrev(await api.pricingPreview(body())) }
+    catch (e) { toast(e.detail || 'Could not work that out', 'err'); setPrev(null) }
+    finally { setBusy(false) }
+  }
+
+  const runApply = async () => {
+    if (!prev || !prev.changed) return
+    const aimed = Object.values(filters).filter(Boolean).length || text
+    const what = picked.size ? picked.size + ' item(s) picked by hand'
+      : (aimed ? 'the current selection' : 'EVERY product')
+    const ok = window.confirm(
+      'Change ' + PRICE_LABEL[field] + ' on ' + prev.changed + ' product(s) — ' + what + '?'
+      + '\n\nThis is recorded and can be put back, but the new prices take effect at once.')
+    if (!ok) return
+    setBusy(true)
+    try {
+      const rev = await api.pricingApply(body())
+      toast(rev.number + ' — ' + rev.product_count + ' price(s) changed', 'ok')
+      setPrev(null); setValue(''); setNote('')
+      await search(); await loadRevisions()
+    } catch (e) { toast(e.detail || 'Could not apply that', 'err') }
+    finally { setBusy(false) }
+  }
+
+  const revert = async (rev) => {
+    if (!window.confirm('Put ' + rev.number + ' back? Every price it changed returns to what it was.')) return
+    try {
+      await api.pricingRevert(rev.id)
+      toast(rev.number + ' put back', 'ok')
+      loadRevisions(); setOpen(null)
+      if (list) search()
+    } catch (e) { toast(e.detail || 'Could not put it back', 'err') }
+  }
+
+  const money = (v) => (v == null || v === '' ? '—' : 'INR ' + Number(v).toFixed(2))
+  const pick = (id) => reselect(() => setPicked((s) => {
+    const n = new Set(s)
+    if (n.has(id)) n.delete(id); else n.add(id)
+    return n
+  }))
+
+  return (
+    <div className="screen">
+      <div className="pagehead">
+        <h2>Price Changer</h2>
+        <span className="small pagesub">
+          What things sell for. Every change is recorded and can be put back.</span>
+        <div style={{ flex: 1 }} />
+        <button className="btn" onClick={loadRevisions}>↻ History</button>
+      </div>
+
+      <div className="screenbody">
+        {!mayChange && (
+          <div className="warnbox" style={{ marginBottom: 14 }}>
+            <h4>You can look, but not change</h4>
+            <div className="small" style={{ color: 'var(--text-2)' }}>
+              Changing a price is an admin's decision — it is money, and one bulk
+              change moves thousands of them at once.
+            </div>
+          </div>
+        )}
+
+        <Section id="price-pick" title="1 · Which products">
+          <div className="mgrid">
+            {PRICE_FILTERS.map(([key, label]) => (
+              <div className="field" key={key}>
+                <label>{label}</label>
+                <select value={filters[key] || ''}
+                  onChange={(e) => reselect(() => setFilters((f) => ({ ...f, [key]: e.target.value })))}>
+                  <option value="">any</option>
+                  {(opts?.[key] || []).map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+            ))}
+            <div className="field">
+              <label>Supplier</label>
+              <select value={filters.supplier_id || ''}
+                onChange={(e) => reselect(() => setFilters((f) => ({ ...f, supplier_id: e.target.value })))}>
+                <option value="">any</option>
+                {(opts?.suppliers || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+            <div className="field wide">
+              <label>Search</label>
+              <input value={text} placeholder="description, SKU, barcode, design no"
+                onChange={(e) => reselect(() => setText(e.target.value))}
+                onKeyDown={(e) => { if (e.key === 'Enter') search() }} />
+            </div>
+          </div>
+          <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button className="btn primary" disabled={busy} onClick={search}>Find products</button>
+            <button className="btn" onClick={() => reselect(() => {
+              setFilters({}); setText(''); setPicked(new Set()); setList(null)
+            })}>Clear</button>
+            {list && (
+              <span className="small" style={{ color: 'var(--text-2)' }}>
+                {list.total} matching
+                {list.shown < list.total ? ' · showing the first ' + list.shown : ''}
+                {picked.size ? ' · ' + picked.size + ' picked by hand' : ''}
+              </span>
+            )}
+          </div>
+
+          {list && (
+            <div className="tablewrap" style={{ marginTop: 10, maxHeight: '38vh' }}>
+              <table className="grid">
+                <thead><tr>
+                  <th style={{ width: 34 }}></th><th>Item</th><th>Attributes</th>
+                  <th className="num">Stock</th><th className="num">Cost</th>
+                  <th className="num">MRP</th><th className="num">Sells at</th>
+                  <th className="num">Disc %</th>
+                </tr></thead>
+                <tbody>
+                  {list.products.map((p) => (
+                    <tr key={p.id}>
+                      <td><input type="checkbox" checked={picked.has(p.id)}
+                        onChange={() => pick(p.id)} /></td>
+                      <td>{p.description}<br /><span className="small mono">{p.sku}</span></td>
+                      <td className="small">{[p.category, p.brand, p.size, p.color, p.material]
+                        .filter(Boolean).join(' · ')}</td>
+                      <td className="num">{p.stock_qty}</td>
+                      <td className="num">{money(p.avg_cost)}</td>
+                      <td className="num">{money(p.mrp)}</td>
+                      <td className="num">{money(p.sale_price)}</td>
+                      <td className="num">{p.sale_discount_pct == null ? '—' : p.sale_discount_pct}</td>
+                    </tr>
+                  ))}
+                  {!list.products.length && (
+                    <tr><td colSpan={8} className="empty">Nothing matches.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="hint" style={{ marginTop: 6 }}>
+            Tick rows to change only those. Tick nothing and the change lands on
+            every product the filters above match — which is what a bulk change is.
+          </div>
+        </Section>
+
+        <Section id="price-what" title="2 · What to change">
+          <div className="mgrid">
+            <div className="field">
+              <label>Price</label>
+              <select value={field} onChange={(e) => { setField(e.target.value); setPrev(null) }}>
+                {(opts?.fields || []).map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>How</label>
+              <select value={op} onChange={(e) => { setOp(e.target.value); setPrev(null) }}>
+                {(opts?.operations || []).map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>{op === 'percent' || op === 'discount_off_mrp' ? 'Percent' : 'Amount'}</label>
+              <input type="number" step="0.01" value={value}
+                onChange={(e) => { setValue(e.target.value); setPrev(null) }}
+                placeholder={op === 'percent' ? '-20 for 20% off' : ''} />
+            </div>
+            <div className="field">
+              <label>Round to nearest</label>
+              <input type="number" step="1" value={roundTo}
+                onChange={(e) => { setRoundTo(e.target.value); setPrev(null) }}
+                placeholder="blank = exact" />
+              <div className="hint">Retail prices are 499, not 487.63.</div>
+            </div>
+            <div className="field wide">
+              <label>Why</label>
+              <input value={note} onChange={(e) => setNote(e.target.value)}
+                placeholder="Festival markdown, cost increase, clearance…" />
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <button className="btn primary" disabled={busy || value === ''}
+              onClick={runPreview}>See what this would do</button>
+          </div>
+        </Section>
+
+        {prev && (
+          <Section id="price-preview"
+            title={'3 · ' + prev.changed + ' price(s) would change'}>
+            {(prev.warnings || []).map((w, i) => (
+              <div className="warnbox" key={i} style={{ marginBottom: 10 }}>
+                <div className="small">{w}</div>
+              </div>
+            ))}
+            <div className="small" style={{ color: 'var(--text-2)', marginBottom: 8 }}>
+              {prev.total} product(s) in the selection · {prev.changed} would move ·
+              {' '}{prev.unchanged} already at that price, or with nothing to work from.
+            </div>
+            <div className="tablewrap" style={{ maxHeight: '40vh' }}>
+              <table className="grid">
+                <thead><tr>
+                  <th>Item</th><th className="num">Cost</th><th className="num">MRP</th>
+                  <th className="num">Now</th><th className="num">Becomes</th>
+                  <th className="num">Change</th>
+                </tr></thead>
+                <tbody>
+                  {prev.rows.map((r) => {
+                    const delta = (r.new == null ? 0 : r.new) - (r.old == null ? 0 : r.old)
+                    return (
+                      <tr key={r.product_id}>
+                        <td>{r.description}<br /><span className="small mono">{r.sku}</span></td>
+                        <td className="num">{money(r.avg_cost)}</td>
+                        <td className="num">{money(r.mrp)}</td>
+                        <td className="num">{r.old == null ? '—' : Number(r.old).toFixed(2)}</td>
+                        <td className="num"><b>{Number(r.new).toFixed(2)}</b></td>
+                        <td className="num" style={{ color: delta < 0 ? 'var(--danger)' : 'var(--ok)' }}>
+                          {delta > 0 ? '+' : ''}{delta.toFixed(2)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button className="btn primary" disabled={busy || !mayChange || !prev.changed}
+                onClick={runApply}>Apply to {prev.changed} product(s)</button>
+              <button className="btn" onClick={() => setPrev(null)}>Cancel</button>
+              <span className="small" style={{ color: 'var(--text-2)' }}>
+                Nothing has changed yet.</span>
+            </div>
+          </Section>
+        )}
+
+        <Section id="price-history" title="Price changes made">
+          <div className="tablewrap">
+            <table className="grid">
+              <thead><tr>
+                <th>Ref</th><th>What</th><th>Which</th><th className="num">Items</th>
+                <th>When</th><th>By</th><th>Why</th><th></th>
+              </tr></thead>
+              <tbody>
+                {revisions.map((r) => (
+                  <tr key={r.id}>
+                    <td><a href="#" onClick={(e) => {
+                      e.preventDefault()
+                      api.pricingRevision(r.id).then(setOpen).catch(() => {})
+                    }}><span className="mono">{r.number}</span></a></td>
+                    <td className="small">
+                      {PRICE_LABEL[r.field] || r.field} · {OP_LABEL[r.operation] || r.operation} {r.value}
+                      {r.round_to ? ' · round ' + r.round_to : ''}</td>
+                    <td className="small">{r.scope}</td>
+                    <td className="num">{r.product_count}</td>
+                    <td className="small">{fmtDate(r.created_at)}</td>
+                    <td className="small">{r.created_by || '—'}</td>
+                    <td className="small">{r.note || '—'}</td>
+                    <td>{r.reverted_at
+                      ? <span className="badge cancelled">put back</span>
+                      : (mayChange ? <button className="btn" onClick={() => revert(r)}>Put back</button> : null)}</td>
+                  </tr>
+                ))}
+                {!revisions.length && (
+                  <tr><td colSpan={8} className="empty">No price changes yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+
+        {open && (
+          <div className="modal-back" onClick={() => setOpen(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-head">
+                <b>{open.number}</b>
+                <span className="badge">{open.product_count} item(s)</span>
+                <button className="modal-x" onClick={() => setOpen(null)}>×</button>
+              </div>
+              <div className="modal-body">
+                <div className="small" style={{ color: 'var(--text-2)', marginBottom: 8 }}>
+                  {PRICE_LABEL[open.field] || open.field} ·
+                  {' '}{OP_LABEL[open.operation] || open.operation} {open.value} ·
+                  {' '}{open.scope}{open.note ? ' · ' + open.note : ''}
+                </div>
+                <div className="tablewrap" style={{ maxHeight: '50vh' }}>
+                  <table className="grid">
+                    <thead><tr><th>Item</th><th className="num">Was</th><th className="num">Became</th></tr></thead>
+                    <tbody>
+                      {(open.changes || []).map((c, i) => (
+                        <tr key={i}>
+                          <td>{c.description}<br /><span className="small mono">{c.sku}</span></td>
+                          <td className="num">{c.old == null ? '—' : Number(c.old).toFixed(2)}</td>
+                          <td className="num">{Number(c.new).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {open.shown < open.product_count && (
+                  <div className="hint">Showing {open.shown} of {open.product_count}.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ==========================================================================
 //  Stock Audit — the desk half of a count
 //  ------------------------------------------------------------------------
 //  The counting happens on a phone at the rack (backend/app/mobile), and this
@@ -6583,11 +6961,11 @@ function StockAuditView({ toast }) {
   return (
     <div className="screen">
       <div className="pagehead">
-        <h2>Stock Audit</h2>
+        <h2>Warehouse Stock Audit</h2>
         {/* Short enough to survive `.pagesub`, which clips rather than wraps —
             a sentence that ends in an ellipsis says less than a shorter one. */}
         <span className="small pagesub">
-          The shelf against the books. Counting never changes stock.</span>
+          Is it on the shelf? Counting never changes stock.</span>
         <div style={{ flex: 1 }} />
         {session
           ? <button className="btn" onClick={finish}>Close {session.code}</button>
@@ -13021,7 +13399,18 @@ const MODULES = [
   // "what is this one thing"; the audit asks "is everything where we think it
   // is" — one item against its whole history, or the whole shelf against the
   // books. The counting itself is done on the phone at the rack.
-  { key: 'stock_audit', icon: '📋', label: 'Stock Audit', blurb: 'Count the shelf against the books — the running report and past counts' },
+  // Named for the building it counts, because there are now two audits and they
+  // answer different questions. THIS one walks a warehouse rack with a scanner
+  // and asks "is this where we think it is" — a presence check, one row per tag.
+  // The STORE's (POS → Physical Stock Audit) counts a shop floor by quantity:
+  // how many are there against how many the books say, with the shortage or
+  // excess and an approval before anything moves. One word for both would send
+  // people to the wrong screen.
+  { key: 'stock_audit', icon: '📋', label: 'Warehouse Stock Audit', blurb: 'Scan a rack — is each item where the books say? (a store floor is counted under POS)' },
+  // Beside the audit because both are about the product master rather than the
+  // stock in it: one asks whether the count is right, this asks what the thing
+  // sells for. Admin-only to change, and the screen says so rather than hiding.
+  { key: 'pricing', icon: '🏷', label: 'Price Changer', blurb: 'Change what things sell for — one item or a whole category, with a record you can put back' },
   { key: 'deadstock', icon: '🧊', label: 'Dead Stock & Clearance', blurb: 'Stock nobody is buying, the discount ladder, and whether the clearance worked', min: 'admin' },
   // Design and printing are two entries because they are two jobs, and they are
   // also two roles: the designer is opened when a new roll of label stock is
@@ -13075,6 +13464,12 @@ const POS_HOME = { key: 'pos:home', icon: '🏠', label: 'Store Dashboard', path
 // frame, so choosing a screen here and then moving around in there does not feel
 // like two different products. A sale goes left to right: build it on the floor
 // or at the counter, look it up afterwards, take it back, alter it.
+//  KEEP THIS IN STEP WITH THE SHOP'S OWN app/modules.py. A screen added there
+//  and not here exists, works, and is reachable from inside the frame — and is
+//  invisible to anybody who navigates from out here, which is nearly everybody.
+//  Four of them had drifted out of this list that way, the Physical Stock Audit
+//  among them; `pos_screens_test.py` in backend/tools now fails when the two
+//  disagree, so the next one cannot go missing quietly.
 const POS_SCREENS = [
   { key: 'pos:floor', icon: '📱', label: 'Floor Sales', path: '/floor/',
     blurb: 'Build a sale on the phone while walking the floor' },
@@ -13084,6 +13479,10 @@ const POS_SCREENS = [
     blurb: 'Scan the bill, scan each garment, hand the goods over' },
   { key: 'pos:inventory', icon: '📦', label: 'Store Stock', path: '/inventory/',
     blurb: 'What is on the store floor, with the warehouse QR on every item' },
+  { key: 'pos:audits', icon: '📋', label: 'Physical Stock Audit', path: '/audits/',
+    blurb: 'Count a store floor item by item and see where the books disagree' },
+  { key: 'pos:checker', icon: '🔍', label: 'Stock Check', path: '/stock-check/',
+    blurb: 'Scan or filter to find an item and where it is' },
   { key: 'pos:customers', icon: '🧍', label: 'Customers', path: '/customers/',
     blurb: 'Customer master, loyalty points and history' },
   { key: 'pos:invoices', icon: '🧾', label: 'Invoices', path: '/pos/invoices',
@@ -13092,6 +13491,10 @@ const POS_SCREENS = [
     blurb: 'Take goods back against a bill and raise a credit note' },
   { key: 'pos:alterations', icon: '✂️', label: 'Alteration', path: '/alterations/',
     blurb: 'Garments out for tailoring, and what each tailor is holding' },
+  { key: 'pos:stores', icon: '🏬', label: 'Floors & Tills', path: '/stores/',
+    blurb: 'Which storey each till bills from, and what its bills are called' },
+  { key: 'pos:promotions', icon: '🎁', label: 'Promotions', path: '/promotions/',
+    blurb: 'Offers the till applies by itself, and what they have given away' },
   { key: 'pos:staff', icon: '👥', label: 'Staff', path: '/staff/',
     blurb: 'Attendance, roles and sales commission' },
   { key: 'pos:reports', icon: '📈', label: 'Store Reports', path: '/reports/',
@@ -14674,6 +15077,8 @@ export default function App() {
         <ItemLocator toast={toast} />
       ) : k === 'stock_audit' ? (
         <StockAuditView toast={toast} />
+      ) : k === 'pricing' ? (
+        <PriceChanger toast={toast} role={role} />
       ) : k === 'labelprint' ? (
         <LabelPrinting toast={toast} />
       ) : k === 'outward' ? (

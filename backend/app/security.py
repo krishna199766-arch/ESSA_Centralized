@@ -116,6 +116,11 @@ POLICY = [
     # module was written for. Its own prefix, so it is not governed by the
     # inventory screen's grants even though it reads through them.
     (r"^/api/stock-audit", "user", "user", "stock_audit"),
+    # What things sell for. READ by the floor — a price is on every screen that
+    # quotes one — and CHANGED only by admin, because it is money and a bulk
+    # change moves thousands of them at once. Not warehouse-scoped: a product is
+    # company-wide and carries one price, however many buildings hold it.
+    (r"^/api/pricing", "user", "admin", "pricing"),
     # The locator reads the whole account of one item and writes nothing. It is
     # its own screen and sits above /api/inventory, which it lives inside.
     (r"^/api/inventory/locate", "user", "user", "locator"),

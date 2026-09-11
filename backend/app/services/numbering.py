@@ -63,6 +63,8 @@ DOCS = {
                     "use_year": False},
     "pos_invoice": {"label": "POS Invoice",      "prefix": "POS-",  "padding": 5,
                     "use_year": False},
+    "price_revision": {"label": "Price Revision", "prefix": "PRC-", "padding": 5,
+                       "use_year": False},
 }
 
 #: How many candidates to try before giving up and trusting the counter. A
